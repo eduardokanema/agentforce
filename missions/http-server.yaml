@@ -1,0 +1,105 @@
+mission:
+  name: "Build CLI HTTP Server"
+  goal: "Build a production-ready HTTP API server in Python with FastAPI, including health check, metrics, and proper error handling"
+  definition_of_done:
+    - "POST /health returns 200 with {status: ok}"
+    - "GET /metrics returns 200 with request count"
+    - "Global exception handler returns 500 with {error: message}"
+    - "All tests pass with pytest"
+    - "Test coverage >= 80%"
+    - "requirements.txt with pinned versions"
+    - "No TODO/FIXME/HACK comments in source"
+  caps:
+    max_concurrent_workers: 2
+    max_retries_per_task: 3
+    max_retries_global: 6
+    max_wall_time_minutes: 45
+    max_human_interventions: 2
+  working_dir: "/tmp/missions/http-server"
+
+tasks:
+  - id: "01"
+    title: "Project scaffolding with FastAPI"
+    description: "Create the project structure: main.py, tests/test_health.py, requirements.txt (fastapi>=0.100, uvicorn, pytest, httpx, pytest-cov). The main.py should initialize FastAPI app with a GET /health endpoint returning {status: ok, version: 0.1.0}."
+    acceptance_criteria:
+      - "main.py exists with FastAPI app and /health endpoint"
+      - "requirements.txt has fastapi, uvicorn, pytest, httpx"
+      - "uvicorn main:app --port 8000 starts without errors"
+    tdd:
+      test_file: "tests/test_health.py"
+      test_command: "pytest tests/test_health.py -v"
+      tests_must_pass: true
+      coverage_threshold: 50
+    output_artifacts:
+      - "main.py"
+      - "tests/test_health.py"
+      - "requirements.txt"
+
+  - id: "02"
+    title: "Request metrics middleware"
+    description: "Add middleware that counts total requests and tracks response times. Add GET /metrics endpoint returning {total_requests: N, average_response_time_ms: X}. Use a simple in-memory counter (no Redis needed)."
+    acceptance_criteria:
+      - "Middleware counts all incoming requests"
+      - "GET /metrics returns total_requests and average_response_time_ms"
+      - "Metrics are accurate after multiple requests"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_metrics.py"
+      test_command: "pytest tests/test_metrics.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "main.py (updated)"
+      - "tests/test_metrics.py"
+
+  - id: "03"
+    title: "Global error handling"
+    description: "Add a global exception handler that catches all unhandled exceptions and returns HTTP 500 with JSON {error: error_message, status: failed}. Include a test endpoint POST /error that deliberately raises an exception for testing."
+    acceptance_criteria:
+      - "Unhandled exceptions return 500 with JSON error response"
+      - "POST /error endpoint triggers the handler for testing"
+      - "No stack traces exposed in responses"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_errors.py"
+      test_command: "pytest tests/test_errors.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "main.py (updated)"
+      - "tests/test_errors.py"
+
+  - id: "04"
+    title: "Full integration tests and coverage"
+    description: "Write comprehensive integration tests using pytest+httpx TestClient covering all endpoints. Run full test suite and ensure coverage >= 80%. Create a conftest.py with shared fixtures."
+    acceptance_criteria:
+      - "All endpoints have integration tests"
+      - "pytest tests/ -v passes all tests"
+      - "pytest-cov reports >= 80% coverage"
+      - "conftest.py with reusable test client fixture"
+    dependencies:
+      - "02"
+      - "03"
+    tdd:
+      test_file: "tests/test_integration.py"
+      test_command: "pytest tests/ -v --cov=. --cov-report=term-missing"
+      tests_must_pass: true
+      coverage_threshold: 80
+    output_artifacts:
+      - "tests/test_integration.py"
+      - "tests/conftest.py"
+
+  - id: "05"
+    title: "Docker support and README"
+    description: "Create Dockerfile (Python 3.12-slim, multi-stage if possible), .dockerignore, and a comprehensive README.md with installation, running, and API documentation (all endpoints with curl examples)."
+    acceptance_criteria:
+      - "Dockerfile builds successfully"
+      - "README.md has API docs for all 4 endpoints"
+      - "README.md has curl examples for each endpoint"
+      - "No hardcoded ports in Dockerfile (uses env var PORT)"
+    dependencies:
+      - "04"
+    output_artifacts:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "README.md"
