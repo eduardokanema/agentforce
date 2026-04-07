@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentforce"
+version = "2.0.0"
+description = "Multi-agent mission orchestrator with spec-driven development, TDD enforcement, external review, and retry loops"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+build = [
+    "build>=1.2",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+mission = "agentforce.cli.cli:main"
