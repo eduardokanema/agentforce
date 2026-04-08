@@ -463,23 +463,27 @@ class TestCodexConnector:
         assert "-m" in cmd
         assert "o4-mini" in cmd
 
-    def test_run_inserts_double_dash_before_dash_prefixed_prompt(self, tmp_path):
+    def test_run_feeds_prompt_via_stdin(self, tmp_path):
         mock_proc = MagicMock()
         mock_proc.stdout = []
         mock_proc.returncode = 0
         mock_proc.stderr.read.return_value = ""
+        mock_proc.stdin = MagicMock()
 
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
             cx_mod.run("-q review this task", str(tmp_path))
 
         cmd = mock_popen.call_args[0][0]
-        assert cmd[-2:] == ["--", "-q review this task"]
+        assert cmd[-1] == "-"
+        mock_proc.stdin.write.assert_called_once_with("-q review this task")
+        mock_proc.stdin.close.assert_called_once()
 
-    def test_run_resume_inserts_double_dash_before_dash_prefixed_prompt(self, tmp_path):
+    def test_run_resume_feeds_prompt_via_stdin(self, tmp_path):
         mock_proc = MagicMock()
         mock_proc.stdout = []
         mock_proc.returncode = 0
         mock_proc.stderr.read.return_value = ""
+        mock_proc.stdin = MagicMock()
 
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
             cx_mod.run("-q review this task", str(tmp_path), session_id="thread_123")
@@ -487,7 +491,21 @@ class TestCodexConnector:
         cmd = mock_popen.call_args[0][0]
         assert cmd[:2] == ["codex", "exec"]
         assert "resume" in cmd
-        assert cmd[-3:] == ["thread_123", "--", "-q review this task"]
+        assert cmd[-2:] == ["thread_123", "-"]
+        mock_proc.stdin.write.assert_called_once_with("-q review this task")
+        mock_proc.stdin.close.assert_called_once()
+
+    def test_run_opens_stdin_pipe(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+        mock_proc.stdin = MagicMock()
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("x", str(tmp_path))
+
+        assert mock_popen.call_args.kwargs["stdin"] is subprocess.PIPE
 
     def test_run_failure_on_nonzero_returncode(self, tmp_path):
         mock_proc = MagicMock()
