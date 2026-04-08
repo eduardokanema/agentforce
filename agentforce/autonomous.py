@@ -184,6 +184,7 @@ def run_autonomous(
     model: str = None,
     variant: str = None,
     pool_size: int = 8,
+    extend_caps: bool = False,
 ):
     """Run a mission autonomously with a parallel supervisor loop.
 
@@ -192,14 +193,18 @@ def run_autonomous(
     as they finish, and feeds them back to the engine — all without blocking.
 
     Args:
-        mission_id: The mission ID to run.
-        workdir:    Override the working directory from the mission spec.
-        agent:      ``"opencode"`` or ``"auto"`` (default).
-        model:      Model string passed to the agent CLI (default: opencode/nemotron-3-super-free).
-        variant:    Reasoning effort variant (default: high).
-        pool_size:  Max concurrent agent threads (default 8). Actual task
-                    parallelism is also governed by the mission's
-                    ``max_concurrent_workers`` cap.
+        mission_id:  The mission ID to run.
+        workdir:     Override the working directory from the mission spec.
+        agent:       ``"opencode"`` or ``"auto"`` (default).
+        model:       Model string passed to the agent CLI (default: opencode/nemotron-3-super-free).
+        variant:     Reasoning effort variant (default: high).
+        pool_size:   Max concurrent agent threads (default 8). Actual task
+                     parallelism is also governed by the mission's
+                     ``max_concurrent_workers`` cap.
+        extend_caps: Ignore cap limits for this run: disables wall-time and
+                     raises retry/intervention limits above current counters.
+                     The stored state is not modified. Use when resuming a
+                     mission blocked by wall_time, interventions, or retries.
     """
     _ensure_pkg()
     from agentforce.core.engine import MissionEngine
@@ -223,6 +228,15 @@ def run_autonomous(
     engine.state.worker_agent = resolved_agent
     engine.state.worker_model = eff_model
     engine.state.caps_hit = {}
+
+    if extend_caps:
+        # Raise all caps well above current counters so none trigger this run.
+        # The stored mission state (counters, started_at) is not modified.
+        c = engine.state.caps
+        c.max_wall_time_minutes = 0          # 0 = disabled in wall_time_exceeded()
+        c.max_retries_global = max(c.max_retries_global, engine.state.total_retries + 100)
+        c.max_human_interventions = max(c.max_human_interventions, engine.state.total_human_interventions + 100)
+        print("  ⟳ Caps ignored for this run (wall-time disabled, retry/intervention limits raised).")
 
     # On every resume: reset tasks that were interrupted or exhausted so they
     # can make progress again. IN_PROGRESS tasks belong to a dead process.
@@ -537,10 +551,19 @@ if __name__ == "__main__":
         help="Max concurrent agent threads (default: 8). Actual task parallelism is "
              "also governed by the mission's max_concurrent_workers cap.",
     )
+    p.add_argument(
+        "--extend-caps",
+        action="store_true",
+        default=False,
+        help="Ignore cap limits for this run: disables wall-time and raises "
+             "retry/intervention limits above current counters. Use when resuming "
+             "a mission blocked by wall_time, interventions, or retry limits.",
+    )
     a = p.parse_args()
 
     success = run_autonomous(
         a.mission_id, a.workdir,
         agent=a.agent, model=a.model, variant=a.variant, pool_size=a.pool_size,
+        extend_caps=a.extend_caps,
     )
     sys.exit(0 if success else 1)
