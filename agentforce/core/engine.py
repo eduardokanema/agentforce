@@ -265,7 +265,7 @@ class MissionEngine:
             goal=f"Complete task {task_id}: {task_spec.title}",
             context=prompt,
             model=self.worker_model,
-            timeout=min(600, self.state.caps.max_wall_time_minutes * 60),
+            timeout=min(600, self.state.caps.max_wall_time_minutes * 60) if self.state.caps.max_wall_time_minutes else 600,
         )
 
     def _dispatch_reviewer(self, task_id: str) -> Optional[ReviewerDelegation]:
