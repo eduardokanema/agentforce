@@ -10,6 +10,22 @@ from typing import Optional
 from .spec import MissionSpec, TaskStatus, Caps
 
 
+def _fmt_duration(started_at: str, ended_at: str | None) -> str:
+    """Render elapsed time as a compact human-readable string."""
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        end_ts = ended_at or datetime.now(timezone.utc).isoformat()
+        ended = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
+        secs = int((ended - started).total_seconds())
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m {secs % 60}s"
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
+    except Exception:
+        return "?"
+
+
 @dataclass
 class TaskState:
     """Runtime state for a single task."""
@@ -252,6 +268,32 @@ class MissionState:
             "working_dir": self.working_dir,
             "worker_agent": self.worker_agent,
             "worker_model": self.worker_model,
+        }
+
+    def to_summary_dict(self) -> dict:
+        done_tasks = sum(1 for ts in self.task_states.values() if ts.status == TaskStatus.REVIEW_APPROVED)
+        total_tasks = len(self.spec.tasks)
+        pct = int(done_tasks / total_tasks * 100) if total_tasks else 0
+        if self.is_done():
+            status = "complete"
+        elif self.is_failed():
+            status = "failed"
+        elif self.needs_human():
+            status = "needs_human"
+        else:
+            status = "active"
+
+        return {
+            "mission_id": self.mission_id,
+            "name": self.spec.name,
+            "status": status,
+            "done_tasks": done_tasks,
+            "total_tasks": total_tasks,
+            "pct": pct,
+            "duration": _fmt_duration(self.started_at, self.completed_at),
+            "worker_agent": self.worker_agent,
+            "worker_model": self.worker_model,
+            "started_at": self.started_at,
         }
 
     @classmethod
