@@ -8,17 +8,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agentforce import autonomous
-from agentforce.connectors import CONNECTORS, run_opencode, run_claude, run_openrouter
+from agentforce.connectors import CONNECTORS, run_opencode, run_claude, run_openrouter, run_codex
 from agentforce.connectors import opencode as oc_mod
 from agentforce.connectors import claude as cl_mod
 from agentforce.connectors import openrouter as or_mod
+from agentforce.connectors import codex as cx_mod
 
 
 # ── Connector registry ────────────────────────────────────────────────────────
 
 class TestConnectorRegistry:
-    def test_all_three_connectors_present(self):
-        assert set(CONNECTORS) == {"opencode", "claude", "openrouter"}
+    def test_all_connectors_present(self):
+        assert set(CONNECTORS) == {"opencode", "claude", "openrouter", "codex"}
 
     def test_connectors_are_callable(self):
         for name, fn in CONNECTORS.items():
@@ -28,6 +29,7 @@ class TestConnectorRegistry:
         assert CONNECTORS["opencode"] is run_opencode
         assert CONNECTORS["claude"] is run_claude
         assert CONNECTORS["openrouter"] is run_openrouter
+        assert CONNECTORS["codex"] is run_codex
 
 
 # ── opencode connector ────────────────────────────────────────────────────────
@@ -361,3 +363,126 @@ class TestSessionCaching:
         session_id = session_ids.get(tid) if role == "worker" else None
 
         assert session_id is None
+
+
+# ── codex connector ───────────────────────────────────────────────────────────
+
+class TestCodexConnector:
+    def test_available_true_when_codex_exists(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            assert cx_mod.available() is True
+
+    def test_available_false_when_not_found(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert cx_mod.available() is False
+
+    def test_available_false_on_timeout(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("codex", 10)):
+            assert cx_mod.available() is False
+
+    def test_run_returns_four_tuple_with_none_session(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = ["task complete\n"]
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            result = cx_mod.run("do something", str(tmp_path))
+
+        assert len(result) == 4
+        success, output, error, session_id = result
+        assert success is True
+        assert session_id is None
+
+    def test_run_passes_model_flag(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("x", str(tmp_path), model="o4-mini")
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--model" in cmd
+        assert "o4-mini" in cmd
+
+    def test_run_uses_quiet_flag(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("x", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert "-q" in cmd or "--quiet" in cmd
+
+    def test_run_uses_full_auto_approval(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("x", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--approval-mode" in cmd
+        assert "full-auto" in cmd
+
+    def test_run_failure_on_nonzero_returncode(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 1
+        mock_proc.stderr.read.return_value = "error occurred"
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            success, _, error, _ = cx_mod.run("x", str(tmp_path))
+
+        assert success is False
+
+    def test_run_streams_to_file(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = ["agent output line\n"]
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        log_file = tmp_path / "stream.log"
+        with patch("subprocess.Popen", return_value=mock_proc):
+            cx_mod.run("x", str(tmp_path), stream_path=log_file)
+
+        assert log_file.exists()
+        assert "agent output line" in log_file.read_text()
+
+    def test_run_timeout_returns_failure(self, tmp_path):
+        import threading
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = -9
+
+        def slow_stdout():
+            import time
+            time.sleep(10)
+            return iter([])
+
+        mock_proc.stdout = iter([])
+
+        killed = []
+
+        def fake_kill():
+            killed.append(True)
+
+        mock_proc.kill = fake_kill
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            with patch("threading.Timer") as mock_timer_cls:
+                mock_timer = MagicMock()
+                mock_timer_cls.return_value = mock_timer
+                cx_mod.run("x", str(tmp_path), timeout=1)
+
+        mock_timer_cls.assert_called_once()
+        mock_timer.start.assert_called_once()
+        mock_timer.cancel.assert_called_once()
