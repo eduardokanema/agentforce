@@ -408,18 +408,6 @@ class TestCodexConnector:
         assert "--model" in cmd
         assert "o4-mini" in cmd
 
-    def test_run_uses_quiet_flag(self, tmp_path):
-        mock_proc = MagicMock()
-        mock_proc.stdout = []
-        mock_proc.returncode = 0
-        mock_proc.stderr.read.return_value = ""
-
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            cx_mod.run("x", str(tmp_path))
-
-        cmd = mock_popen.call_args[0][0]
-        assert "-q" in cmd or "--quiet" in cmd
-
     def test_run_uses_full_auto_approval(self, tmp_path):
         mock_proc = MagicMock()
         mock_proc.stdout = []

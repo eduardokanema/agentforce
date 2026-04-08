@@ -31,7 +31,7 @@ def run(
     Returns:
         (success, output, error, None)  — session_id always None (codex has no session API)
     """
-    cmd = ["codex", "-q", "--approval-mode", "full-auto"]
+    cmd = ["codex", "--approval-mode", "full-auto"]
     if model:
         cmd += ["--model", model]
     cmd.append(prompt)
