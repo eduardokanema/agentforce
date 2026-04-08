@@ -592,25 +592,91 @@ class TestParseReviewerOutput:
         assert result["approved"] is True
         assert result["score"] == 9
 
+    def test_parses_multiline_json_at_end(self):
+        """Core fix: multi-line verdict JSON after prose should be found."""
+        output = (
+            "I reviewed the files and everything looks good.\n"
+            "{\n"
+            '  "approved": true,\n'
+            '  "score": 8,\n'
+            '  "feedback": "all criteria met"\n'
+            "}"
+        )
+        result = autonomous._parse_reviewer_output(output)
+        assert result["approved"] is True
+        assert result["score"] == 8
+
+    def test_last_json_wins_over_file_content(self):
+        """Regression: file content read during review must not swamp the verdict."""
+        package_json_dump = (
+            "I read the file:\n"
+            "{\n"
+            '  "name": "my-app",\n'
+            '  "version": "1.0.0",\n'
+            '  "dependencies": {"react": "^18"}\n'
+            "}\n"
+        )
+        verdict = (
+            "{\n"
+            '  "approved": true,\n'
+            '  "score": 9,\n'
+            '  "feedback": "scaffold complete"\n'
+            "}"
+        )
+        result = autonomous._parse_reviewer_output(package_json_dump + verdict)
+        assert result["approved"] is True
+        assert result["score"] == 9
+        assert result["feedback"] == "scaffold complete"
+
+    def test_tool_output_with_line_numbers_before_verdict(self):
+        """nl -ba output (line-numbered) should not prevent finding the verdict."""
+        nl_output = (
+            "  1\t{\n"
+            '  2\t  "name": "@agentforce/ui",\n'
+            "  3\t}\n"
+        )
+        verdict = (
+            "{\n"
+            '  "approved": false,\n'
+            '  "score": 4,\n'
+            '  "feedback": "missing tests"\n'
+            "}"
+        )
+        result = autonomous._parse_reviewer_output(nl_output + verdict)
+        assert result["approved"] is False
+        assert result["score"] == 4
+
     def test_parses_json_in_fenced_code_block(self):
         output = 'Some preamble\n```json\n{"approved": false, "score": 3, "feedback": "needs work"}\n```'
         result = autonomous._parse_reviewer_output(output)
         assert result["approved"] is False
         assert result["score"] == 3
 
-    def test_parses_json_via_regex_fallback(self):
-        output = 'Here is my review:\n{"approved": true, "score": 7, "feedback": "ok", "extra": 1}'
+    def test_last_fenced_block_wins(self):
+        """When multiple ```json blocks appear, the last one is the verdict."""
+        output = (
+            "```json\n"
+            '{"name": "package", "version": "1"}\n'
+            "```\n"
+            "Here is my actual verdict:\n"
+            "```json\n"
+            '{"approved": true, "score": 7, "feedback": "ok"}\n'
+            "```"
+        )
         result = autonomous._parse_reviewer_output(output)
         assert result["approved"] is True
+        assert result["score"] == 7
 
-    def test_returns_fallback_when_no_json_found(self):
-        output = "This is just plain text with no JSON at all."
-        result = autonomous._parse_reviewer_output(output)
-        assert result["approved"] is False
-        assert result["score"] == 0
-        assert "Could not parse" in result["feedback"]
+    def test_raises_on_no_json_found(self):
+        """No parseable JSON → ValueError (triggers critical error path)."""
+        with pytest.raises(ValueError, match="Could not parse reviewer output"):
+            autonomous._parse_reviewer_output("This is just plain text with no JSON at all.")
 
-    def test_skips_invalid_json_line_and_continues(self):
+    def test_raises_on_empty_output(self):
+        with pytest.raises(ValueError, match="Could not parse reviewer output"):
+            autonomous._parse_reviewer_output("")
+
+    def test_skips_invalid_json_and_finds_valid_later(self):
         output = "{invalid json}\n{\"approved\": true, \"score\": 5, \"feedback\": \"fine\"}"
         result = autonomous._parse_reviewer_output(output)
         assert result["approved"] is True
