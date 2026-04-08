@@ -1,4 +1,4 @@
-"""codex connector — runs prompts via the OpenAI Codex CLI."""
+"""codex connector — runs prompts via the OpenAI Codex CLI (`codex exec`)."""
 from __future__ import annotations
 
 import os
@@ -24,16 +24,17 @@ def run(
     variant: str = None,
     session_id: str = None,
 ) -> tuple[bool, str, str, None]:
-    """Run codex CLI non-interactively.
+    """Run codex non-interactively via `codex exec`.
 
-    Uses quiet mode with full-auto approval so it runs without human interaction.
+    Uses --dangerously-bypass-approvals-and-sandbox for fully automated
+    execution and -C to set the agent's working root.
 
     Returns:
-        (success, output, error, None)  — session_id always None (codex has no session API)
+        (success, output, error, None)  — session_id always None
     """
-    cmd = ["codex", "--approval-mode", "full-auto"]
+    cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-C", workdir]
     if model:
-        cmd += ["--model", model]
+        cmd += ["-m", model]
     cmd.append(prompt)
 
     output_parts: list[str] = []
