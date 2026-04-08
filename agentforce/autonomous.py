@@ -18,6 +18,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+
+from agentforce.connectors import CONNECTORS
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
@@ -85,7 +87,6 @@ def _run_agent(
     session_id: str = None,
 ) -> tuple[bool, str, str, str | None]:
     """Dispatch to the selected connector. Returns (success, output, error, session_id)."""
-    from agentforce.connectors import CONNECTORS
     if agent == "auto":
         agent = _detect_agent()
     connector = CONNECTORS.get(agent)
@@ -404,7 +405,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--agent",
         default="auto",
-        choices=["auto", "opencode", "claude", "openrouter", "codex"],
+        choices=["auto", *CONNECTORS],
         help="Agent CLI to use (default: auto — opencode)",
     )
     p.add_argument(
