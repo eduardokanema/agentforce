@@ -463,6 +463,32 @@ class TestCodexConnector:
         assert "-m" in cmd
         assert "o4-mini" in cmd
 
+    def test_run_inserts_double_dash_before_dash_prefixed_prompt(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("-q review this task", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[-2:] == ["--", "-q review this task"]
+
+    def test_run_resume_inserts_double_dash_before_dash_prefixed_prompt(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("-q review this task", str(tmp_path), session_id="thread_123")
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[:2] == ["codex", "exec"]
+        assert "resume" in cmd
+        assert cmd[-3:] == ["thread_123", "--", "-q review this task"]
+
     def test_run_failure_on_nonzero_returncode(self, tmp_path):
         mock_proc = MagicMock()
         mock_proc.stdout = []
@@ -537,3 +563,48 @@ class TestCodexConnector:
         mock_timer_cls.assert_called_once()
         mock_timer.start.assert_called_once()
         mock_timer.cancel.assert_called_once()
+
+
+# ── _parse_reviewer_output ────────────────────────────────────────────────────
+
+class TestParseReviewerOutput:
+    def test_parses_bare_json_line(self):
+        output = '{"approved": true, "score": 9, "feedback": "looks good"}'
+        result = autonomous._parse_reviewer_output(output)
+        assert result["approved"] is True
+        assert result["score"] == 9
+
+    def test_parses_json_in_fenced_code_block(self):
+        output = 'Some preamble\n```json\n{"approved": false, "score": 3, "feedback": "needs work"}\n```'
+        result = autonomous._parse_reviewer_output(output)
+        assert result["approved"] is False
+        assert result["score"] == 3
+
+    def test_parses_json_via_regex_fallback(self):
+        output = 'Here is my review:\n{"approved": true, "score": 7, "feedback": "ok", "extra": 1}'
+        result = autonomous._parse_reviewer_output(output)
+        assert result["approved"] is True
+
+    def test_returns_fallback_when_no_json_found(self):
+        output = "This is just plain text with no JSON at all."
+        result = autonomous._parse_reviewer_output(output)
+        assert result["approved"] is False
+        assert result["score"] == 0
+        assert "Could not parse" in result["feedback"]
+
+    def test_skips_invalid_json_line_and_continues(self):
+        output = "{invalid json}\n{\"approved\": true, \"score\": 5, \"feedback\": \"fine\"}"
+        result = autonomous._parse_reviewer_output(output)
+        assert result["approved"] is True
+
+    def test_blocking_issues_key_preserved(self):
+        output = '{"approved": false, "score": 2, "feedback": "bad", "blocking_issues": ["issue A"]}'
+        result = autonomous._parse_reviewer_output(output)
+        assert result["blocking_issues"] == ["issue A"]
+
+    def test_import_json_is_available(self):
+        """Regression: json must be importable at module level (NameError fix)."""
+        import importlib
+        mod = importlib.import_module("agentforce.autonomous")
+        import json as _json
+        assert mod.json is _json
