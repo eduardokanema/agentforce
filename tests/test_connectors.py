@@ -592,6 +592,20 @@ class TestParseReviewerOutput:
         assert result["approved"] is True
         assert result["score"] == 9
 
+    def test_json_followed_by_turn_complete_line(self):
+        """Codex appends '── turn complete ...' after the verdict — must not break parsing."""
+        output = (
+            "{\n"
+            '  "approved": true,\n'
+            '  "score": 8,\n'
+            '  "feedback": "all good"\n'
+            "}\n"
+            "── turn complete  in=91494 (cached=46336) out=2496 ──"
+        )
+        result = autonomous._parse_reviewer_output(output)
+        assert result["approved"] is True
+        assert result["score"] == 8
+
     def test_parses_multiline_json_at_end(self):
         """Core fix: multi-line verdict JSON after prose should be found."""
         output = (
