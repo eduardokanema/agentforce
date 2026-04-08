@@ -20,10 +20,18 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
 from pathlib import Path
+
+_STREAMS_DIR = Path.home() / ".agentforce" / "streams"
+
+
+def _stream_path(mission_id: str, task_id: str) -> Path:
+    _STREAMS_DIR.mkdir(parents=True, exist_ok=True)
+    return _STREAMS_DIR / f"{mission_id}_{task_id}.log"
 
 
 def _ensure_pkg():
@@ -68,49 +76,114 @@ def _detect_agent() -> str:
     raise SystemExit("No agent CLI found. Install 'claude' (Claude Code) or 'opencode'.")
 
 
-def _run_claude(prompt: str, workdir: str, timeout: int = 300, model: str = None) -> tuple[bool, str, str]:
-    """Run claude CLI non-interactively. Prompt is passed via stdin."""
+def _run_claude(prompt: str, workdir: str, timeout: int = 300, model: str = None,
+                stream_path: Path = None) -> tuple[bool, str, str]:
+    """Run claude CLI non-interactively, streaming output to stream_path line-by-line."""
     cmd = ["claude", "--dangerously-skip-permissions", "-p", "--output-format", "text"]
     if model:
         cmd += ["--model", model]
+    output_parts: list[str] = []
+    timed_out = False
     try:
-        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                           timeout=timeout, cwd=workdir, env=os.environ.copy())
-        return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
-    except subprocess.TimeoutExpired:
-        return False, "", "claude timed out"
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=workdir,
+            env=os.environ.copy(),
+        )
+
+        def _kill():
+            nonlocal timed_out
+            timed_out = True
+            proc.kill()
+
+        timer = threading.Timer(timeout, _kill)
+        timer.start()
+        sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+            for line in proc.stdout:
+                output_parts.append(line)
+                if sf:
+                    sf.write(line)
+                    sf.flush()
+            proc.wait()
+        finally:
+            timer.cancel()
+            if sf:
+                sf.close()
+
+        if timed_out:
+            return False, "".join(output_parts).strip(), "claude timed out"
+        stderr = proc.stderr.read()
+        return proc.returncode == 0, "".join(output_parts).strip(), stderr.strip()
     except Exception as e:
-        return False, "", str(e)
+        return False, "".join(output_parts).strip(), str(e)
 
 
-def _run_opencode_cmd(prompt: str, workdir: str, timeout: int = 300, model: str = None) -> tuple[bool, str, str]:
-    """Run opencode CLI with a prompt."""
+def _run_opencode_cmd(prompt: str, workdir: str, timeout: int = 300, model: str = None,
+                      stream_path: Path = None) -> tuple[bool, str, str]:
+    """Run opencode CLI with a prompt, streaming output to stream_path line-by-line."""
     cmd = ["opencode", "run", prompt]
     if model:
         cmd += ["--model", model]
+    output_parts: list[str] = []
+    timed_out = False
     env = os.environ.copy()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           cwd=workdir, env=env)
-        output = r.stdout.strip()
-        error = r.stderr.strip()
-        success = r.returncode == 0 and "error" not in (r.stderr or "").lower()
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=workdir,
+            env=env,
+        )
+
+        def _kill():
+            nonlocal timed_out
+            timed_out = True
+            proc.kill()
+
+        timer = threading.Timer(timeout, _kill)
+        timer.start()
+        sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
+        try:
+            for line in proc.stdout:
+                output_parts.append(line)
+                if sf:
+                    sf.write(line)
+                    sf.flush()
+            proc.wait()
+        finally:
+            timer.cancel()
+            if sf:
+                sf.close()
+
+        if timed_out:
+            return False, "".join(output_parts).strip(), "opencode timed out"
+        error = proc.stderr.read().strip()
+        output = "".join(output_parts).strip()
+        success = proc.returncode == 0 and "error" not in (error or "").lower()
         return success, output, error
-    except subprocess.TimeoutExpired:
-        return False, "", "opencode timed out"
     except Exception as e:
-        return False, "", str(e)
+        return False, "".join(output_parts).strip(), str(e)
 
 
 def _run_agent(prompt: str, workdir: str, timeout: int = 300,
-               agent: str = "auto", model: str = None) -> tuple[bool, str, str]:
+               agent: str = "auto", model: str = None,
+               stream_path: Path = None) -> tuple[bool, str, str]:
     """Dispatch to the selected agent CLI."""
     if agent == "auto":
         agent = _detect_agent()
     if agent == "claude":
-        return _run_claude(prompt, workdir, timeout, model)
+        return _run_claude(prompt, workdir, timeout, model, stream_path)
     if agent == "opencode":
-        return _run_opencode_cmd(prompt, workdir, timeout, model)
+        return _run_opencode_cmd(prompt, workdir, timeout, model, stream_path)
     raise ValueError(f"Unknown agent: {agent!r}. Use 'claude' or 'opencode'.")
 
 
@@ -209,7 +282,9 @@ def run_autonomous(
         timeout = getattr(action, "timeout", 300 if role == "worker" else 120)
         effective_model = _model or getattr(action, "model", None)
 
+        sp = _stream_path(engine.state.mission_id, tid)
         if role == "worker":
+            sp.write_text(f"=== WORKER [{tid}] STARTED ===\n", encoding="utf-8")
             task_metrics.setdefault(tid, TaskMetrics(
                 task_id=tid,
                 task_title=engine._get_task_spec(tid).title,
@@ -218,6 +293,8 @@ def run_autonomous(
             ))
             task_metrics[tid].worker_attempts += 1
         elif role == "reviewer":
+            with open(sp, "a", encoding="utf-8") as _sf:
+                _sf.write(f"\n=== REVIEWER [{tid}] STARTED ===\n")
             task_metrics.setdefault(tid, TaskMetrics(
                 task_id=tid,
                 task_title=engine._get_task_spec(tid).title,
@@ -226,7 +303,7 @@ def run_autonomous(
             task_metrics[tid].reviewer_started = datetime.now(timezone.utc).isoformat()
             task_metrics[tid].review_attempts += 1
 
-        fut = executor.submit(_run_agent, action.context, _wdir, timeout, resolved_agent, effective_model)
+        fut = executor.submit(_run_agent, action.context, _wdir, timeout, resolved_agent, effective_model, sp)
         in_flight[key] = (fut, action)
         print(f"  ↑ [{role}] task {tid} dispatched")
 
