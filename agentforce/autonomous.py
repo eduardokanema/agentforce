@@ -235,6 +235,13 @@ def run_autonomous(
             ts.bump()
             engine.state.log_event("task_reset", ts.task_id, "Interrupted IN_PROGRESS task reset on resume")
             _reset = True
+        elif ts.status == TaskStatus.REVIEWING:
+            # Reviewer was in-flight when the process died — re-queue for review.
+            ts.status = TaskStatus.COMPLETED
+            ts.review_feedback = ""
+            ts.bump()
+            engine.state.log_event("task_reset", ts.task_id, "Interrupted REVIEWING task reset on resume")
+            _reset = True
         elif ts.status == TaskStatus.FAILED and not ts.human_intervention_needed:
             ts.retries = 0
             ts.status = TaskStatus.PENDING
