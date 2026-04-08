@@ -134,6 +134,45 @@ def _parse_reviewer_output(output: str) -> dict:
     raise ValueError("Could not parse reviewer output: no valid JSON found")
 
 
+_MIN_APPROVAL_SCORE = 8
+
+
+def _enforce_review_thresholds(review: dict) -> dict:
+    """Apply mandatory approval thresholds to a parsed reviewer dict.
+
+    Returns a new dict with ``approved`` forced to False (and ``feedback`` /
+    ``blocking_issues`` updated) when:
+    - score < _MIN_APPROVAL_SCORE
+    - criteria_results.security is anything other than "met"
+
+    The original dict is not mutated.
+    """
+    approved = review.get("approved", False)
+    if not approved:
+        return review
+
+    score = review.get("score", 0)
+    criteria = review.get("criteria_results", {})
+    security_status = str(criteria.get("security", "met")).lower()
+
+    if score < _MIN_APPROVAL_SCORE:
+        return {
+            **review,
+            "approved": False,
+            "feedback": f"[Score {score}/10 below threshold {_MIN_APPROVAL_SCORE}] {review.get('feedback', '')}",
+        }
+
+    if security_status != "met":
+        return {
+            **review,
+            "approved": False,
+            "blocking_issues": list(review.get("blocking_issues", [])) + [f"security: {security_status}"],
+            "feedback": f"[Security issue: {security_status}] {review.get('feedback', '')}",
+        }
+
+    return review
+
+
 _DEFAULT_MODEL = "opencode/nemotron-3-super-free"
 _DEFAULT_VARIANT = "high"
 
@@ -340,6 +379,7 @@ def run_autonomous(
                 else:
                     review = {"approved": False, "feedback": f"Reviewer error: {error}", "score": 0}
 
+                review = _enforce_review_thresholds(review)
                 approved = review.get("approved", False)
                 score = review.get("score", 0)
                 feedback = review.get("feedback", "")

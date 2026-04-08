@@ -583,6 +583,79 @@ class TestCodexConnector:
         mock_timer.cancel.assert_called_once()
 
 
+# ── _enforce_review_thresholds ───────────────────────────────────────────────
+
+class TestEnforceReviewThresholds:
+    def _approved(self, score=9, security="met", extra=None):
+        r = {"approved": True, "score": score, "feedback": "looks good",
+             "blocking_issues": [], "criteria_results": {"security": security}}
+        if extra:
+            r.update(extra)
+        return r
+
+    def test_passes_through_high_score_no_security_issue(self):
+        result = autonomous._enforce_review_thresholds(self._approved(score=8))
+        assert result["approved"] is True
+
+    def test_passes_through_score_exactly_8(self):
+        result = autonomous._enforce_review_thresholds(self._approved(score=8))
+        assert result["approved"] is True
+
+    def test_rejects_score_below_8(self):
+        result = autonomous._enforce_review_thresholds(self._approved(score=7))
+        assert result["approved"] is False
+        assert "7/10 below threshold 8" in result["feedback"]
+
+    def test_rejects_score_0(self):
+        result = autonomous._enforce_review_thresholds(self._approved(score=0))
+        assert result["approved"] is False
+
+    def test_rejects_security_not_met(self):
+        result = autonomous._enforce_review_thresholds(self._approved(security="failed"))
+        assert result["approved"] is False
+        assert "Security issue: failed" in result["feedback"]
+        assert any("security" in b for b in result["blocking_issues"])
+
+    def test_rejects_security_partial(self):
+        result = autonomous._enforce_review_thresholds(self._approved(security="partial"))
+        assert result["approved"] is False
+
+    def test_score_check_takes_priority_over_security(self):
+        """Low score + security issue: score rejection fires first."""
+        result = autonomous._enforce_review_thresholds(self._approved(score=5, security="failed"))
+        assert result["approved"] is False
+        assert "below threshold" in result["feedback"]
+
+    def test_already_rejected_not_mutated(self):
+        """A review already marked approved=False passes through unchanged."""
+        r = {"approved": False, "score": 3, "feedback": "bad", "blocking_issues": ["X"]}
+        result = autonomous._enforce_review_thresholds(r)
+        assert result is r  # same object, no copy
+
+    def test_original_dict_not_mutated(self):
+        original = self._approved(score=5)
+        autonomous._enforce_review_thresholds(original)
+        assert original["approved"] is True  # untouched
+
+    def test_preserves_existing_blocking_issues_on_security_rejection(self):
+        r = self._approved(security="not met",
+                           extra={"blocking_issues": ["missing tests"]})
+        result = autonomous._enforce_review_thresholds(r)
+        issues = result["blocking_issues"]
+        assert "missing tests" in issues
+        assert any("security" in b for b in issues)
+
+    def test_real_log_task06_score8_passes(self):
+        """Score 8 with security=met (real task 06 output) must be approved."""
+        review = {
+            "approved": True, "score": 8, "feedback": "scaffold complete",
+            "criteria_results": {"security": "met", "tdd": "partial"},
+            "blocking_issues": [],
+        }
+        result = autonomous._enforce_review_thresholds(review)
+        assert result["approved"] is True
+
+
 # ── _parse_reviewer_output ────────────────────────────────────────────────────
 
 class TestParseReviewerOutput:
