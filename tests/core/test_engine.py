@@ -223,10 +223,54 @@ class TestCaps:
         engine = make_engine(tmp_path, caps=caps)
         engine.state.started_at = "2020-01-01T00:00:00+00:00"
         engine._save()
-        
+
         cap = engine._check_caps()
         assert cap is not None
         assert "wall_time" in engine.state.caps_hit
+
+    def test_worker_timeout_fallback_when_wall_time_disabled(self, tmp_path):
+        # max_wall_time_minutes=0 means wall-time is disabled (used by --extend-caps).
+        # _dispatch_worker must not compute min(600, 0*60)=0; it should use 600.
+        caps = Caps(max_wall_time_minutes=0, max_retries_global=10)
+        engine = make_engine(tmp_path, caps=caps)
+        actions = engine.tick()
+        worker_actions = [a for a in actions if isinstance(a, WorkerDelegation)]
+        assert worker_actions, "expected at least one worker dispatched"
+        for action in worker_actions:
+            assert action.timeout == 600, f"expected timeout=600, got {action.timeout}"
+
+    def test_wall_time_disabled_when_zero(self, tmp_path):
+        # max_wall_time_minutes=0 must not trigger the wall-time cap.
+        caps = Caps(max_wall_time_minutes=0)
+        engine = make_engine(tmp_path, caps=caps)
+        engine.state.started_at = "2020-01-01T00:00:00+00:00"
+        engine._save()
+
+        cap = engine._check_caps()
+        assert cap is None
+        assert "wall_time" not in engine.state.caps_hit
+
+    def test_extend_caps_raises_limits_without_touching_counters(self, tmp_path):
+        # Simulate what run_autonomous does with extend_caps=True:
+        # caps are raised in-memory; stored counters are unchanged.
+        caps = Caps(max_wall_time_minutes=180, max_retries_global=5, max_human_interventions=3)
+        engine = make_engine(tmp_path, caps=caps)
+        engine.state.total_retries = 5
+        engine.state.total_human_interventions = 3
+        engine.state.started_at = "2020-01-01T00:00:00+00:00"
+        engine._save()
+
+        # Apply extend_caps logic (mirrors autonomous.py)
+        c = engine.state.caps
+        c.max_wall_time_minutes = 0
+        c.max_retries_global = max(c.max_retries_global, engine.state.total_retries + 100)
+        c.max_human_interventions = max(c.max_human_interventions, engine.state.total_human_interventions + 100)
+
+        # No cap should trigger now
+        assert engine._check_caps() is None
+        # Counters are untouched
+        assert engine.state.total_retries == 5
+        assert engine.state.total_human_interventions == 3
 
 
 class TestEventLog:
