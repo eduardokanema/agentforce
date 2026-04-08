@@ -97,28 +97,30 @@ def _run_agent(
 
 
 def _parse_reviewer_output(output: str) -> dict:
-    """Extract JSON from reviewer output."""
-    for line in output.split("\n"):
-        line = line.strip()
-        if line.startswith("{"):
+    """Extract JSON from reviewer output.
+
+    Scans from the *end* of the output so that tool-call results containing
+    JSON (e.g. package.json file contents) don't swallow the final verdict.
+    """
+    lines = output.split("\n")
+
+    # Walk backwards: find the last line that opens a JSON object and try to
+    # parse from that line to the end of the output.
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip().startswith("{"):
             try:
-                return json.loads(line)
+                return json.loads("\n".join(lines[i:]))
             except json.JSONDecodeError:
                 pass
-        if line.startswith("```json"):
-            try:
-                block = output.split("```json", 1)[1].split("```", 1)[0].strip()
-                return json.loads(block)
-            except (json.JSONDecodeError, IndexError):
-                pass
-    # Fallback: try to find any JSON object
-    import re
-    match = re.search(r'(\{.*"approved".*\})', output, re.DOTALL)
-    if match:
+
+    # Try a ```json fenced block (last occurrence wins)
+    if "```json" in output:
         try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
+            block = output.rsplit("```json", 1)[1].split("```", 1)[0].strip()
+            return json.loads(block)
+        except (json.JSONDecodeError, IndexError):
             pass
+
     raise ValueError("Could not parse reviewer output: no valid JSON found")
 
 
