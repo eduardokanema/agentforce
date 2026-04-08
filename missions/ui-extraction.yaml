@@ -1,0 +1,451 @@
+mission:
+  name: "Extract AgentForce Dashboard as Standalone React Frontend"
+  goal: "Build a self-contained React+Vite+TS frontend in ui/ that connects to the Python backend via WebSocket for live mission monitoring, replacing polling/SSE. Feature parity with current server-rendered UI."
+  definition_of_done:
+    - "ui/ subproject scaffolded with React 18 + Vite 5 + TypeScript + Tailwind + shadcn/ui"
+    - "Python server exposes GET /api/missions, /api/mission/{id}, /api/mission/{id}/task/{tid}"
+    - "Python server accepts WebSocket connections at /ws with RFC 6455 handshake"
+    - "WebSocket broadcasts mission_list_update on any state change"
+    - "WebSocket streams task_stream_line events replacing SSE"
+    - "MissionsPage renders all missions with live updates (no meta-refresh)"
+    - "MissionDetailPage renders stats, task list, event log with live updates"
+    - "TaskDetailPage renders live terminal stream via WebSocket"
+    - "Frontend configurable via VITE_API_BASE_URL and VITE_WS_URL env vars"
+    - "npm run dev works with Vite proxy to localhost:8080"
+    - "Existing HTML routes on Python server remain functional"
+  caps:
+    max_concurrent_workers: 2
+    max_retries_per_task: 3
+    max_retries_global: 10
+    max_wall_time_minutes: 180
+    max_human_interventions: 3
+  working_dir: "/Users/rent/Projects/agentforce"
+
+tasks:
+  - id: "01"
+    title: "Add to_summary_dict() to MissionState"
+    description: |
+      In agentforce/core/state.py, add a to_summary_dict() method to MissionState (around line 241 where to_dict() exists).
+      It should return a lightweight dict with: mission_id, name (from spec.name), status ("complete"|"failed"|"needs_human"|"active"),
+      done_tasks (count of review_approved tasks), total_tasks, pct (int 0-100), duration (human string from started_at to now/completed_at),
+      worker_agent, worker_model, started_at.
+      Use existing methods: is_done() (line 147), is_failed() (line 151), needs_human() (line 157).
+    acceptance_criteria:
+      - "MissionState.to_summary_dict() exists and returns all required fields"
+      - "status is 'complete' when is_done(), 'failed' when is_failed(), 'needs_human' when needs_human(), else 'active'"
+      - "pct is correctly computed as int(done_tasks / total_tasks * 100)"
+      - "duration is a human-readable string (e.g. '4m 12s')"
+    tdd:
+      test_file: "tests/test_state_summary.py"
+      test_command: "python3.11 -m pytest tests/test_state_summary.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/state.py (updated)"
+      - "tests/test_state_summary.py"
+
+  - id: "02"
+    title: "Add JSON API routes to DashboardHandler"
+    description: |
+      In agentforce/server/handler.py, extend do_GET to handle /api/* routes before the existing HTML routing.
+      Add _json(self, obj, status=200) helper that serializes obj with json.dumps, sends Content-Type: application/json
+      and Access-Control-Allow-Origin: * headers.
+      Implement _handle_api(parts) with:
+        GET /api/missions -> load all state files, call to_summary_dict() on each, return list
+        GET /api/mission/{id} -> load state by id, return to_dict()
+        GET /api/mission/{id}/task/{tid} -> load state, return task_states[tid].to_dict() merged with spec task fields
+      Return 404 JSON if mission/task not found.
+      Existing HTML routes must still work unchanged.
+    acceptance_criteria:
+      - "GET /api/missions returns JSON array of mission summaries"
+      - "GET /api/mission/{id} returns full mission state as JSON"
+      - "GET /api/mission/{id}/task/{tid} returns task state + spec fields as JSON"
+      - "404 JSON returned for unknown ids"
+      - "Access-Control-Allow-Origin: * present on all /api responses"
+      - "Existing HTML endpoints still return HTML"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "python3.11 -m pytest tests/test_api_routes.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/handler.py (updated)"
+      - "tests/test_api_routes.py"
+
+  - id: "03"
+    title: "Implement stdlib WebSocket module (ws.py)"
+    description: |
+      Create agentforce/server/ws.py implementing RFC 6455 WebSocket support using only Python stdlib.
+      Provide:
+        _ws_handshake(handler) -- reads Sec-WebSocket-Key, computes Sec-WebSocket-Accept via
+          SHA1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11") base64-encoded, writes 101 response
+        WsConnection class -- wraps a raw socket, implements:
+          send_text(msg: str) -- frames as text frame (opcode 0x1), server frames must NOT be masked
+          recv_text() -> str | None -- reads and unmasks client frame (clients MUST mask), returns None on close/error
+          close() -- sends close frame
+        _LOCK: threading.Lock protecting _SUBSCRIBERS
+        _SUBSCRIBERS: dict[str, set[WsConnection]] -- keyed by mission_id; "*" = subscribe_all
+        register(conn, mission_id="*") -- adds to subscriber set under lock
+        unregister(conn, mission_id="*") -- removes under lock
+        broadcast_mission_list(summaries: list[dict]) -- send to "*" subscribers
+        broadcast_mission(mission_id: str, state_dict: dict) -- send to mission_id subscribers
+        broadcast_stream_line(mission_id, task_id, line: str, seq: int) -- send stream event
+      All broadcast functions must catch OSError and call unregister on dead connections.
+      Client frames from browser are always masked -- unmask correctly using the 4-byte masking key.
+    acceptance_criteria:
+      - "ws.py exists with all listed functions and classes"
+      - "RFC 6455 handshake produces correct Sec-WebSocket-Accept value"
+      - "send_text frames payload correctly (FIN=1, opcode=1, no server masking)"
+      - "recv_text correctly unmasks client frames using XOR with masking key"
+      - "broadcast functions handle dead connections without raising"
+      - "threading.Lock used for all _SUBSCRIBERS mutations"
+    tdd:
+      test_file: "tests/test_ws.py"
+      test_command: "python3.11 -m pytest tests/test_ws.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/ws.py"
+      - "tests/test_ws.py"
+
+  - id: "04"
+    title: "Wire WebSocket upgrade into DashboardHandler"
+    description: |
+      In agentforce/server/handler.py, at the TOP of do_GET (before any routing), check:
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            self._handle_websocket(); return
+      Implement _handle_websocket(self):
+        1. Call ws.handshake(self) to send 101
+        2. Wrap self.connection in ws.WsConnection
+        3. Register with ws.register(conn, "*")
+        4. Loop: msg = conn.recv_text(); if None: break; parse JSON
+           - "subscribe_all": ws.unregister from current, ws.register(conn, "*")
+           - "subscribe": ws.unregister from current, ws.register(conn, mission_id)
+           - "ping": conn.send_text(json.dumps({"type":"pong"}))
+        5. On exit: ws.unregister from all buckets; conn.close()
+      Use try/except OSError to handle disconnects cleanly.
+    acceptance_criteria:
+      - "HTTP GET with Upgrade: websocket header triggers WebSocket handshake"
+      - "Client receives 101 Switching Protocols response"
+      - "subscribe message moves connection to mission-specific subscriber set"
+      - "subscribe_all message moves connection back to '*' set"
+      - "ping receives pong response"
+      - "Disconnected clients are removed from subscriber sets"
+    dependencies:
+      - "03"
+    tdd:
+      test_file: "tests/test_ws_handler.py"
+      test_command: "python3.11 -m pytest tests/test_ws_handler.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/handler.py (updated)"
+      - "tests/test_ws_handler.py"
+
+  - id: "05"
+    title: "Hook WebSocket broadcasts into engine._save() and add watchdog"
+    description: |
+      In agentforce/core/engine.py, in the _save() method (line 138), after self.state.save(self._state_file),
+      add a broadcast call wrapped in try/except so it never crashes the engine:
+        try:
+            from agentforce.server import ws
+            ws.broadcast_mission(self.state.mission_id, self.state.to_dict())
+            ws.broadcast_mission_list([self.state.to_summary_dict()])
+        except Exception:
+            pass
+      Also in the SSE _sse handler in handler.py, each time a new line is read from the stream file,
+      call ws.broadcast_stream_line(mission_id, task_id, line, seq) where seq increments per connection.
+      Add a watchdog thread in serve() that polls STATE_DIR every 3 seconds, detects mtime changes,
+      and calls broadcast_mission_list with all current summaries (handles engine running as separate process).
+      Watchdog thread must be daemon=True.
+    acceptance_criteria:
+      - "After engine._save(), connected WS clients receive mission_state message"
+      - "SSE stream lines are also broadcast as task_stream_line WS messages"
+      - "Watchdog thread starts with serve() and broadcasts mission list on file changes"
+      - "engine._save() never raises even if ws module fails to import"
+      - "Watchdog thread is daemon=True so it does not block server shutdown"
+    dependencies:
+      - "03"
+      - "04"
+    tdd:
+      test_file: "tests/test_ws_broadcast.py"
+      test_command: "python3.11 -m pytest tests/test_ws_broadcast.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/engine.py (updated)"
+      - "agentforce/server/handler.py (updated)"
+      - "tests/test_ws_broadcast.py"
+
+  - id: "06"
+    title: "Scaffold ui/ subproject with Vite + React + TS + Tailwind"
+    description: |
+      Create a self-contained frontend subproject at ui/ inside the repo root.
+      Files to create:
+        ui/package.json -- name: "@agentforce/ui", scripts: dev/build/preview
+          deps: react, react-dom, react-router-dom
+          devDeps: vite, @vitejs/plugin-react, typescript, tailwindcss, @tailwindcss/vite,
+            autoprefixer, @types/react, @types/react-dom
+        ui/tsconfig.json -- strict mode, target ES2022, moduleResolution bundler
+        ui/vite.config.ts -- react plugin, server proxy: /api and /ws -> localhost:8080
+        ui/tailwind.config.ts -- extend colors with dark-mode design tokens from style.css:
+          bg: '#090d18', surface: '#0d1525', card: '#111c2e', card-hover: '#162234',
+          border: '#1b2d42', border-lit: '#264060', text: '#dde6f0', dim: '#8da0b5',
+          muted: '#4d6070', blue: '#4d94ff', blue-bg: '#0f2040', green: '#2ecc8a',
+          green-bg: '#0a2818', amber: '#f0b429', amber-bg: '#2d1f06', red: '#ff6b6b',
+          red-bg: '#2d0f0f', purple: '#9b7dff', purple-bg: '#1f1045', teal: '#2dd4bf'
+        ui/index.html -- minimal HTML shell, <div id="root">, loads src/main.tsx
+        ui/src/main.tsx -- renders <App /> into #root
+        ui/src/App.tsx -- BrowserRouter with routes:
+          / -> MissionsPage, /mission/:id -> MissionDetailPage, /mission/:id/task/:tid -> TaskDetailPage
+          (pages can be stubs initially)
+        ui/src/env.d.ts -- vite/client types
+      Add ui/node_modules/ and ui/dist/ to .gitignore.
+    acceptance_criteria:
+      - "ui/ directory exists with all listed files"
+      - "npm install completes without errors in ui/"
+      - "npx tsc --noEmit passes in ui/"
+      - "npm run build completes and emits ui/dist/index.html"
+      - "Routes / /mission/:id /mission/:id/task/:tid are defined in App.tsx"
+      - "ui/node_modules and ui/dist added to .gitignore"
+    tdd:
+      test_file: "ui/src/App.tsx"
+      test_command: "cd ui && npm run build 2>&1 | tail -5"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/package.json"
+      - "ui/tsconfig.json"
+      - "ui/vite.config.ts"
+      - "ui/tailwind.config.ts"
+      - "ui/index.html"
+      - "ui/src/main.tsx"
+      - "ui/src/App.tsx"
+      - "ui/src/env.d.ts"
+      - ".gitignore (updated)"
+
+  - id: "07"
+    title: "TypeScript types, REST client, and WebSocket singleton"
+    description: |
+      Create ui/src/lib/types.ts -- TypeScript interfaces matching Python models:
+        TaskStatus union type (all status strings), TaskState, EventLogEntry,
+        TaskSpec, MissionSpec, MissionState, MissionSummary. No use of `any`.
+      Create ui/src/lib/api.ts -- fetch helpers:
+        getMissions(): Promise<MissionSummary[]> -> GET /api/missions
+        getMission(id): Promise<MissionState> -> GET /api/mission/{id}
+        getTask(missionId, taskId): Promise<TaskState & TaskSpec> -> GET /api/mission/{id}/task/{tid}
+        BASE_URL from import.meta.env.VITE_API_BASE_URL or ""
+      Create ui/src/lib/ws.ts -- AgentForceWs class and singleton:
+        connects to import.meta.env.VITE_WS_URL or "ws://localhost:8080/ws"
+        on open: sends { type: "subscribe_all" }
+        on message: parses JSON, routes to handlers via on(type, handler) / off(type, handler)
+        subscribe(missionId): sends { type: "subscribe", mission_id: missionId }
+        auto-reconnects with exponential backoff (1s, 2s, 4s, ... max 30s)
+        exposes connectionState: "connecting"|"open"|"closed" via event emitter
+        export const wsClient = new AgentForceWs()
+      Create ui/src/hooks/useMissionList.ts -- fetches /api/missions on mount,
+        listens to mission_list_update WS events to update in place.
+        Returns { missions: MissionSummary[], loading: boolean, error: string | null }.
+      Create ui/src/hooks/useMission.ts -- fetches /api/mission/{id} on mount,
+        listens to mission_state WS events filtered by mission_id.
+        Returns { mission: MissionState | null, loading: boolean, error: string | null }.
+      Create ui/src/hooks/useTaskStream.ts -- subscribes to task_stream_line WS events,
+        accumulates lines in useRef to avoid re-renders per line, exposes flush trigger.
+        Pre-populates from worker_output via REST on mount.
+        Returns { lines: string[], done: boolean }.
+    acceptance_criteria:
+      - "types.ts exports all required TypeScript types with no any"
+      - "api.ts fetch helpers use BASE_URL and return typed responses"
+      - "wsClient singleton connects, routes messages by type, and auto-reconnects"
+      - "useMissionList updates missions array live via WS events"
+      - "useMission updates MissionState live via WS events"
+      - "useTaskStream accumulates lines without re-rendering on every line"
+      - "All files compile with zero TypeScript errors"
+    dependencies:
+      - "06"
+    tdd:
+      test_file: "ui/src/lib/types.ts"
+      test_command: "cd ui && npx tsc --noEmit"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/src/lib/types.ts"
+      - "ui/src/lib/api.ts"
+      - "ui/src/lib/ws.ts"
+      - "ui/src/hooks/useMissionList.ts"
+      - "ui/src/hooks/useMission.ts"
+      - "ui/src/hooks/useTaskStream.ts"
+
+  - id: "08"
+    title: "Shared UI components"
+    description: |
+      Create reusable components in ui/src/components/ using Tailwind only (no inline styles).
+      Match visual appearance of current server-rendered HTML.
+
+      StatusBadge.tsx -- maps TaskStatus/mission status to colored badge:
+        review_approved -> text-green bg-green-bg
+        failed -> text-red bg-red-bg
+        needs_human/blocked -> text-amber bg-amber-bg
+        in_progress/reviewing -> text-blue bg-blue-bg
+        pending/retry -> text-dim bg-surface
+      MissionProgressBar.tsx -- animated progress bar (CSS transition), matches .progress-bar in style.css
+      AgentChip.tsx -- small chip showing agent name + model name
+      StatsBar.tsx -- horizontal row of labeled stat values (label above, value below)
+      EventLogTable.tsx -- table of EventLogEntry items, timestamp as local time string
+      TerminalPanel.tsx -- monospace scrollable div, max-height 500px overflow-y scroll,
+        auto-scrolls to bottom on new lines via useEffect + scrollIntoView on a bottom sentinel
+      Breadcrumb.tsx -- "Missions / {mission name} / {task title}" with router Links
+      ConnectionBanner.tsx -- top-bar indicator: green dot when WS open, amber when reconnecting
+    acceptance_criteria:
+      - "All 8 components exist and compile with zero TypeScript errors"
+      - "StatusBadge renders correct color classes for all TaskStatus values"
+      - "TerminalPanel auto-scrolls to bottom when lines prop length increases"
+      - "MissionProgressBar uses CSS transition for animation"
+      - "ConnectionBanner reflects wsClient connectionState correctly"
+    dependencies:
+      - "07"
+    tdd:
+      test_file: "ui/src/components/StatusBadge.tsx"
+      test_command: "cd ui && npx tsc --noEmit"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/src/components/StatusBadge.tsx"
+      - "ui/src/components/MissionProgressBar.tsx"
+      - "ui/src/components/AgentChip.tsx"
+      - "ui/src/components/StatsBar.tsx"
+      - "ui/src/components/EventLogTable.tsx"
+      - "ui/src/components/TerminalPanel.tsx"
+      - "ui/src/components/Breadcrumb.tsx"
+      - "ui/src/components/ConnectionBanner.tsx"
+
+  - id: "09"
+    title: "MissionsPage -- live mission list"
+    description: |
+      Implement ui/src/pages/MissionsPage.tsx.
+      Use useMissionList() hook. No meta-refresh -- WS events drive updates.
+      Renders:
+        ConnectionBanner at top
+        Heading "AgentForce Missions"
+        Loading skeleton while fetching
+        Empty state if no missions
+        List of mission cards, each showing:
+          mission name as link to /mission/{id}
+          StatusBadge
+          MissionProgressBar (pct)
+          "X / Y tasks" count
+          duration string
+          AgentChip (worker_agent, worker_model)
+      Dark background bg-bg, cards use bg-card with border border-border rounded.
+    acceptance_criteria:
+      - "MissionsPage renders mission list from useMissionList hook"
+      - "Each card shows name (link), status badge, progress bar, task count, duration, agent"
+      - "Empty state shown when missions array is empty"
+      - "Loading state shown while initial fetch is in flight"
+      - "No meta-refresh anywhere in component tree"
+      - "Compiles with zero TypeScript errors"
+    dependencies:
+      - "08"
+    tdd:
+      test_file: "ui/src/pages/MissionsPage.tsx"
+      test_command: "cd ui && npx tsc --noEmit"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/src/pages/MissionsPage.tsx"
+
+  - id: "10"
+    title: "MissionDetailPage -- stats, tasks, event log"
+    description: |
+      Implement ui/src/pages/MissionDetailPage.tsx using useParams() for mission id.
+      Use useMission(id) hook. All data updates live via WS -- no polling.
+      Renders:
+        Breadcrumb (Missions / {mission name})
+        PageHead: mission name + StatusBadge
+        StatsBar with 6 stats: Tasks Completed, Duration, Total Retries,
+          Avg Review Score, Human Interventions, Worker Agent
+        Task table: columns task#, title, retries, score, StatusBadge
+          each row links to /mission/{id}/task/{tid}
+        EventLogTable: last 50 events from mission.event_log (most recent first)
+      Loading and error states.
+    acceptance_criteria:
+      - "MissionDetailPage renders from useMission hook"
+      - "StatsBar shows all 6 stats matching server-rendered layout"
+      - "Task rows link to /mission/{id}/task/{tid}"
+      - "EventLogTable shows up to 50 events"
+      - "Page updates without refresh when WS mission_state event arrives"
+      - "Compiles with zero TypeScript errors"
+    dependencies:
+      - "08"
+    tdd:
+      test_file: "ui/src/pages/MissionDetailPage.tsx"
+      test_command: "cd ui && npx tsc --noEmit"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/src/pages/MissionDetailPage.tsx"
+
+  - id: "11"
+    title: "TaskDetailPage -- live terminal stream"
+    description: |
+      Implement ui/src/pages/TaskDetailPage.tsx using useParams() for mission_id and task_id.
+      Use useMission(mission_id) for task metadata.
+      Use useTaskStream(mission_id, task_id) for live output.
+      Renders:
+        Breadcrumb (Missions / {mission name} / {task title})
+        PageHead: task title + StatusBadge
+        StatsBar: Status, Review Score, Retries, Duration
+        LiveStream panel: TerminalPanel fed by useTaskStream lines
+          Shows "(stream complete)" when task_stream_done received
+          Pre-populates from worker_output REST field on mount
+        ReviewPanel: review_feedback + score (only when review_feedback is non-empty)
+        Conditional panels (only if data present):
+          BlockingIssues: bullet list of blocking_issues strings
+          HumanInterventionBox: human_intervention_message in amber-bg box
+          ErrorBox: error_message in red-bg box
+    acceptance_criteria:
+      - "TaskDetailPage renders from useMission + useTaskStream hooks"
+      - "TerminalPanel shows live lines as they arrive via WebSocket"
+      - "TerminalPanel auto-scrolls to bottom on new lines"
+      - "Pre-populates with worker_output from REST on mount"
+      - "BlockingIssues, HumanInterventionBox, ErrorBox only render when data present"
+      - "task_stream_done event causes stream complete indicator to appear"
+      - "Compiles with zero TypeScript errors"
+    dependencies:
+      - "08"
+    tdd:
+      test_file: "ui/src/pages/TaskDetailPage.tsx"
+      test_command: "cd ui && npx tsc --noEmit"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/src/pages/TaskDetailPage.tsx"
+
+  - id: "12"
+    title: "ui/README.md and integration verification"
+    description: |
+      Create ui/README.md documenting:
+        Prerequisites: Node 18+, Python 3.11+
+        Dev workflow: cd ui && npm install && npm run dev (requires: mission serve)
+        Custom backend: VITE_API_BASE_URL=http://remote:8080 VITE_WS_URL=ws://remote:8080/ws npm run dev
+        Build: npm run build -> output in ui/dist/
+        Component structure overview
+        WebSocket message protocol reference (all message types)
+      Write tests/test_integration_ws.py that:
+        Starts the Python server on a random port in a thread
+        Verifies GET /api/missions returns valid JSON
+        Verifies WebSocket handshake succeeds and ping/pong works
+        Verifies existing GET / still returns HTML
+      Verify npm run build in ui/ exits 0.
+      Verify python3.11 -m pytest -q passes all tests including integration.
+    acceptance_criteria:
+      - "ui/README.md exists with all documented sections"
+      - "npm run build in ui/ exits 0 with no TypeScript errors"
+      - "python3.11 -m pytest -q passes all tests"
+      - "GET /api/missions returns valid JSON array"
+      - "WebSocket /ws responds to ping with pong"
+      - "GET / still returns HTML (backwards compat confirmed)"
+    dependencies:
+      - "02"
+      - "05"
+      - "09"
+      - "10"
+      - "11"
+    tdd:
+      test_file: "tests/test_integration_ws.py"
+      test_command: "python3.11 -m pytest tests/ -q"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/README.md"
+      - "tests/test_integration_ws.py"

@@ -1,0 +1,200 @@
+mission:
+  name: "Vector Memory Upgrade"
+  goal: |
+    Replace the current flat-JSON memory system in agentforce/memory/memory.py with a
+    vector-backed store using LanceDB (already envisioned in the code comments) and
+    fastembed for lightweight ONNX embeddings — no PyTorch required.
+    The new VectorMemory class must maintain full API compatibility with the existing
+    Memory class while adding semantic similarity retrieval via agent_context().
+  definition_of_done:
+    - "agentforce/memory/vector_memory.py exists with VectorMemory class"
+    - "VectorMemory has global_set/get/dump, project_set/get/dump, task_set/get/dump, task_clear, agent_context"
+    - "agent_context() performs semantic top-K retrieval instead of dumping all entries"
+    - "agentforce/memory/__init__.py exports VectorMemory alongside Memory"
+    - "pyproject.toml updated with lancedb and fastembed as optional[vector] deps"
+    - "All existing memory tests still pass (tests/memory/test_memory.py)"
+    - "New tests cover VectorMemory set/get, semantic retrieval, and persistence"
+    - "BDD feature file covers the semantic retrieval behaviour"
+    - "benchmark.py script shows retrieval time for both backends"
+  caps:
+    max_concurrent_workers: 1
+    max_retries_per_task: 3
+    max_retries_global: 9
+    max_wall_time_minutes: 60
+    max_human_interventions: 3
+  working_dir: "/Users/rent/Projects/agentforce"
+
+tasks:
+  - id: "01"
+    title: "Add dependencies and run baseline benchmark"
+    description: |
+      In /Users/rent/Projects/agentforce:
+
+      1. Add to pyproject.toml under [project.optional-dependencies]:
+           vector = ["lancedb>=0.6", "fastembed>=0.2"]
+         (keep existing deps untouched)
+
+      2. Install the new deps:
+           pip3 install lancedb fastembed
+
+      3. Create missions/benchmark_memory.py that:
+         - Inserts 200 entries into the existing Memory backend (flat JSON)
+         - Inserts 200 entries into a VectorMemory stub (just lancedb table, no embeddings yet)
+         - Times both on 50 random key lookups
+         - Prints a comparison table to stdout
+         - The VectorMemory stub uses a `lancedb.connect(tmp_dir)` table with columns:
+           key (str), value (str), category (str), source (str), layer (str), vector (fixed-size list of zeros for now)
+
+      4. Run the benchmark and capture output.
+
+      The benchmark script must run to completion without errors.
+    acceptance_criteria:
+      - "pyproject.toml has vector optional-dependencies with lancedb and fastembed"
+      - "missions/benchmark_memory.py exists and runs without errors"
+      - "Benchmark script prints timing for both backends"
+      - "lancedb and fastembed import without errors"
+    tdd:
+      test_file: "tests/test_benchmark.py"
+      test_command: "python3 missions/benchmark_memory.py"
+      tests_must_pass: true
+    output_artifacts:
+      - "pyproject.toml (updated)"
+      - "missions/benchmark_memory.py"
+
+  - id: "02"
+    title: "Implement VectorMemory core storage"
+    description: |
+      In /Users/rent/Projects/agentforce, create agentforce/memory/vector_memory.py.
+
+      The VectorMemory class must:
+      - Accept base_dir (Path) in __init__, same as Memory
+      - Use lancedb.connect(base_dir / "lancedb") as the database
+      - Use a single table "memories" with schema:
+          key: str, value: str, category: str, source: str, layer: str,
+          created_at: str, updated_at: str,
+          vector: fixed-size list[float32] of dimension 384
+      - Use fastembed.TextEmbedding(model_name="BAAI/bge-small-en-v1.5") for embeddings
+        (lazy-init the embedder only when first needed to avoid slow startup)
+      - layer column encodes: "global", "project:<id>", "task:<id>"
+
+      Implement ALL of the following methods matching Memory's exact signature:
+        global_set(key, value, category="general")
+        global_get(key) -> str | None
+        global_dump() -> str
+        project_set(project_id, key, value, category="general")
+        project_get(project_id, key) -> str | None
+        project_dump(project_id) -> str
+        task_set(task_id, key, value, category="general")
+        task_get(task_id, key) -> str | None
+        task_dump(task_id) -> str
+        task_clear(task_id)
+        agent_context(project_id, task_id=None) -> str   [full dump, semantic search in task-03]
+        clear_project(project_id)
+
+      For upsert semantics: if a record with the same (key, layer) exists, update it;
+      otherwise insert. Use lancedb's merge_insert or delete+insert pattern.
+
+      The existing Memory class in memory.py must remain untouched.
+    acceptance_criteria:
+      - "agentforce/memory/vector_memory.py exists with VectorMemory class"
+      - "VectorMemory can set and get values in all three layers (global, project, task)"
+      - "task_clear() removes all entries for a task layer"
+      - "Upsert works: setting the same key twice updates the value"
+      - "All layer data is persisted to disk (survives VectorMemory reinitialisation)"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/memory/test_vector_memory.py"
+      test_command: "pytest tests/memory/test_vector_memory.py -v"
+      tests_must_pass: true
+      coverage_threshold: 80
+    output_artifacts:
+      - "agentforce/memory/vector_memory.py"
+      - "tests/memory/test_vector_memory.py"
+
+  - id: "03"
+    title: "Semantic agent_context() with top-K retrieval"
+    description: |
+      In /Users/rent/Projects/agentforce, upgrade VectorMemory.agent_context() to
+      perform semantic similarity search instead of dumping all entries.
+
+      New signature:
+        agent_context(project_id, task_id=None, query=None, top_k=8) -> str
+
+      Behaviour:
+      - If query is None or embedding fails: fall back to full dump (same as current Memory)
+      - If query is provided:
+          1. Embed the query string using fastembed
+          2. Search the lancedb "memories" table with a vector similarity query
+             filtered to layers: "global", "project:<project_id>", and optionally "task:<task_id>"
+          3. Return the top_k most similar entries
+          4. Format output same as existing dump format:
+             [category] key: value
+             with section headers per layer
+
+      The existing Memory.agent_context() signature is agent_context(project_id, task_id=None)
+      — adding query=None, top_k=8 is backward compatible.
+
+      Also update agentforce/memory/__init__.py to export VectorMemory:
+        from .memory import Memory, MemoryEntry
+        from .vector_memory import VectorMemory
+        __all__ = ["Memory", "MemoryEntry", "VectorMemory"]
+    acceptance_criteria:
+      - "agent_context(project_id, query='some task context') returns relevant entries"
+      - "Semantic retrieval returns fewer entries than full dump when top_k < total entries"
+      - "agent_context without query param still works (backward compatible)"
+      - "agentforce/memory/__init__.py exports VectorMemory"
+      - "Existing tests/memory/test_memory.py still passes (Memory class untouched)"
+    dependencies:
+      - "02"
+    tdd:
+      test_file: "tests/memory/test_vector_memory.py"
+      test_command: "pytest tests/memory/test_vector_memory.py tests/memory/test_memory.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/memory/vector_memory.py (updated)"
+      - "agentforce/memory/__init__.py (updated)"
+
+  - id: "04"
+    title: "BDD scenarios and updated benchmark"
+    description: |
+      In /Users/rent/Projects/agentforce:
+
+      1. Create tests/features/vector_memory.feature with these scenarios:
+
+         Feature: Vector Memory semantic retrieval
+           Scenario: Storing and retrieving a global memory entry
+           Scenario: Semantic search returns relevant entries
+           Scenario: Task memory is cleared after task completion
+           Scenario: Backward-compatible agent_context without query
+
+      2. Create tests/features/test_vector_memory_bdd.py with pytest-bdd steps.
+         Steps should create a VectorMemory in a tmp_path, insert entries,
+         call agent_context(), and assert on the returned string.
+         For semantic search: insert 10 entries on diverse topics, query for
+         "authentication security tokens", expect the auth-related entries to appear.
+
+      3. Update missions/benchmark_memory.py to:
+         - Now use real fastembed embeddings in VectorMemory (not zeros)
+         - Benchmark: 200 inserts + 50 semantic queries (VectorMemory with query=)
+           vs 200 inserts + 50 exact lookups (flat Memory)
+         - Print final table with: backend, insert_time_ms, query_time_ms, query_type
+
+      4. Run: pytest tests/features/test_vector_memory_bdd.py -v
+         Run: python3 missions/benchmark_memory.py
+         Both must complete without errors.
+    acceptance_criteria:
+      - "tests/features/vector_memory.feature exists with 4 BDD scenarios"
+      - "tests/features/test_vector_memory_bdd.py exists and all 4 scenarios pass"
+      - "Updated benchmark script runs and prints comparison table"
+      - "Full test suite passes: pytest tests/ -v"
+    dependencies:
+      - "03"
+    tdd:
+      test_file: "tests/features/test_vector_memory_bdd.py"
+      test_command: "pytest tests/features/test_vector_memory_bdd.py tests/memory/ -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "tests/features/vector_memory.feature"
+      - "tests/features/test_vector_memory_bdd.py"
+      - "missions/benchmark_memory.py (updated)"
