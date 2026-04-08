@@ -100,16 +100,24 @@ def _parse_reviewer_output(output: str) -> dict:
     """Extract JSON from reviewer output.
 
     Scans from the *end* of the output so that tool-call results containing
-    JSON (e.g. package.json file contents) don't swallow the final verdict.
+    JSON (e.g. package.json file contents) don't mask the final verdict.
+    Uses raw_decode so trailing non-JSON lines (e.g. codex's
+    '── turn complete ...' footer) don't break parsing.
     """
+    _decoder = json.JSONDecoder()
     lines = output.split("\n")
 
-    # Walk backwards: find the last line that opens a JSON object and try to
-    # parse from that line to the end of the output.
+    # Walk backwards: find the last line that opens a JSON object, then use
+    # raw_decode from that position — it parses one JSON value and ignores
+    # everything after it, so trailing lines don't cause a parse failure.
     for i in range(len(lines) - 1, -1, -1):
         if lines[i].strip().startswith("{"):
+            candidate = "\n".join(lines[i:])
+            brace_pos = candidate.index("{")
             try:
-                return json.loads("\n".join(lines[i:]))
+                data, _ = _decoder.raw_decode(candidate, brace_pos)
+                if isinstance(data, dict) and "approved" in data:
+                    return data
             except json.JSONDecodeError:
                 pass
 
@@ -117,7 +125,9 @@ def _parse_reviewer_output(output: str) -> dict:
     if "```json" in output:
         try:
             block = output.rsplit("```json", 1)[1].split("```", 1)[0].strip()
-            return json.loads(block)
+            data = json.loads(block)
+            if isinstance(data, dict) and "approved" in data:
+                return data
         except (json.JSONDecodeError, IndexError):
             pass
 
