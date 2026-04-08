@@ -76,7 +76,7 @@ class TaskState:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "last_updated": self.last_updated,
-        }.items() if v or v == 0 or v is False}
+        }.items() if v or v == 0 or v is False or k == "blocking_issues"}
 
     @classmethod
     def from_dict(cls, d: dict) -> TaskState:

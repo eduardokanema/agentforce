@@ -431,9 +431,9 @@ def run_autonomous(
                     _submit(action)
                 elif hasattr(action, "message"):  # HumanIntervention
                     print(f"  ⚠ Human intervention [{action.task_id}]: {getattr(action, 'message', '')[:120]}")
-                    print(f"    Auto-resolving.")
+                    print(f"    Auto-resolving with reviewer context.")
                     engine.apply_human_resolution(
-                        action.task_id, "Auto-resolved: continuing with current implementation."
+                        action.task_id, getattr(action, "message", "Fix the blocking issues listed above.")
                     )
                     engine._save()
 

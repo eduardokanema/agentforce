@@ -158,19 +158,40 @@ class TestReviewerLifecycle:
         assert ts.retries == 1
         assert "bad code quality" in ts.review_feedback.lower()
 
-    def test_blocking_issues_flag_human(self, tmp_path):
+    def test_blocking_issues_retry_before_human(self, tmp_path):
+        # Blocking issues should trigger a retry so the worker can fix them,
+        # not immediately escalate to human intervention.
         engine = make_engine(tmp_path)
         engine.tick()
         engine.apply_worker_result("01", True, "Done")
-        
+
         engine.tick()
         engine.apply_reviewer_result(
-            "01", False, "Spec is ambiguous", score=3,
-            blocking_issues=["Requirement contradicts API spec"]
+            "01", False, "Missing subscription call", score=3,
+            blocking_issues=["wsClient.subscribe() never called"]
         )
-        
+
+        ts = engine.state.get_task("01")
+        assert ts.status == "retry"
+        assert ts.blocking_issues == ["wsClient.subscribe() never called"]
+        assert not ts.needs_human_attention()
+
+    def test_blocking_issues_escalate_after_retries_exhausted(self, tmp_path):
+        # After retries are exhausted, blocking issues escalate to human.
+        engine = make_engine(tmp_path)
+        engine.tick()
+        engine.apply_worker_result("01", True, "Done")
+
+        # max_retries=2, so two rejections exhaust retries
+        for _ in range(2):
+            engine.tick()
+            engine.apply_reviewer_result(
+                "01", False, "Still broken", score=3, blocking_issues=["Missing subscribe"]
+            )
+
         ts = engine.state.get_task("01")
         assert ts.needs_human_attention()
+        assert "Missing subscribe" in ts.human_intervention_message
 
 
 class TestDependencyOrdering:
