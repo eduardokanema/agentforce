@@ -15,10 +15,15 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-bdd>=7.0",
 ]
 build = [
     "build>=1.2",
     "pyinstaller>=6.0",
+]
+vector = [
+    "lancedb>=0.6",
+    "fastembed>=0.2",
 ]
 
 [project.scripts]

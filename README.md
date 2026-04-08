@@ -118,6 +118,7 @@ Or drive manually tick-by-tick using the engine API.
 | `mission fail <id> <task>` | Mark a task as permanently failed |
 | `mission kill <id>` | Stop a mission |
 | `mission metrics` | Show aggregated telemetry across missions |
+| `mission serve [--port PORT]` | Start the web dashboard (default: http://localhost:8080) |
 
 ## Architecture
 
