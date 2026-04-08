@@ -1,6 +1,7 @@
-"""codex connector — runs prompts via the OpenAI Codex CLI (`codex exec`)."""
+"""codex connector — runs prompts via the OpenAI Codex CLI (`codex exec --json`)."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -15,6 +16,44 @@ def available() -> bool:
         return False
 
 
+def _format_event(event: dict) -> str | None:
+    """Convert a codex JSONL event into a human-readable stream line."""
+    t = event.get("type", "")
+
+    if t == "item.started":
+        item = event.get("item", {})
+        if item.get("type") == "command_execution":
+            return f"▶ {item.get('command', '')}"
+
+    elif t == "item.completed":
+        item = event.get("item", {})
+        kind = item.get("type", "")
+        if kind == "agent_message":
+            return item.get("text", "")
+        if kind == "command_execution":
+            cmd = item.get("command", "")
+            code = item.get("exit_code")
+            out = item.get("aggregated_output", "").strip()
+            status = "✓" if code == 0 else f"✗ [exit={code}]"
+            parts = [f"{status} {cmd}"]
+            if out:
+                # Limit noisy output to avoid flooding the stream
+                lines = out.splitlines()
+                parts.extend(f"  {l}" for l in lines[:30])
+                if len(lines) > 30:
+                    parts.append(f"  … ({len(lines) - 30} more lines)")
+            return "\n".join(parts)
+
+    elif t == "turn.completed":
+        usage = event.get("usage", {})
+        inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+        cached = usage.get("cached_input_tokens", 0)
+        return f"── turn complete  in={inp} (cached={cached}) out={out} ──"
+
+    return None
+
+
 def run(
     prompt: str,
     workdir: str,
@@ -23,22 +62,32 @@ def run(
     stream_path: Path = None,
     variant: str = None,
     session_id: str = None,
-) -> tuple[bool, str, str, None]:
-    """Run codex non-interactively via `codex exec`.
+) -> tuple[bool, str, str, str | None]:
+    """Run codex non-interactively via `codex exec --json`.
 
-    Uses --dangerously-bypass-approvals-and-sandbox for fully automated
-    execution and -C to set the agent's working root.
+    --json makes codex emit JSONL events to stdout instead of a TUI,
+    enabling real-time streaming. The thread_id from the first event is
+    returned as session_id so retries can resume the same session.
 
     Returns:
-        (success, output, error, None)  — session_id always None
+        (success, output, error, thread_id | None)
     """
-    cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-C", workdir]
+    cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json", "-C", workdir]
     if model:
         cmd += ["-m", model]
-    cmd.append(prompt)
+    if session_id:
+        cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json",
+               "-C", workdir, "resume", session_id]
+        if model:
+            cmd += ["-m", model]
+        cmd += [prompt]
+    else:
+        cmd.append(prompt)
 
-    output_parts: list[str] = []
+    text_parts: list[str] = []
+    returned_thread_id: str | None = None
     timed_out = False
+
     try:
         proc = subprocess.Popen(
             cmd,
@@ -58,11 +107,27 @@ def run(
         timer.start()
         sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
         try:
-            for line in proc.stdout:
-                output_parts.append(line)
-                if sf:
-                    sf.write(line)
-                    sf.flush()
+            for raw in proc.stdout:
+                raw_stripped = raw.strip()
+                if not raw_stripped:
+                    continue
+                try:
+                    event = json.loads(raw_stripped)
+                    # Capture thread_id from the first event
+                    if returned_thread_id is None:
+                        returned_thread_id = event.get("thread_id")
+                    formatted = _format_event(event)
+                    if formatted:
+                        text_parts.append(formatted)
+                        if sf:
+                            sf.write(formatted + "\n")
+                            sf.flush()
+                except (json.JSONDecodeError, AttributeError):
+                    # Non-JSON line (banner, error) — pass through as-is
+                    text_parts.append(raw_stripped)
+                    if sf:
+                        sf.write(raw_stripped + "\n")
+                        sf.flush()
             proc.wait()
         finally:
             timer.cancel()
@@ -70,9 +135,11 @@ def run(
                 sf.close()
 
         if timed_out:
-            return False, "".join(output_parts).strip(), "codex timed out", None
+            return False, "\n".join(text_parts).strip(), "codex timed out", returned_thread_id
 
-        error = proc.stderr.read()
-        return proc.returncode == 0, "".join(output_parts).strip(), error.strip(), None
+        error = proc.stderr.read().strip()
+        success = proc.returncode == 0
+        return success, "\n".join(text_parts).strip(), error, returned_thread_id
+
     except Exception as e:
-        return False, "".join(output_parts).strip(), str(e), None
+        return False, "\n".join(text_parts).strip(), str(e), returned_thread_id

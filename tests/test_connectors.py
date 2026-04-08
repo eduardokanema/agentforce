@@ -381,9 +381,13 @@ class TestCodexConnector:
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("codex", 10)):
             assert cx_mod.available() is False
 
-    def test_run_returns_four_tuple_with_none_session(self, tmp_path):
+    def test_run_returns_four_tuple(self, tmp_path):
+        events = [
+            '{"type":"thread.started","thread_id":"thread_abc"}\n',
+            '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"done"}}\n',
+        ]
         mock_proc = MagicMock()
-        mock_proc.stdout = ["task complete\n"]
+        mock_proc.stdout = events
         mock_proc.returncode = 0
         mock_proc.stderr.read.return_value = ""
 
@@ -393,7 +397,20 @@ class TestCodexConnector:
         assert len(result) == 4
         success, output, error, session_id = result
         assert success is True
-        assert session_id is None
+        assert "done" in output
+        assert session_id == "thread_abc"
+
+    def test_run_uses_json_flag(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("x", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--json" in cmd
 
     def test_run_uses_exec_subcommand(self, tmp_path):
         mock_proc = MagicMock()
@@ -458,8 +475,11 @@ class TestCodexConnector:
         assert success is False
 
     def test_run_streams_to_file(self, tmp_path):
+        events = [
+            '{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"agent output line"}}\n',
+        ]
         mock_proc = MagicMock()
-        mock_proc.stdout = ["agent output line\n"]
+        mock_proc.stdout = events
         mock_proc.returncode = 0
         mock_proc.stderr.read.return_value = ""
 
@@ -469,6 +489,24 @@ class TestCodexConnector:
 
         assert log_file.exists()
         assert "agent output line" in log_file.read_text()
+
+    def test_run_streams_command_execution_to_file(self, tmp_path):
+        events = [
+            '{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"ls -la"}}\n',
+            '{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"ls -la","aggregated_output":"file.txt\\n","exit_code":0,"status":"completed"}}\n',
+        ]
+        mock_proc = MagicMock()
+        mock_proc.stdout = events
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        log_file = tmp_path / "stream.log"
+        with patch("subprocess.Popen", return_value=mock_proc):
+            cx_mod.run("x", str(tmp_path), stream_path=log_file)
+
+        content = log_file.read_text()
+        assert "▶ ls -la" in content
+        assert "✓" in content
 
     def test_run_timeout_returns_failure(self, tmp_path):
         import threading
