@@ -161,6 +161,8 @@ def run_autonomous(
 
     resolved_agent = agent if agent != "auto" else _detect_agent()
 
+    from agentforce.core.spec import TaskStatus
+
     memory = Memory(Path.home() / ".agentforce" / "memory")
     engine = MissionEngine.load(state_file, memory)
     eff_model = model or _DEFAULT_MODEL
@@ -169,6 +171,28 @@ def run_autonomous(
     engine.state.worker_agent = resolved_agent
     engine.state.worker_model = eff_model
     engine.state.caps_hit = {}
+
+    # On every resume: reset tasks that were interrupted or exhausted so they
+    # can make progress again. IN_PROGRESS tasks belong to a dead process.
+    # FAILED tasks get a fresh attempt (retries reset) so re-running the CLI is
+    # enough to retry without manual intervention.
+    _reset = False
+    for ts in engine.state.task_states.values():
+        if ts.status == TaskStatus.IN_PROGRESS:
+            ts.status = TaskStatus.RETRY if ts.retries > 0 else TaskStatus.PENDING
+            ts.bump()
+            engine.state.log_event("task_reset", ts.task_id, "Interrupted IN_PROGRESS task reset on resume")
+            _reset = True
+        elif ts.status == TaskStatus.FAILED and not ts.human_intervention_needed:
+            ts.retries = 0
+            ts.status = TaskStatus.PENDING
+            ts.error_message = ""
+            ts.bump()
+            engine.state.log_event("task_reset", ts.task_id, "FAILED task reset for re-run")
+            _reset = True
+    if _reset:
+        engine.state.total_retries = 0
+
     engine._save()
     tele_store = TelemetryStore()
     start = datetime.now(timezone.utc)

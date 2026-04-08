@@ -35,7 +35,7 @@ class TaskState:
 
     def can_review(self) -> bool:
         s = self.status.value if hasattr(self.status, 'value') else self.status
-        return s == TaskStatus.COMPLETED.value and bool(self.worker_output)
+        return s == TaskStatus.COMPLETED.value
 
     def needs_human_attention(self) -> bool:
         s = self.status.value if hasattr(self.status, 'value') else self.status
