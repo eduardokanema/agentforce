@@ -118,6 +118,8 @@ class MissionState:
     
     # Derived from spec but we store snapshot
     working_dir: str = ""
+    worker_agent: str = ""   # agent CLI used: "claude", "opencode"
+    worker_model: str = ""   # model ID passed to the agent
     daemon_pid: Optional[int] = None
     daemon_started_at: Optional[str] = None
 
@@ -248,6 +250,8 @@ class MissionState:
             "total_human_interventions": self.total_human_interventions,
             "caps_hit": self.caps_hit,
             "working_dir": self.working_dir,
+            "worker_agent": self.worker_agent,
+            "worker_model": self.worker_model,
         }
 
     @classmethod
@@ -266,6 +270,8 @@ class MissionState:
             total_human_interventions=d.get("total_human_interventions", 0),
             caps_hit=d.get("caps_hit", {}),
             working_dir=d.get("working_dir", ""),
+            worker_agent=d.get("worker_agent", ""),
+            worker_model=d.get("worker_model", ""),
         )
 
     def save(self, path: Path | str):
