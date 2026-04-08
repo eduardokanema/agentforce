@@ -395,6 +395,44 @@ class TestCodexConnector:
         assert success is True
         assert session_id is None
 
+    def test_run_uses_exec_subcommand(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("x", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "codex"
+        assert cmd[1] == "exec"
+
+    def test_run_uses_dangerously_bypass(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("x", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+    def test_run_passes_workdir_with_C_flag(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cx_mod.run("x", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert "-C" in cmd
+        assert str(tmp_path) in cmd
+
     def test_run_passes_model_flag(self, tmp_path):
         mock_proc = MagicMock()
         mock_proc.stdout = []
@@ -405,21 +443,8 @@ class TestCodexConnector:
             cx_mod.run("x", str(tmp_path), model="o4-mini")
 
         cmd = mock_popen.call_args[0][0]
-        assert "--model" in cmd
+        assert "-m" in cmd
         assert "o4-mini" in cmd
-
-    def test_run_uses_full_auto_approval(self, tmp_path):
-        mock_proc = MagicMock()
-        mock_proc.stdout = []
-        mock_proc.returncode = 0
-        mock_proc.stderr.read.return_value = ""
-
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            cx_mod.run("x", str(tmp_path))
-
-        cmd = mock_popen.call_args[0][0]
-        assert "--approval-mode" in cmd
-        assert "full-auto" in cmd
 
     def test_run_failure_on_nonzero_returncode(self, tmp_path):
         mock_proc = MagicMock()
