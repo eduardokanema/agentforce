@@ -54,6 +54,12 @@ def _format_event(event: dict) -> str | None:
     return None
 
 
+def _append_prompt_arg(cmd: list[str], prompt: str) -> list[str]:
+    """Feed prompts via stdin to avoid CLI parsing edge cases."""
+    cmd.append("-")
+    return cmd
+
+
 def run(
     prompt: str,
     workdir: str,
@@ -72,17 +78,25 @@ def run(
     Returns:
         (success, output, error, thread_id | None)
     """
-    cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json", "-C", workdir]
-    if model:
-        cmd += ["-m", model]
     if session_id:
-        cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json",
-               "-C", workdir, "resume", session_id]
+        cmd = [
+            "codex",
+            "exec",
+            "-C",
+            workdir,
+            "resume",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+        ]
         if model:
             cmd += ["-m", model]
-        cmd += [prompt]
+        cmd.append(session_id)
+        _append_prompt_arg(cmd, prompt)
     else:
-        cmd.append(prompt)
+        cmd = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json", "-C", workdir]
+        if model:
+            cmd += ["-m", model]
+        _append_prompt_arg(cmd, prompt)
 
     text_parts: list[str] = []
     returned_thread_id: str | None = None
@@ -91,12 +105,17 @@ def run(
     try:
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             cwd=workdir,
             env=os.environ.copy(),
         )
+
+        if proc.stdin is not None:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
 
         def _kill():
             nonlocal timed_out
