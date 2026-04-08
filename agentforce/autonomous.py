@@ -16,11 +16,8 @@ Usage:
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
-import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
@@ -49,142 +46,32 @@ def _ensure_pkg():
     raise SystemExit("Cannot find agentforce package")
 
 
-def _opencode_available() -> bool:
-    """Check if opencode CLI is installed and functional."""
-    try:
-        r = subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=10)
-        return r.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-def _claude_available() -> bool:
-    """Check if the claude CLI is installed."""
-    try:
-        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
-        return r.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
 def _detect_agent() -> str:
-    """Auto-detect which agent CLI to use: prefer claude, fall back to opencode."""
-    if _claude_available():
-        return "claude"
-    if _opencode_available():
+    """Auto-detect which agent to use: opencode only."""
+    from agentforce.connectors import opencode as _oc
+    if _oc.available():
         return "opencode"
-    raise SystemExit("No agent CLI found. Install 'claude' (Claude Code) or 'opencode'.")
+    raise SystemExit("No agent CLI found. Install 'opencode'.")
 
 
-def _run_claude(prompt: str, workdir: str, timeout: int = 300, model: str = None,
-                stream_path: Path = None) -> tuple[bool, str, str]:
-    """Run claude CLI non-interactively, streaming output to stream_path line-by-line."""
-    cmd = ["claude", "--dangerously-skip-permissions", "-p", "--output-format", "text"]
-    if model:
-        cmd += ["--model", model]
-    output_parts: list[str] = []
-    timed_out = False
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=workdir,
-            env=os.environ.copy(),
-        )
-
-        def _kill():
-            nonlocal timed_out
-            timed_out = True
-            proc.kill()
-
-        timer = threading.Timer(timeout, _kill)
-        timer.start()
-        sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
-        try:
-            proc.stdin.write(prompt)
-            proc.stdin.close()
-            for line in proc.stdout:
-                output_parts.append(line)
-                if sf:
-                    sf.write(line)
-                    sf.flush()
-            proc.wait()
-        finally:
-            timer.cancel()
-            if sf:
-                sf.close()
-
-        if timed_out:
-            return False, "".join(output_parts).strip(), "claude timed out"
-        stderr = proc.stderr.read()
-        return proc.returncode == 0, "".join(output_parts).strip(), stderr.strip()
-    except Exception as e:
-        return False, "".join(output_parts).strip(), str(e)
-
-
-def _run_opencode_cmd(prompt: str, workdir: str, timeout: int = 300, model: str = None,
-                      stream_path: Path = None) -> tuple[bool, str, str]:
-    """Run opencode CLI with a prompt, streaming output to stream_path line-by-line."""
-    cmd = ["opencode", "run", prompt]
-    if model:
-        cmd += ["--model", model]
-    output_parts: list[str] = []
-    timed_out = False
-    env = os.environ.copy()
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=workdir,
-            env=env,
-        )
-
-        def _kill():
-            nonlocal timed_out
-            timed_out = True
-            proc.kill()
-
-        timer = threading.Timer(timeout, _kill)
-        timer.start()
-        sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
-        try:
-            for line in proc.stdout:
-                output_parts.append(line)
-                if sf:
-                    sf.write(line)
-                    sf.flush()
-            proc.wait()
-        finally:
-            timer.cancel()
-            if sf:
-                sf.close()
-
-        if timed_out:
-            return False, "".join(output_parts).strip(), "opencode timed out"
-        error = proc.stderr.read().strip()
-        output = "".join(output_parts).strip()
-        success = proc.returncode == 0 and "error" not in (error or "").lower()
-        return success, output, error
-    except Exception as e:
-        return False, "".join(output_parts).strip(), str(e)
-
-
-def _run_agent(prompt: str, workdir: str, timeout: int = 300,
-               agent: str = "auto", model: str = None,
-               stream_path: Path = None) -> tuple[bool, str, str]:
-    """Dispatch to the selected agent CLI."""
+def _run_agent(
+    prompt: str,
+    workdir: str,
+    timeout: int = 300,
+    agent: str = "auto",
+    model: str = None,
+    stream_path: Path = None,
+    variant: str = None,
+    session_id: str = None,
+) -> tuple[bool, str, str, str | None]:
+    """Dispatch to the selected connector. Returns (success, output, error, session_id)."""
+    from agentforce.connectors import CONNECTORS
     if agent == "auto":
         agent = _detect_agent()
-    if agent == "claude":
-        return _run_claude(prompt, workdir, timeout, model, stream_path)
-    if agent == "opencode":
-        return _run_opencode_cmd(prompt, workdir, timeout, model, stream_path)
-    raise ValueError(f"Unknown agent: {agent!r}. Use 'claude' or 'opencode'.")
+    connector = CONNECTORS.get(agent)
+    if connector is None:
+        raise ValueError(f"Unknown agent: {agent!r}. Available: {list(CONNECTORS)}")
+    return connector(prompt, workdir, timeout, model, stream_path, variant, session_id)
 
 
 def _parse_reviewer_output(output: str) -> dict:
@@ -213,11 +100,16 @@ def _parse_reviewer_output(output: str) -> dict:
     return {"approved": False, "feedback": "Could not parse reviewer output", "score": 0}
 
 
+_DEFAULT_MODEL = "opencode/nemotron-3-super-free"
+_DEFAULT_VARIANT = "high"
+
+
 def run_autonomous(
     mission_id: str,
     workdir: str = None,
     agent: str = "auto",
     model: str = None,
+    variant: str = None,
     pool_size: int = 8,
 ):
     """Run a mission autonomously with a parallel supervisor loop.
@@ -229,8 +121,9 @@ def run_autonomous(
     Args:
         mission_id: The mission ID to run.
         workdir:    Override the working directory from the mission spec.
-        agent:      ``"claude"`` (default/auto), ``"opencode"``, or ``"auto"``.
-        model:      Model string passed to the agent CLI.
+        agent:      ``"opencode"`` or ``"auto"`` (default).
+        model:      Model string passed to the agent CLI (default: opencode/nemotron-3-super-free).
+        variant:    Reasoning effort variant (default: high).
         pool_size:  Max concurrent agent threads (default 8). Actual task
                     parallelism is also governed by the mission's
                     ``max_concurrent_workers`` cap.
@@ -249,8 +142,11 @@ def run_autonomous(
 
     memory = Memory(Path.home() / ".agentforce" / "memory")
     engine = MissionEngine.load(state_file, memory)
+    eff_model = model or _DEFAULT_MODEL
+    eff_variant = variant or _DEFAULT_VARIANT
+
     engine.state.worker_agent = resolved_agent
-    engine.state.worker_model = model or ""
+    engine.state.worker_model = eff_model
     engine.state.caps_hit = {}
     engine._save()
     tele_store = TelemetryStore()
@@ -260,7 +156,7 @@ def run_autonomous(
     print(f"\n=== Autonomous Mission Runner ===")
     print(f"Mission : {engine.spec.name} [{engine.state.mission_id}]")
     print(f"Tasks   : {len(engine.spec.tasks)}")
-    print(f"Agent   : {resolved_agent}" + (f"  model={model}" if model else ""))
+    print(f"Agent   : {resolved_agent}  model={eff_model}  variant={eff_variant}")
     print(f"Workers : up to {engine.state.caps.max_concurrent_workers} concurrent  (thread pool: {eff_pool})")
     print(f"Workdir : {workdir or engine.state.working_dir}")
     print()
@@ -268,9 +164,10 @@ def run_autonomous(
     task_metrics: dict[str, TaskMetrics] = {}
     # in_flight maps "task_id.role" → (Future, action)
     in_flight: dict[str, tuple[Future, object]] = {}
+    # session_ids maps task_id → opencode session ID for caching across retries
+    session_ids: dict[str, str] = {}
 
     _wdir = workdir or engine.state.working_dir
-    _model = model
 
     def _submit(action) -> None:
         """Submit an action to the thread pool (non-blocking)."""
@@ -280,7 +177,10 @@ def run_autonomous(
         role = action.role
         tid = action.task_id
         timeout = getattr(action, "timeout", 300 if role == "worker" else 120)
-        effective_model = _model or getattr(action, "model", None)
+        effective_model = eff_model or getattr(action, "model", None)
+
+        # Reuse session for the same task across worker retries (enables caching)
+        session_id = session_ids.get(tid) if role == "worker" else None
 
         sp = _stream_path(engine.state.mission_id, tid)
         if role == "worker":
@@ -303,7 +203,10 @@ def run_autonomous(
             task_metrics[tid].reviewer_started = datetime.now(timezone.utc).isoformat()
             task_metrics[tid].review_attempts += 1
 
-        fut = executor.submit(_run_agent, action.context, _wdir, timeout, resolved_agent, effective_model, sp)
+        fut = executor.submit(
+            _run_agent, action.context, _wdir, timeout,
+            resolved_agent, effective_model, sp, eff_variant, session_id,
+        )
         in_flight[key] = (fut, action)
         print(f"  ↑ [{role}] task {tid} dispatched")
 
@@ -316,9 +219,13 @@ def run_autonomous(
             tid = action.task_id
 
             try:
-                success, output, error = fut.result()
+                success, output, error, returned_sid = fut.result()
             except Exception as exc:
-                success, output, error = False, "", str(exc)
+                success, output, error, returned_sid = False, "", str(exc), None
+
+            # Store session ID for reuse across worker retries
+            if role == "worker" and returned_sid and tid not in session_ids:
+                session_ids[tid] = returned_sid
 
             if role == "worker":
                 now = datetime.now(timezone.utc).isoformat()
@@ -470,17 +377,18 @@ if __name__ == "__main__":
     p.add_argument(
         "--agent",
         default="auto",
-        choices=["auto", "claude", "opencode"],
-        help="Agent CLI to use (default: auto — claude first, opencode fallback)",
+        choices=["auto", "opencode"],
+        help="Agent CLI to use (default: auto — opencode)",
     )
     p.add_argument(
         "--model",
         default=None,
-        help=(
-            "Model to pass to the agent CLI "
-            "(e.g. claude-sonnet-4-6, claude-opus-4-6, "
-            "cloudflare-ai-gateway/anthropic/claude-sonnet-4-6)"
-        ),
+        help=f"Model to pass to the agent CLI (default: {_DEFAULT_MODEL})",
+    )
+    p.add_argument(
+        "--variant",
+        default=None,
+        help=f"Reasoning effort variant (default: {_DEFAULT_VARIANT})",
     )
     p.add_argument(
         "--pool-size",
@@ -492,5 +400,8 @@ if __name__ == "__main__":
     )
     a = p.parse_args()
 
-    success = run_autonomous(a.mission_id, a.workdir, agent=a.agent, model=a.model, pool_size=a.pool_size)
+    success = run_autonomous(
+        a.mission_id, a.workdir,
+        agent=a.agent, model=a.model, variant=a.variant, pool_size=a.pool_size,
+    )
     sys.exit(0 if success else 1)

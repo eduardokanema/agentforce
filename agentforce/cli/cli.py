@@ -100,8 +100,8 @@ def cmd_start(args):
     print(f"  Caps: workers={spec.caps.max_concurrent_workers}, retries={spec.caps.max_retries_per_task}/task, wall={spec.caps.max_wall_time_minutes}m")
     print(f"\nTo run autonomously:")
     print(f"  python3 -m agentforce.autonomous {mid}")
-    print(f"  python3 -m agentforce.autonomous {mid} --agent claude --model claude-sonnet-4-6")
     print(f"  python3 -m agentforce.autonomous {mid} --agent opencode --model <model-id>")
+    print(f"  python3 -m agentforce.autonomous {mid} --agent claude --model claude-sonnet-4-6")
 
 
 def cmd_status(args):
