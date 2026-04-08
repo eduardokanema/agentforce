@@ -243,6 +243,31 @@ def cmd_metrics(args):
         print(f"{m['mission_id']:<10} {m['mission_name']:<30} {m['total_tasks']:<6} {dur:<10} {score:<6} {m.get('total_retries', 0):<8} {m.get('approved_on_first_try', 0)}/{m['total_tasks']}")
 
 
+def cmd_pause(args):
+    """Pause a running mission (creates a pause sentinel file)."""
+    sf = _find_state(args.id)
+    if not sf:
+        print(f"No mission found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    from agentforce.autonomous import pause_mission
+    pause_mission(sf.stem)
+    print(f"Mission {sf.stem} paused. Run 'mission resume {args.id}' to continue.")
+
+
+def cmd_resume(args):
+    """Resume a paused mission."""
+    sf = _find_state(args.id)
+    if not sf:
+        print(f"No mission found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    from agentforce.autonomous import resume_mission, is_paused
+    if not is_paused(sf.stem):
+        print(f"Mission {sf.stem} is not paused.")
+        return
+    resume_mission(sf.stem)
+    print(f"Mission {sf.stem} resumed.")
+
+
 def cmd_serve(args):
     """Start the mission dashboard HTTP server."""
     from agentforce.server import serve
@@ -264,6 +289,8 @@ def main():
     sub.add_parser("cat").add_argument("id")
     p = sub.add_parser("metrics"); p.add_argument("--mission", help="Show single mission metrics")
     p = sub.add_parser("serve", help="start mission dashboard web server"); p.add_argument("--port", type=int, default=8080, help="port to listen on (default: 8080)")
+    p = sub.add_parser("pause", help="pause a running mission"); p.add_argument("id")
+    p = sub.add_parser("resume", help="resume a paused mission"); p.add_argument("id")
 
     args = parser.parse_args()
     if not args.command:
@@ -273,7 +300,7 @@ def main():
     cmds = {"start": cmd_start, "status": cmd_status, "list": cmd_list,
             "resolve": cmd_resolve, "fail": cmd_fail, "report": cmd_report,
             "kill": cmd_kill, "cat": cmd_cat, "metrics": cmd_metrics,
-            "serve": cmd_serve}
+            "serve": cmd_serve, "pause": cmd_pause, "resume": cmd_resume}
     cmds[args.command](args)
 
 

@@ -24,6 +24,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _STREAMS_DIR = Path.home() / ".agentforce" / "streams"
+_STATE_DIR = Path.home() / ".agentforce" / "state"
+
+
+def _pause_file(mission_id: str) -> Path:
+    return _STATE_DIR / f"{mission_id}.pause"
+
+
+def is_paused(mission_id: str) -> bool:
+    return _pause_file(mission_id).exists()
+
+
+def pause_mission(mission_id: str) -> None:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _pause_file(mission_id).touch()
+
+
+def resume_mission(mission_id: str) -> None:
+    pf = _pause_file(mission_id)
+    if pf.exists():
+        pf.unlink()
 
 
 def _stream_path(mission_id: str, task_id: str) -> Path:
@@ -316,6 +336,13 @@ def run_autonomous(
             active = len(in_flight)
             if tick % 5 == 0 and active:
                 print(f"  [tick {tick}] {active} agent(s) running: {list(in_flight)}")
+
+            # Pause support: block here while pause file exists
+            if is_paused(engine.state.mission_id):
+                print(f"  ⏸  Mission paused. Remove pause file or run: mission resume {engine.state.mission_id}")
+                while is_paused(engine.state.mission_id):
+                    time.sleep(2)
+                print(f"  ▶  Mission resumed.")
 
             time.sleep(2)  # supervisor poll interval
 
