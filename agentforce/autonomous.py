@@ -119,7 +119,7 @@ def _parse_reviewer_output(output: str) -> dict:
             return json.loads(match.group(1))
         except json.JSONDecodeError:
             pass
-    return {"approved": False, "feedback": "Could not parse reviewer output", "score": 0}
+    raise ValueError("Could not parse reviewer output: no valid JSON found")
 
 
 _DEFAULT_MODEL = "opencode/nemotron-3-super-free"
@@ -282,7 +282,14 @@ def run_autonomous(
                         datetime.fromisoformat(now) - datetime.fromisoformat(tm.worker_started)
                     ).total_seconds()
                 print(f"  ↓ [worker] task {tid}  success={success}  output={len(output)}B")
-                if error and "timed out" not in error:
+                if error and "timed out" in error:
+                    print(f"    timed out — retrying without consuming a retry slot")
+                    ts = engine.state.get_task(tid)
+                    if ts:
+                        ts.status = TaskStatus.RETRY
+                    engine._save()
+                    continue
+                if error:
                     print(f"    error: {error[:200]}")
                 engine.apply_worker_result(tid, success, output, error)
                 engine._save()
@@ -296,8 +303,28 @@ def run_autonomous(
                         datetime.fromisoformat(now) - datetime.fromisoformat(tm.reviewer_started)
                     ).total_seconds()
 
+                if not success and error and "timed out" in error:
+                    print(f"  ↓ [reviewer] task {tid}  timed out — re-dispatching reviewer")
+                    ts = engine.state.get_task(tid)
+                    if ts:
+                        ts.status = TaskStatus.COMPLETED  # triggers reviewer re-dispatch
+                    engine._save()
+                    continue
+
                 if success and output:
-                    review = _parse_reviewer_output(output)
+                    try:
+                        review = _parse_reviewer_output(output)
+                    except ValueError as exc:
+                        msg = str(exc)
+                        print(f"  [CRITICAL] task {tid}: {msg}")
+                        print(f"    Reviewer produced unreadable output — marking task as permanently failed.")
+                        task_spec = engine._get_task_spec(tid)
+                        ts = engine.state.get_task(tid)
+                        if ts and task_spec:
+                            ts.retries = task_spec.max_retries  # exhaust retries
+                        engine.apply_reviewer_result(tid, False, msg, 0, [])
+                        engine._save()
+                        continue
                 else:
                     review = {"approved": False, "feedback": f"Reviewer error: {error}", "score": 0}
 

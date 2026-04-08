@@ -343,7 +343,7 @@ class MissionEngine:
             logger.info("Task review approved: %s", task_id)
 
             # Update project memory with lessons learned
-            if feedback and len(feedback) < 500:
+            if feedback:
                 self.memory.project_set(
                     self.state.mission_id,
                     f"task_{task_id}_outcome",
