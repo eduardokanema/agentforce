@@ -18,11 +18,40 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import subprocess
 import sys
+
+from agentforce.connectors import CONNECTORS
 import time
+from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
 from pathlib import Path
+
+_STREAMS_DIR = Path.home() / ".agentforce" / "streams"
+_STATE_DIR = Path.home() / ".agentforce" / "state"
+
+
+def _pause_file(mission_id: str) -> Path:
+    return _STATE_DIR / f"{mission_id}.pause"
+
+
+def is_paused(mission_id: str) -> bool:
+    return _pause_file(mission_id).exists()
+
+
+def pause_mission(mission_id: str) -> None:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _pause_file(mission_id).touch()
+
+
+def resume_mission(mission_id: str) -> None:
+    pf = _pause_file(mission_id)
+    if pf.exists():
+        pf.unlink()
+
+
+def _stream_path(mission_id: str, task_id: str) -> Path:
+    _STREAMS_DIR.mkdir(parents=True, exist_ok=True)
+    return _STREAMS_DIR / f"{mission_id}_{task_id}.log"
 
 
 def _ensure_pkg():
@@ -40,69 +69,143 @@ def _ensure_pkg():
     raise SystemExit("Cannot find agentforce package")
 
 
-def _opencode_available() -> bool:
-    """Check if opencode CLI is installed and configured."""
-    try:
-        r = subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=10)
-        return r.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+def _detect_agent() -> str:
+    """Auto-detect which agent to use: opencode only."""
+    from agentforce.connectors import opencode as _oc
+    if _oc.available():
+        return "opencode"
+    raise SystemExit("No agent CLI found. Install 'opencode'.")
 
 
-def _run_opencode(prompt: str, workdir: str, timeout: int = 300) -> tuple[bool, str, str]:
-    """Run opencode with a prompt and return (success, output, error)."""
-    cmd = ["opencode", "run", prompt]
-    env = os.environ.copy()
-    # Pass through API keys
-    for k in ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]:
-        if k in env:
-            cmd_env = {**env}
-            break
-    else:
-        cmd_env = env
-
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           cwd=workdir, env=cmd_env)
-        output = r.stdout.strip()
-        error = r.stderr.strip()
-        success = r.returncode == 0 and "error" not in (r.stderr or "").lower()
-        return success, output, error
-    except subprocess.TimeoutExpired:
-        return False, "", "opencode timed out"
-    except Exception as e:
-        return False, "", str(e)
+def _run_agent(
+    prompt: str,
+    workdir: str,
+    timeout: int = 300,
+    agent: str = "auto",
+    model: str = None,
+    stream_path: Path = None,
+    variant: str = None,
+    session_id: str = None,
+) -> tuple[bool, str, str, str | None]:
+    """Dispatch to the selected connector. Returns (success, output, error, session_id)."""
+    if agent == "auto":
+        agent = _detect_agent()
+    connector = CONNECTORS.get(agent)
+    if connector is None:
+        raise ValueError(f"Unknown agent: {agent!r}. Available: {list(CONNECTORS)}")
+    return connector(prompt, workdir, timeout, model, stream_path, variant, session_id)
 
 
 def _parse_reviewer_output(output: str) -> dict:
-    """Extract JSON from reviewer output."""
-    for line in output.split("\n"):
-        line = line.strip()
-        if line.startswith("{"):
+    """Extract JSON from reviewer output.
+
+    Scans from the *end* of the output so that tool-call results containing
+    JSON (e.g. package.json file contents) don't mask the final verdict.
+    Uses raw_decode so trailing non-JSON lines (e.g. codex's
+    '── turn complete ...' footer) don't break parsing.
+    """
+    _decoder = json.JSONDecoder()
+    lines = output.split("\n")
+
+    # Walk backwards: find the last line that opens a JSON object, then use
+    # raw_decode from that position — it parses one JSON value and ignores
+    # everything after it, so trailing lines don't cause a parse failure.
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip().startswith("{"):
+            candidate = "\n".join(lines[i:])
+            brace_pos = candidate.index("{")
             try:
-                return json.loads(line)
+                data, _ = _decoder.raw_decode(candidate, brace_pos)
+                if isinstance(data, dict) and "approved" in data:
+                    return data
             except json.JSONDecodeError:
                 pass
-        if line.startswith("```json"):
-            try:
-                block = output.split("```json", 1)[1].split("```", 1)[0].strip()
-                return json.loads(block)
-            except (json.JSONDecodeError, IndexError):
-                pass
-    # Fallback: try to find any JSON object
-    import re
-    match = re.search(r'(\{.*"approved".*\})', output, re.DOTALL)
-    if match:
+
+    # Try a ```json fenced block (last occurrence wins)
+    if "```json" in output:
         try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
+            block = output.rsplit("```json", 1)[1].split("```", 1)[0].strip()
+            data = json.loads(block)
+            if isinstance(data, dict) and "approved" in data:
+                return data
+        except (json.JSONDecodeError, IndexError):
             pass
-    return {"approved": False, "feedback": "Could not parse reviewer output", "score": 0}
+
+    raise ValueError("Could not parse reviewer output: no valid JSON found")
 
 
-def run_autonomous(mission_id: str, workdir: str = None):
-    """Run a mission entirely autonomously using opencode subprocesses."""
+_MIN_APPROVAL_SCORE = 8
 
+
+def _enforce_review_thresholds(review: dict) -> dict:
+    """Apply mandatory approval thresholds to a parsed reviewer dict.
+
+    Returns a new dict with ``approved`` forced to False (and ``feedback`` /
+    ``blocking_issues`` updated) when:
+    - score < _MIN_APPROVAL_SCORE
+    - criteria_results.security is anything other than "met"
+
+    The original dict is not mutated.
+    """
+    approved = review.get("approved", False)
+    if not approved:
+        return review
+
+    score = review.get("score", 0)
+    criteria = review.get("criteria_results", {})
+    security_status = str(criteria.get("security", "met")).lower()
+
+    if score < _MIN_APPROVAL_SCORE:
+        return {
+            **review,
+            "approved": False,
+            "feedback": f"[Score {score}/10 below threshold {_MIN_APPROVAL_SCORE}] {review.get('feedback', '')}",
+        }
+
+    if security_status != "met":
+        return {
+            **review,
+            "approved": False,
+            "blocking_issues": list(review.get("blocking_issues", [])) + [f"security: {security_status}"],
+            "feedback": f"[Security issue: {security_status}] {review.get('feedback', '')}",
+        }
+
+    return review
+
+
+_DEFAULT_MODEL = "opencode/nemotron-3-super-free"
+_DEFAULT_VARIANT = "high"
+
+
+def run_autonomous(
+    mission_id: str,
+    workdir: str = None,
+    agent: str = "auto",
+    model: str = None,
+    variant: str = None,
+    pool_size: int = 8,
+    extend_caps: bool = False,
+):
+    """Run a mission autonomously with a parallel supervisor loop.
+
+    The supervisor ticks on a short interval, dispatches every available
+    action (workers *and* reviewers) as concurrent threads, collects results
+    as they finish, and feeds them back to the engine — all without blocking.
+
+    Args:
+        mission_id:  The mission ID to run.
+        workdir:     Override the working directory from the mission spec.
+        agent:       ``"opencode"`` or ``"auto"`` (default).
+        model:       Model string passed to the agent CLI (default: opencode/nemotron-3-super-free).
+        variant:     Reasoning effort variant (default: high).
+        pool_size:   Max concurrent agent threads (default 8). Actual task
+                     parallelism is also governed by the mission's
+                     ``max_concurrent_workers`` cap.
+        extend_caps: Ignore cap limits for this run: disables wall-time and
+                     raises retry/intervention limits above current counters.
+                     The stored state is not modified. Use when resuming a
+                     mission blocked by wall_time, interventions, or retries.
+    """
     _ensure_pkg()
     from agentforce.core.engine import MissionEngine
     from agentforce.memory import Memory
@@ -113,135 +216,261 @@ def run_autonomous(mission_id: str, workdir: str = None):
         print(f"No mission state found: {mission_id}")
         sys.exit(1)
 
+    resolved_agent = agent if agent != "auto" else _detect_agent()
+
+    from agentforce.core.spec import TaskStatus
+
     memory = Memory(Path.home() / ".agentforce" / "memory")
     engine = MissionEngine.load(state_file, memory)
+    eff_model = model or _DEFAULT_MODEL
+    eff_variant = variant or _DEFAULT_VARIANT
+
+    engine.state.worker_agent = resolved_agent
+    engine.state.worker_model = eff_model
+    engine.state.caps_hit = {}
+
+    if extend_caps:
+        # Raise all caps well above current counters so none trigger this run.
+        # The stored mission state (counters, started_at) is not modified.
+        c = engine.state.caps
+        c.max_wall_time_minutes = 0          # 0 = disabled in wall_time_exceeded()
+        c.max_retries_global = max(c.max_retries_global, engine.state.total_retries + 100)
+        c.max_human_interventions = max(c.max_human_interventions, engine.state.total_human_interventions + 100)
+        print("  ⟳ Caps ignored for this run (wall-time disabled, retry/intervention limits raised).")
+
+    # On every resume: reset tasks that were interrupted or exhausted so they
+    # can make progress again. IN_PROGRESS tasks belong to a dead process.
+    # FAILED tasks get a fresh attempt (retries reset) so re-running the CLI is
+    # enough to retry without manual intervention.
+    _reset = False
+    for ts in engine.state.task_states.values():
+        if ts.status == TaskStatus.IN_PROGRESS:
+            ts.status = TaskStatus.RETRY if ts.retries > 0 else TaskStatus.PENDING
+            ts.bump()
+            engine.state.log_event("task_reset", ts.task_id, "Interrupted IN_PROGRESS task reset on resume")
+            _reset = True
+        elif ts.status == TaskStatus.REVIEWING:
+            # Reviewer was in-flight when the process died — re-queue for review.
+            ts.status = TaskStatus.COMPLETED
+            ts.review_feedback = ""
+            ts.bump()
+            engine.state.log_event("task_reset", ts.task_id, "Interrupted REVIEWING task reset on resume")
+            _reset = True
+        elif ts.status == TaskStatus.FAILED and not ts.human_intervention_needed:
+            ts.retries = 0
+            ts.status = TaskStatus.PENDING
+            ts.error_message = ""
+            ts.bump()
+            engine.state.log_event("task_reset", ts.task_id, "FAILED task reset for re-run")
+            _reset = True
+    if _reset:
+        engine.state.total_retries = 0
+
+    engine._save()
     tele_store = TelemetryStore()
     start = datetime.now(timezone.utc)
 
+    eff_pool = max(pool_size, engine.state.caps.max_concurrent_workers * 2 + 2)
     print(f"\n=== Autonomous Mission Runner ===")
-    print(f"Mission: {engine.spec.name} [{engine.state.mission_id}]")
-    print(f"Tasks: {len(engine.spec.tasks)}")
-    print(f"Workdir: {workdir or engine.state.working_dir}")
+    print(f"Mission : {engine.spec.name} [{engine.state.mission_id}]")
+    print(f"Tasks   : {len(engine.spec.tasks)}")
+    print(f"Agent   : {resolved_agent}  model={eff_model}  variant={eff_variant}")
+    print(f"Workers : up to {engine.state.caps.max_concurrent_workers} concurrent  (thread pool: {eff_pool})")
+    print(f"Workdir : {workdir or engine.state.working_dir}")
     print()
 
-    # Clear caps so we can continue
-    engine.state.caps_hit = {}
-    engine._save()
+    task_metrics: dict[str, TaskMetrics] = {}
+    # in_flight maps "task_id.role" → (Future, action)
+    in_flight: dict[str, tuple[Future, object]] = {}
+    # session_ids maps task_id → opencode session ID for caching across retries
+    session_ids: dict[str, str] = {}
+
+    _wdir = workdir or engine.state.working_dir
+
+    def _submit(action) -> None:
+        """Submit an action to the thread pool (non-blocking)."""
+        key = f"{action.task_id}.{action.role}"
+        if key in in_flight:
+            return
+        role = action.role
+        tid = action.task_id
+        timeout = getattr(action, "timeout", 300 if role == "worker" else 120)
+        effective_model = eff_model or getattr(action, "model", None)
+
+        # Reuse session for the same task across worker retries (enables caching)
+        session_id = session_ids.get(tid) if role == "worker" else None
+
+        sp = _stream_path(engine.state.mission_id, tid)
+        if role == "worker":
+            sp.write_text(f"=== WORKER [{tid}] STARTED ===\n", encoding="utf-8")
+            task_metrics.setdefault(tid, TaskMetrics(
+                task_id=tid,
+                task_title=engine._get_task_spec(tid).title,
+                mission_id=engine.state.mission_id,
+                worker_started=datetime.now(timezone.utc).isoformat(),
+            ))
+            task_metrics[tid].worker_attempts += 1
+        elif role == "reviewer":
+            with open(sp, "a", encoding="utf-8") as _sf:
+                _sf.write(f"\n=== REVIEWER [{tid}] STARTED ===\n")
+            task_metrics.setdefault(tid, TaskMetrics(
+                task_id=tid,
+                task_title=engine._get_task_spec(tid).title,
+                mission_id=engine.state.mission_id,
+            ))
+            task_metrics[tid].reviewer_started = datetime.now(timezone.utc).isoformat()
+            task_metrics[tid].review_attempts += 1
+
+        fut = executor.submit(
+            _run_agent, action.context, _wdir, timeout,
+            resolved_agent, effective_model, sp, eff_variant, session_id,
+        )
+        in_flight[key] = (fut, action)
+        print(f"  ↑ [{role}] task {tid} dispatched")
+
+    def _collect() -> None:
+        """Harvest any completed futures and apply results to the engine."""
+        done_keys = [k for k, (f, _) in in_flight.items() if f.done()]
+        for key in done_keys:
+            fut, action = in_flight.pop(key)
+            role = action.role
+            tid = action.task_id
+
+            try:
+                success, output, error, returned_sid = fut.result()
+            except Exception as exc:
+                success, output, error, returned_sid = False, "", str(exc), None
+
+            # Store session ID for reuse across worker retries
+            if role == "worker" and returned_sid and tid not in session_ids:
+                session_ids[tid] = returned_sid
+
+            if role == "worker":
+                now = datetime.now(timezone.utc).isoformat()
+                tm = task_metrics.get(tid)
+                if tm and tm.worker_started:
+                    tm.worker_finished = now
+                    tm.worker_duration_s = (
+                        datetime.fromisoformat(now) - datetime.fromisoformat(tm.worker_started)
+                    ).total_seconds()
+                print(f"  ↓ [worker] task {tid}  success={success}  output={len(output)}B")
+                if error and "timed out" in error:
+                    print(f"    timed out — retrying without consuming a retry slot")
+                    ts = engine.state.get_task(tid)
+                    if ts:
+                        ts.status = TaskStatus.RETRY
+                    engine._save()
+                    continue
+                if error:
+                    print(f"    error: {error[:200]}")
+                engine.apply_worker_result(tid, success, output, error)
+                engine._save()
+
+            elif role == "reviewer":
+                now = datetime.now(timezone.utc).isoformat()
+                tm = task_metrics.get(tid)
+                if tm and tm.reviewer_started:
+                    tm.reviewer_finished = now
+                    tm.reviewer_duration_s = (
+                        datetime.fromisoformat(now) - datetime.fromisoformat(tm.reviewer_started)
+                    ).total_seconds()
+
+                if not success and error and "timed out" in error:
+                    print(f"  ↓ [reviewer] task {tid}  timed out — re-dispatching reviewer")
+                    ts = engine.state.get_task(tid)
+                    if ts:
+                        ts.status = TaskStatus.COMPLETED  # triggers reviewer re-dispatch
+                    engine._save()
+                    continue
+
+                if success and output:
+                    try:
+                        review = _parse_reviewer_output(output)
+                    except ValueError as exc:
+                        msg = str(exc)
+                        print(f"  [CRITICAL] task {tid}: {msg}")
+                        print(f"    Reviewer produced unreadable output — marking task as permanently failed.")
+                        task_spec = engine._get_task_spec(tid)
+                        ts = engine.state.get_task(tid)
+                        if ts and task_spec:
+                            ts.retries = task_spec.max_retries  # exhaust retries
+                        engine.apply_reviewer_result(tid, False, msg, 0, [])
+                        engine._save()
+                        continue
+                else:
+                    review = {"approved": False, "feedback": f"Reviewer error: {error}", "score": 0}
+
+                review = _enforce_review_thresholds(review)
+                approved = review.get("approved", False)
+                score = review.get("score", 0)
+                feedback = review.get("feedback", "")
+                blocking = review.get("blocking_issues", [])
+
+                if tm:
+                    tm.review_score = score
+                    tm.review_approved = approved
+                    tm.review_issues_count = len(blocking)
+
+                print(f"  ↓ [reviewer] task {tid}  approved={approved}  score={score}")
+                if not approved and feedback:
+                    print(f"    feedback: {feedback[:200]}")
+                engine.apply_reviewer_result(tid, approved, feedback, score, blocking)
+                engine._save()
 
     tick = 0
-    max_ticks = 50
-    task_metrics = {}
+    max_ticks = 500   # short ticks now — many more needed
+    idle_ticks = 0
 
-    while tick < max_ticks:
-        tick += 1
-        actions = engine.tick()
+    with ThreadPoolExecutor(max_workers=eff_pool) as executor:
+        while tick < max_ticks:
+            tick += 1
 
-        if not actions:
-            if engine.is_done():
-                print(f"\nTick {tick}: Mission complete!")
+            # Collect finished work first (non-blocking)
+            _collect()
+
+            # Terminal conditions
+            if engine.is_done() and not in_flight:
+                print(f"\n✓ Mission complete! ({tick} ticks)")
                 break
-            if engine.is_failed():
-                print(f"\nTick {tick}: Mission failed.")
+            if engine.is_failed() and not in_flight:
+                print(f"\n✗ Mission failed. ({tick} ticks)")
                 break
-            # No actions but not done — check if there are pending tasks
-            pending = engine.state.dispatchable_tasks()
-            if pending:
-                print(f"\nTick {tick}: No actions but {len(pending)} tasks pending.")
-                print("This might mean all worker slots are full or waiting for deps.")
-                if engine.state.in_progress_tasks():
-                    print(f"  In progress: {[ts.task_id for ts in engine.state.in_progress_tasks()]}")
-            # Check if we're stuck (no actions, no progress)
-            time.sleep(1)
-            continue
 
-        print(f"\n--- Tick {tick}: {len(actions)} action(s) ---")
-        for action in actions:
-            role = getattr(action, "role", "?")
-            tid = action.task_id
-            print(f"  [{role}] Task {tid}")
+            # Get new actions from the engine
+            actions = engine.tick()
 
-            if hasattr(action, "context"):
-                # Worker action — spawn opencode
-                if role == "worker":
-                    print(f"    Spawning opencode worker for task {tid}...")
-                    task_metrics[tid] = TaskMetrics(
-                        task_id=tid,
-                        task_title=engine._task_spec(tid).title,
-                        mission_id=engine.state.mission_id,
-                        worker_started=datetime.now(timezone.utc).isoformat(),
+            for action in actions:
+                role = getattr(action, "role", "")
+                if role in ("worker", "reviewer") and hasattr(action, "context"):
+                    _submit(action)
+                elif hasattr(action, "message"):  # HumanIntervention
+                    print(f"  ⚠ Human intervention [{action.task_id}]: {getattr(action, 'message', '')[:120]}")
+                    print(f"    Auto-resolving with reviewer context.")
+                    engine.apply_human_resolution(
+                        action.task_id, getattr(action, "message", "Fix the blocking issues listed above.")
                     )
-                    task_metrics[tid].worker_attempts += 1
-
-                    success, output, error = _run_opencode(
-                        prompt=action.context,
-                        workdir=workdir or engine.state.working_dir,
-                        timeout=getattr(action, "timeout", 300),
-                    )
-                    task_metrics[tid].worker_finished = datetime.now(timezone.utc).isoformat()
-                    task_metrics[tid].worker_duration_s = (
-                        datetime.fromisoformat(task_metrics[tid].worker_finished)
-                        - datetime.fromisoformat(task_metrics[tid].worker_started)
-                    ).total_seconds()
-
-                    print(f"    Worker result: success={success}, output_len={len(output)}")
-                    if error and "timed out" not in error:
-                        print(f"    Error: {error[:200]}")
-
-                    engine.apply_worker_result(tid, success, output, error)
                     engine._save()
 
-                # Reviewer action — spawn opencode for review
-                elif role == "reviewer":
-                    print(f"    Spawning opencode reviewer for task {tid}...")
-                    task_metrics.setdefault(tid, TaskMetrics(
-                        task_id=tid,
-                        task_title=engine._task_spec(tid).title,
-                        mission_id=engine.state.mission_id,
-                    ))
-                    task_metrics[tid].reviewer_started = datetime.now(timezone.utc).isoformat()
-                    task_metrics[tid].review_attempts += 1
+            if not actions and not in_flight:
+                idle_ticks += 1
+                if idle_ticks >= 3:
+                    print(f"\n  No actions and nothing in flight — stopping.")
+                    break
+            else:
+                idle_ticks = 0
 
-                    success, output, error = _run_opencode(
-                        prompt=action.context,
-                        workdir=workdir or engine.state.working_dir,
-                        timeout=getattr(action, "timeout", 120),
-                    )
-                    task_metrics[tid].reviewer_finished = datetime.now(timezone.utc).isoformat()
-                    task_metrics[tid].reviewer_duration_s = (
-                        datetime.fromisoformat(task_metrics[tid].reviewer_finished)
-                        - datetime.fromisoformat(task_metrics[tid].reviewer_started)
-                    ).total_seconds()
+            active = len(in_flight)
+            if tick % 5 == 0 and active:
+                print(f"  [tick {tick}] {active} agent(s) running: {list(in_flight)}")
 
-                    if success and output:
-                        review = _parse_reviewer_output(output)
-                    else:
-                        review = {"approved": False, "feedback": f"Reviewer error: {error}", "score": 0}
+            # Pause support: block here while pause file exists
+            if is_paused(engine.state.mission_id):
+                print(f"  ⏸  Mission paused. Remove pause file or run: mission resume {engine.state.mission_id}")
+                while is_paused(engine.state.mission_id):
+                    time.sleep(2)
+                print(f"  ▶  Mission resumed.")
 
-                    approved = review.get("approved", False)
-                    score = review.get("score", 0)
-                    feedback = review.get("feedback", "")
-                    blocking = review.get("blocking_issues", [])
-
-                    task_metrics[tid].review_score = score
-                    task_metrics[tid].review_approved = approved
-                    task_metrics[tid].review_issues_count = len(blocking)
-
-                    print(f"    Review result: approved={approved}, score={score}")
-                    if not approved:
-                        print(f"    Feedback: {feedback[:200]}")
-
-                    engine.apply_reviewer_result(tid, approved, feedback, score, blocking)
-                    engine._save()
-
-                # Human intervention — auto-resolve or mark as failed
-                elif role == "human" or hasattr(action, "message"):
-                    print(f"    Human intervention needed: {getattr(action, 'message', 'blocked')}")
-                    print(f"    Auto-resolving: continuing with best effort")
-                    engine.apply_human_resolution(tid, "Auto-resolved: continuing with current implementation.")
-                    engine._save()
-
-        # Brief pause between ticks
-        time.sleep(0.5)
+            time.sleep(2)  # supervisor poll interval
 
     # Build final metrics
     end = datetime.now(timezone.utc)
@@ -290,14 +519,51 @@ def run_autonomous(mission_id: str, workdir: str = None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(f"Usage: python3 -m agentforce.autonomous <mission_id> [--workdir PATH]")
-        sys.exit(1)
+    import argparse as _ap
 
-    mid = sys.argv[1]
-    workdir = None
-    if len(sys.argv) > 2 and sys.argv[2] == "--workdir":
-        workdir = sys.argv[3]
+    p = _ap.ArgumentParser(
+        prog="python3 -m agentforce.autonomous",
+        description="Run an AgentForce mission autonomously.",
+    )
+    p.add_argument("mission_id", help="Mission ID to run")
+    p.add_argument("--workdir", help="Override working directory")
+    p.add_argument(
+        "--agent",
+        default="auto",
+        choices=["auto", *CONNECTORS],
+        help="Agent CLI to use (default: auto — opencode)",
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        help=f"Model to pass to the agent CLI (default: {_DEFAULT_MODEL})",
+    )
+    p.add_argument(
+        "--variant",
+        default=None,
+        help=f"Reasoning effort variant (default: {_DEFAULT_VARIANT})",
+    )
+    p.add_argument(
+        "--pool-size",
+        type=int,
+        default=8,
+        metavar="N",
+        help="Max concurrent agent threads (default: 8). Actual task parallelism is "
+             "also governed by the mission's max_concurrent_workers cap.",
+    )
+    p.add_argument(
+        "--extend-caps",
+        action="store_true",
+        default=False,
+        help="Ignore cap limits for this run: disables wall-time and raises "
+             "retry/intervention limits above current counters. Use when resuming "
+             "a mission blocked by wall_time, interventions, or retry limits.",
+    )
+    a = p.parse_args()
 
-    success = run_autonomous(mid, workdir)
+    success = run_autonomous(
+        a.mission_id, a.workdir,
+        agent=a.agent, model=a.model, variant=a.variant, pool_size=a.pool_size,
+        extend_caps=a.extend_caps,
+    )
     sys.exit(0 if success else 1)

@@ -10,6 +10,22 @@ from typing import Optional
 from .spec import MissionSpec, TaskStatus, Caps
 
 
+def _fmt_duration(started_at: str, ended_at: str | None) -> str:
+    """Render elapsed time as a compact human-readable string."""
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        end_ts = ended_at or datetime.now(timezone.utc).isoformat()
+        ended = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
+        secs = int((ended - started).total_seconds())
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m {secs % 60}s"
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
+    except Exception:
+        return "?"
+
+
 @dataclass
 class TaskState:
     """Runtime state for a single task."""
@@ -35,7 +51,7 @@ class TaskState:
 
     def can_review(self) -> bool:
         s = self.status.value if hasattr(self.status, 'value') else self.status
-        return s == TaskStatus.COMPLETED.value and bool(self.worker_output)
+        return s == TaskStatus.COMPLETED.value
 
     def needs_human_attention(self) -> bool:
         s = self.status.value if hasattr(self.status, 'value') else self.status
@@ -60,7 +76,7 @@ class TaskState:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "last_updated": self.last_updated,
-        }.items() if v or v == 0 or v is False}
+        }.items() if v or v == 0 or v is False or k == "blocking_issues"}
 
     @classmethod
     def from_dict(cls, d: dict) -> TaskState:
@@ -118,6 +134,8 @@ class MissionState:
     
     # Derived from spec but we store snapshot
     working_dir: str = ""
+    worker_agent: str = ""   # agent CLI used: "claude", "opencode"
+    worker_model: str = ""   # model ID passed to the agent
     daemon_pid: Optional[int] = None
     daemon_started_at: Optional[str] = None
 
@@ -248,6 +266,34 @@ class MissionState:
             "total_human_interventions": self.total_human_interventions,
             "caps_hit": self.caps_hit,
             "working_dir": self.working_dir,
+            "worker_agent": self.worker_agent,
+            "worker_model": self.worker_model,
+        }
+
+    def to_summary_dict(self) -> dict:
+        done_tasks = sum(1 for ts in self.task_states.values() if ts.status == TaskStatus.REVIEW_APPROVED)
+        total_tasks = len(self.spec.tasks)
+        pct = int(done_tasks / total_tasks * 100) if total_tasks else 0
+        if self.is_done():
+            status = "complete"
+        elif self.is_failed():
+            status = "failed"
+        elif self.needs_human():
+            status = "needs_human"
+        else:
+            status = "active"
+
+        return {
+            "mission_id": self.mission_id,
+            "name": self.spec.name,
+            "status": status,
+            "done_tasks": done_tasks,
+            "total_tasks": total_tasks,
+            "pct": pct,
+            "duration": _fmt_duration(self.started_at, self.completed_at),
+            "worker_agent": self.worker_agent,
+            "worker_model": self.worker_model,
+            "started_at": self.started_at,
         }
 
     @classmethod
@@ -266,6 +312,8 @@ class MissionState:
             total_human_interventions=d.get("total_human_interventions", 0),
             caps_hit=d.get("caps_hit", {}),
             working_dir=d.get("working_dir", ""),
+            worker_agent=d.get("worker_agent", ""),
+            worker_model=d.get("worker_model", ""),
         )
 
     def save(self, path: Path | str):

@@ -137,6 +137,13 @@ class MissionEngine:
 
     def _save(self):
         self.state.save(self._state_file)
+        try:
+            from agentforce.server import ws
+
+            ws.broadcast_mission(self.state.mission_id, self.state.to_dict())
+            ws.broadcast_mission_list([self.state.to_summary_dict()])
+        except Exception:
+            pass
 
     @property
     def state_file(self) -> Path:
@@ -245,6 +252,8 @@ class MissionEngine:
             prompt += f"\n\nPREVIOUS ATTEMPT FAILED (attempt {ts.retries + 1} of {task_spec.max_retries + 1})."
             if ts.review_feedback:
                 prompt += f"\nReviewer feedback: {ts.review_feedback}"
+            if ts.blocking_issues:
+                prompt += "\nBlocking issues that MUST be fixed:\n" + "\n".join(f"- {i}" for i in ts.blocking_issues)
             if ts.error_message:
                 prompt += f"\nPrevious error: {ts.error_message}"
 
@@ -256,7 +265,7 @@ class MissionEngine:
             goal=f"Complete task {task_id}: {task_spec.title}",
             context=prompt,
             model=self.worker_model,
-            timeout=min(600, self.state.caps.max_wall_time_minutes * 60),
+            timeout=min(600, self.state.caps.max_wall_time_minutes * 60) if self.state.caps.max_wall_time_minutes else 600,
         )
 
     def _dispatch_reviewer(self, task_id: str) -> Optional[ReviewerDelegation]:
@@ -333,7 +342,13 @@ class MissionEngine:
 
         ts.review_feedback = feedback
         ts.review_score = score or (10 if approved else 3)
-        ts.blocking_issues = blocking_issues or []
+        # Only overwrite blocking_issues when the reviewer provides a non-empty list;
+        # keep the previous list if the reviewer didn't supply new ones, so the worker
+        # retains the structured issue context across retries.
+        if blocking_issues:
+            ts.blocking_issues = blocking_issues
+        elif approved:
+            ts.blocking_issues = []
 
         if approved:
             ts.status = TaskStatus.REVIEW_APPROVED
@@ -343,7 +358,7 @@ class MissionEngine:
             logger.info("Task review approved: %s", task_id)
 
             # Update project memory with lessons learned
-            if feedback and len(feedback) < 500:
+            if feedback:
                 self.memory.project_set(
                     self.state.mission_id,
                     f"task_{task_id}_outcome",
@@ -354,23 +369,23 @@ class MissionEngine:
             ts.retries += 1
             self.state.total_retries += 1
 
-            # Check if issues need human intervention
-            if blocking_issues and len(blocking_issues) > 0:
-                # If blocking issues are about spec ambiguity, flag for human
-                ts.human_intervention_needed = True
-                ts.human_intervention_message = (
-                    f"Reviewer blocked on task {task_id}: "
-                    f"{'; '.join(blocking_issues)}\n"
-                    f"Feedback: {feedback}"
-                )
-                ts.status = TaskStatus.NEEDS_HUMAN
-                self.state.total_human_interventions += 1
-                self.state.log_event("human_intervention", task_id, ts.human_intervention_message)
-                logger.warning("Human intervention needed: %s", task_id)
-            elif ts.retries >= task_spec.max_retries or self.state.total_retries >= self.state.caps.max_retries_global:
-                ts.status = TaskStatus.FAILED
-                self.state.log_event("task_failed", task_id, f"Max retries exceeded: {feedback}")
-                logger.warning("Task failed after retries: %s", task_id)
+            # Escalate to human only after retries are exhausted
+            if ts.retries >= task_spec.max_retries or self.state.total_retries >= self.state.caps.max_retries_global:
+                if blocking_issues:
+                    ts.human_intervention_needed = True
+                    ts.human_intervention_message = (
+                        f"Reviewer blocked on task {task_id}: "
+                        f"{'; '.join(blocking_issues)}\n"
+                        f"Feedback: {feedback}"
+                    )
+                    ts.status = TaskStatus.NEEDS_HUMAN
+                    self.state.total_human_interventions += 1
+                    self.state.log_event("human_intervention", task_id, ts.human_intervention_message)
+                    logger.warning("Human intervention needed: %s", task_id)
+                else:
+                    ts.status = TaskStatus.FAILED
+                    self.state.log_event("task_failed", task_id, f"Max retries exceeded: {feedback}")
+                    logger.warning("Task failed after retries: %s", task_id)
             else:
                 ts.status = TaskStatus.RETRY
                 self.state.log_event("review_rejected", task_id, f"Retry {ts.retries}/{task_spec.max_retries}: {feedback}")
@@ -390,7 +405,11 @@ class MissionEngine:
         ts.human_intervention_needed = False
         ts.human_intervention_message = ""
         ts.status = TaskStatus.RETRY
-        ts.review_feedback = f"HUMAN RESOLUTION: {resolution}"
+        # Preserve the reviewer's feedback and blocking_issues so the worker
+        # sees the structured issues on retry. Append human guidance only if
+        # it adds information beyond the reviewer verdict.
+        if resolution:
+            ts.review_feedback = ts.review_feedback + f"\n\nHuman guidance: {resolution}"
         ts.bump()
         
         self.state.log_event("human_resolved", task_id, resolution)
