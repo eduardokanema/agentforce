@@ -404,7 +404,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--agent",
         default="auto",
-        choices=["auto", "opencode"],
+        choices=["auto", "opencode", "claude", "openrouter", "codex"],
         help="Agent CLI to use (default: auto — opencode)",
     )
     p.add_argument(
