@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { getTask } from '../lib/api';
-import { wsClient, type StreamLineEvent, type TaskStreamLineEvent } from '../lib/ws';
+import { wsClient, type StreamLineEvent, type TaskStreamDoneEvent, type TaskStreamLineEvent } from '../lib/ws';
 import type { TaskStatus } from '../lib/types';
 
 const TERMINAL_STATUSES: readonly TaskStatus[] = [
@@ -69,12 +69,22 @@ export function useTaskStream(
           return;
         }
 
-        setLines(splitWorkerOutput(task.worker_output ?? ''));
+        const initialLines = splitWorkerOutput(task.worker_output ?? '');
+        setLines((current) => {
+          if (current.length === 0) {
+            return initialLines;
+          }
+
+          if (initialLines.length === 0) {
+            return current;
+          }
+
+          return initialLines.concat(current);
+        });
         setDone(isTerminalStatus(task.status));
       })
       .catch(() => {
         if (active) {
-          setLines([]);
           setDone(false);
         }
       });
@@ -92,8 +102,13 @@ export function useTaskStream(
       }, 0);
     };
 
-    const handler = (event: StreamLineEvent | TaskStreamLineEvent): void => {
+    const handler = (event: StreamLineEvent | TaskStreamLineEvent | TaskStreamDoneEvent): void => {
       if (!active || event.mission_id !== missionId || event.task_id !== taskId) {
+        return;
+      }
+
+      if (event.type === 'task_stream_done') {
+        setDone(true);
         return;
       }
 
@@ -107,11 +122,13 @@ export function useTaskStream(
     wsClient.subscribe(missionId);
     wsClient.on('stream_line', handler);
     wsClient.on('task_stream_line', handler);
+    wsClient.on('task_stream_done', handler);
 
     return () => {
       active = false;
       wsClient.off('stream_line', handler);
       wsClient.off('task_stream_line', handler);
+      wsClient.off('task_stream_done', handler);
       if (flushTimerRef.current !== null) {
         clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
