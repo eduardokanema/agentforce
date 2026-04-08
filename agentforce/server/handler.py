@@ -1,11 +1,16 @@
 """HTTP handler and routing for the AgentForce dashboard."""
 from __future__ import annotations
 
+import json as _json
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import time as _time
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 from .render import render_mission_list, render_mission_detail, render_task_detail
+
+_STREAMS_DIR = Path.home() / ".agentforce" / "streams"
+_SSE_TERMINAL = {"review_approved", "review_rejected", "failed", "blocked"}
 
 AGENTFORCE_HOME = Path(os.path.expanduser("~/.agentforce"))
 STATE_DIR = AGENTFORCE_HOME / "state"
@@ -60,6 +65,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._html(render_mission_detail(state))
                 else:
                     self._err(404, f"Mission {parts[1]!r} not found")
+            elif (len(parts) == 5 and parts[0] == "mission"
+                  and parts[2] == "task" and parts[4] == "stream"):
+                self._sse(parts[1], parts[3])
             elif len(parts) == 4 and parts[0] == "mission" and parts[2] == "task":
                 state = _load_state(parts[1])
                 if state:
@@ -95,6 +103,75 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _sse(self, mission_id: str, task_id: str):
+        """Stream live agent output as Server-Sent Events."""
+        stream_file = _STREAMS_DIR / f"{mission_id}_{task_id}.log"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        def _send(line=None, event=None) -> bool:
+            try:
+                msg = b""
+                if event:
+                    msg += f"event: {event}\n".encode()
+                if line is not None:
+                    msg += f"data: {_json.dumps({'line': line})}\n\n".encode()
+                elif event:
+                    msg += b"data: {}\n\n"
+                self.wfile.write(msg)
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return False
+
+        pos = 0
+        idle = 0
+        try:
+            while idle < 180:
+                # Keepalive comment
+                try:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+
+                # Drain new content from stream file
+                if stream_file.exists():
+                    with open(stream_file, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(pos)
+                        chunk = f.read()
+                        pos = f.tell()
+                    if chunk:
+                        idle = 0
+                        for ln in chunk.splitlines():
+                            if not _send(ln):
+                                return
+                    else:
+                        idle += 1
+                else:
+                    idle += 1
+
+                # Check if task reached a terminal status
+                state = _load_state(mission_id)
+                if state:
+                    ts = state.task_states.get(task_id)
+                    if ts and ts.status in _SSE_TERMINAL:
+                        # Drain any remaining content
+                        if stream_file.exists():
+                            with open(stream_file, "r", encoding="utf-8", errors="replace") as f:
+                                f.seek(pos)
+                                for ln in f.read().splitlines():
+                                    _send(ln)
+                        _send(event="done")
+                        return
+
+                _time.sleep(1)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def _err(self, code: int, msg: str):
         from .render import _page
         body = _page("Error", f'<p class="empty">{msg}</p>').encode("utf-8")
@@ -109,7 +186,7 @@ def serve(port: int = 8080, state_dir: Path | None = None) -> None:
     global STATE_DIR
     if state_dir is not None:
         STATE_DIR = Path(state_dir)
-    server = HTTPServer(("localhost", port), DashboardHandler)
+    server = ThreadingHTTPServer(("localhost", port), DashboardHandler)
     print(f"AgentForce Dashboard → http://localhost:{port}")
     print("Press Ctrl+C to stop.")
     try:

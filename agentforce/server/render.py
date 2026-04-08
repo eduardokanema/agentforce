@@ -194,6 +194,9 @@ def render_mission_detail(state) -> str:
     return _page(state.spec.name, body, refresh=10)
 
 
+_TERMINAL_STATUSES = {"review_approved", "review_rejected", "failed", "blocked"}
+
+
 def render_task_detail(state, task_id: str) -> str:
     ts = state.task_states.get(task_id)
     task_spec = next((t for t in state.spec.tasks if t.id == task_id), None)
@@ -202,6 +205,7 @@ def render_task_detail(state, task_id: str) -> str:
 
     score_badge = _score_badge(ts.review_score)
     dur = _fmt_duration(ts.started_at or state.started_at, ts.completed_at)
+    is_active = ts.status not in _TERMINAL_STATUSES
 
     stats = f"""<div class="stats">
   <div class="stat"><div class="stat-lbl">Status</div><div class="stat-val" style="font-size:13px">{_status_badge(ts.status)}</div></div>
@@ -230,6 +234,38 @@ def render_task_detail(state, task_id: str) -> str:
     if ts.error_message:
         extras += f'<div class="sec"><h2 class="section-title">Error</h2><div class="error-box">{_h(ts.error_message)}</div></div>'
 
+    mid = _h(state.mission_id)
+    tid = _h(task_id)
+    live_stream_section = f"""<div class="sec">
+  <h2 class="section-title">Live Agent Stream <span id="sse-status" class="auto-label">(connecting...)</span></h2>
+  <div id="live-stream" style="font-family:monospace;font-size:12px;line-height:1.5;background:#0d1117;color:#e6edf3;padding:14px 16px;border-radius:6px;height:420px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;"></div>
+</div>
+<script>
+(function(){{
+  var el=document.getElementById('live-stream');
+  var st=document.getElementById('sse-status');
+  var url='/mission/{mid}/task/{tid}/stream';
+  var es=new EventSource(url);
+  var autoScroll=true;
+  el.addEventListener('scroll',function(){{autoScroll=el.scrollTop+el.clientHeight>=el.scrollHeight-20;}});
+  es.onmessage=function(e){{
+    var d=JSON.parse(e.data);
+    el.textContent+=d.line+'\\n';
+    if(autoScroll)el.scrollTop=el.scrollHeight;
+    st.textContent='(live)';
+  }};
+  es.addEventListener('done',function(){{
+    st.textContent='(complete \u2014 reloading...)';
+    es.close();
+    setTimeout(function(){{location.reload();}},1500);
+  }});
+  es.onerror=function(){{
+    st.textContent='(disconnected)';
+    es.close();
+  }};
+}})();
+</script>"""
+
     breadcrumb = f'''<nav class="breadcrumb">
   <a href="/">Missions</a><span class="breadcrumb-sep">›</span>
   <a href="/mission/{_h(state.mission_id)}">{_h(state.spec.name)}</a><span class="breadcrumb-sep">›</span>
@@ -241,6 +277,7 @@ def render_task_detail(state, task_id: str) -> str:
   <h1>{_h(task_spec.title)}</h1>
 </div>
 {stats}
+{live_stream_section if is_active else ""}
 <div class="sec"><h2 class="section-title">Worker Output</h2>{worker_out}</div>
 <div class="sec"><h2 class="section-title">Reviewer Feedback {score_badge}</h2>{review_out}</div>
 {extras}"""
