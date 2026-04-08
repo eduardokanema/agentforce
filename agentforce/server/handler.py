@@ -205,6 +205,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         self._json({"error": "Not found"}, status=404)
 
+    def _serve_spa(self, parts: list[str]):
+        """Serve the React SPA from ui/dist/. Static assets are served directly;
+        all other paths return index.html so React Router handles routing."""
+        _MIME = {
+            ".js": "application/javascript",
+            ".css": "text/css",
+            ".html": "text/html; charset=utf-8",
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".ico": "image/x-icon",
+            ".woff2": "font/woff2",
+            ".woff": "font/woff",
+        }
+        # Try to serve a real file from dist (assets, favicon, etc.)
+        if parts:
+            candidate = _UI_DIST / "/".join(parts)
+            if candidate.exists() and candidate.is_file():
+                data = candidate.read_bytes()
+                mime = _MIME.get(candidate.suffix.lower(), "application/octet-stream")
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable"
+                                 if "/assets/" in self.path else "no-cache")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+        # SPA fallback: all other routes → index.html
+        index = _UI_DIST / "index.html"
+        data = index.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _serve_static(self, filename: str):
         filepath = _STATIC_DIR / filename
         if not filepath.exists() or not filepath.is_file():
