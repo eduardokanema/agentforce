@@ -5,6 +5,8 @@ import html
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..utils import fmt_duration
+
 _TEMPLATES = Path(__file__).parent / "templates"
 
 
@@ -58,21 +60,6 @@ def _fmt_ts(ts: str) -> str:
         return ts[:19]
 
 
-def _fmt_duration(started: str, ended: str | None) -> str:
-    try:
-        s = datetime.fromisoformat(started.replace("Z", "+00:00"))
-        end_ts = ended or datetime.now(timezone.utc).isoformat()
-        e = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
-        secs = int((e - s).total_seconds())
-        if secs < 60:
-            return f"{secs}s"
-        if secs < 3600:
-            return f"{secs // 60}m {secs % 60}s"
-        return f"{secs // 3600}h {(secs % 3600) // 60}m"
-    except Exception:
-        return "?"
-
-
 def _agent_chip(state) -> str:
     agent = getattr(state, "worker_agent", "") or ""
     model = getattr(state, "worker_model", "") or ""
@@ -97,7 +84,7 @@ def render_mission_list(missions: list) -> str:
         done = sum(1 for t in s.task_states.values() if t.status == "review_approved")
         total = len(s.task_states)
         pct = int(done / total * 100) if total else 0
-        dur = _fmt_duration(s.started_at, s.completed_at)
+        dur = fmt_duration(s.started_at, s.completed_at)
         badge = _mission_badge(s)
         chip = _agent_chip(s)
 
@@ -121,7 +108,7 @@ def render_mission_list(missions: list) -> str:
 def render_mission_detail(state) -> str:
     done = sum(1 for t in state.task_states.values() if t.status == "review_approved")
     total = len(state.task_states)
-    dur = _fmt_duration(state.started_at, state.completed_at)
+    dur = fmt_duration(state.started_at, state.completed_at)
     scores = [t.review_score for t in state.task_states.values() if t.review_score]
     avg_score = f"{sum(scores)/len(scores):.1f}" if scores else "—"
     agent = getattr(state, "worker_agent", "") or ""
@@ -204,7 +191,7 @@ def render_task_detail(state, task_id: str) -> str:
         return _page("Not found", f'<p class="empty">Task <code>{_h(task_id)}</code> not found.</p>')
 
     score_badge = _score_badge(ts.review_score)
-    dur = _fmt_duration(ts.started_at or state.started_at, ts.completed_at)
+    dur = fmt_duration(ts.started_at or state.started_at, ts.completed_at)
     is_active = ts.status not in _TERMINAL_STATUSES
 
     stats = f"""<div class="stats">

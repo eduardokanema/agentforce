@@ -15,6 +15,14 @@ from agentforce.review.models import ActionItem, MetricsSnapshot, ReviewReport
 from agentforce.server.handler import DashboardHandler
 
 
+def _set_handler_config(state_dir: Path) -> None:
+    DashboardHandler.config = DashboardHandler.config.__class__(
+        state_dir=Path(state_dir),
+        host="localhost",
+        port=8080,
+    )
+
+
 def _make_state(mission_id: str = "mission-123") -> MissionState:
     spec = MissionSpec(
         name="Integration Mission",
@@ -237,7 +245,7 @@ def test_api_get_review_returns_skipped_when_sentinel_exists(tmp_path: Path, mon
 
 def test_api_post_review_returns_404_when_mission_missing(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path / ".agentforce")
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", tmp_path / "state")
+    _set_handler_config(tmp_path / "state")
 
     payload = json.dumps({"model": "claude"}).encode("utf-8")
     handler = _make_handler("/api/mission/mission-123/review", body=payload)
@@ -258,7 +266,7 @@ def test_api_post_review_returns_429_when_too_recent(tmp_path: Path, monkeypatch
     review_file = reviews_dir / "mission-123_review.json"
     review_file.write_text(json.dumps({"mission_id": "mission-123"}))
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", home)
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", state_dir)
+    _set_handler_config(state_dir)
 
     payload = json.dumps({"model": "claude"}).encode("utf-8")
     handler = _make_handler("/api/mission/mission-123/review", body=payload)
@@ -275,7 +283,7 @@ def test_api_post_review_returns_403_when_globally_disabled(tmp_path: Path, monk
     state_dir.mkdir(parents=True)
     _make_state().save(state_dir / "mission-123.json")
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", home)
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", state_dir)
+    _set_handler_config(state_dir)
     monkeypatch.setattr("agentforce.review.config.AGENTFORCE_HOME", home)
     (home / "config.json").parent.mkdir(parents=True, exist_ok=True)
     (home / "config.json").write_text(json.dumps({"review_enabled": False}))
@@ -297,7 +305,7 @@ def test_api_post_review_skip_writes_sentinel_file(tmp_path: Path, monkeypatch):
     state_dir.mkdir(parents=True)
     _make_state().save(state_dir / "mission-123.json")
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", home)
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", state_dir)
+    _set_handler_config(state_dir)
 
     payload = json.dumps({"skip": True}).encode("utf-8")
     handler = _make_handler("/api/mission/mission-123/review", body=payload)
