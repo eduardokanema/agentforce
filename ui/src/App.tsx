@@ -5,7 +5,7 @@ import { ToastProvider } from './components/Toast';
 import MissionsPageScreen from './pages/MissionsPage';
 import MissionDetailPageScreen from './pages/MissionDetailPage';
 import PlanModePageScreen from './pages/PlanModePage';
-import ConnectorsPageScreen from './pages/ConnectorsPage';
+import ModelsPageScreen from './pages/ConnectorsPage';
 import TelemetryPageScreen from './pages/TelemetryPage';
 import TaskDetailPageScreen from './pages/TaskDetailPage';
 
@@ -14,7 +14,7 @@ const routeConfig = [
   { path: '/mission/:id', element: <MissionDetailPageScreen /> },
   { path: '/mission/:mission_id/task/:task_id', element: <TaskDetailPageScreen /> },
   { path: '/plan', element: <PlanModePageScreen /> },
-  { path: '/connectors', element: <ConnectorsPageScreen /> },
+  { path: '/models', element: <ModelsPageScreen /> },
   { path: '/telemetry', element: <TelemetryPageScreen /> },
 ] as const;
 
@@ -22,7 +22,7 @@ type Expect<T extends true> = T;
 type RoutePath = (typeof routeConfig)[number]['path'];
 type _taskRouteExists = Expect<'/mission/:mission_id/task/:task_id' extends RoutePath ? true : false>;
 type _planRouteExists = Expect<'/plan' extends RoutePath ? true : false>;
-type _connectorsRouteExists = Expect<'/connectors' extends RoutePath ? true : false>;
+type _modelsRouteExists = Expect<'/models' extends RoutePath ? true : false>;
 type _telemetryRouteExists = Expect<'/telemetry' extends RoutePath ? true : false>;
 
 function App() {

@@ -171,6 +171,47 @@ export interface Connector {
   token_last4?: string;
 }
 
+export interface ProviderModel {
+  id: string;
+  name: string;
+  cost_per_1k_input: number;
+  cost_per_1k_output: number;
+  latency_label: string;
+}
+
+export interface Provider {
+  id: string;
+  display_name: string;
+  description?: string;
+  type?: 'api' | 'cli';
+  binary?: string;
+  requires_key?: boolean;
+  active: boolean;
+  is_default?: boolean;
+  last_configured?: string | null;
+  enabled_models: string[] | null;
+  default_model?: string | null;
+  all_models: ProviderModel[];
+}
+
+export interface FilesystemEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export interface FilesystemListing {
+  path: string;
+  entries: FilesystemEntry[];
+  parent: string | null;
+}
+
+export interface AppConfig {
+  filesystem: {
+    allowed_base_paths: string[];
+  };
+}
+
 export interface Model {
   id: string;
   name: string;
@@ -178,6 +219,15 @@ export interface Model {
   cost_per_1k_input: number;
   cost_per_1k_output: number;
   latency_label: string;
+}
+
+export interface AgentInfo {
+  id: string;
+  display_name: string;
+  binary: string;
+  available: boolean;
+  is_default: boolean;
+  model: string | null;
 }
 
 export interface TaskAttempt {

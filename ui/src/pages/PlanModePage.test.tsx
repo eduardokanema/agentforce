@@ -101,6 +101,18 @@ describe('PlanModePage', () => {
           headers: { 'Content-Type': 'application/json' },
         });
       }
+      if (url === '/api/config') {
+        return new Response(JSON.stringify({ filesystem: { allowed_base_paths: ['/Users/rent/Projects'] } }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.startsWith('/api/filesystem')) {
+        return new Response(JSON.stringify({
+          path: '/Users/rent/Projects',
+          entries: [{ name: 'agentforce', path: '/Users/rent/Projects/agentforce', is_dir: true }],
+          parent: null,
+        }), { headers: { 'Content-Type': 'application/json' } });
+      }
       if (url === '/api/plan') {
         return stream.response;
       }
@@ -123,7 +135,6 @@ describe('PlanModePage', () => {
     expect(container.innerHTML).toContain('bg-cyan-bg');
 
     const prompt = container.querySelector('textarea[placeholder="Describe what you want to build..."]') as HTMLTextAreaElement;
-    const workspace = container.querySelector('input[placeholder="/path/to/project"]') as HTMLInputElement;
     const generateButton = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Generate Plan'),
     ) as HTMLButtonElement;
@@ -133,9 +144,20 @@ describe('PlanModePage', () => {
     await act(async () => {
       prompt.value = 'Build a launch flow';
       prompt.dispatchEvent(new Event('input', { bubbles: true }));
-      workspace.value = '/Users/rent/Projects/agentforce';
-      workspace.dispatchEvent(new Event('input', { bubbles: true }));
     });
+
+    // Select workspace via FileBrowser "Select this folder" button
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const selectFolderButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Select this folder'),
+    ) as HTMLButtonElement | undefined;
+    if (selectFolderButton && !selectFolderButton.disabled) {
+      await act(async () => {
+        selectFolderButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+    }
 
     expect(generateButton.disabled).toBe(false);
 

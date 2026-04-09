@@ -1,8 +1,11 @@
 import type {
+  AppConfig,
   Connector,
+  FilesystemListing,
   Model,
   MissionState,
   MissionSummary,
+  Provider,
   TaskAttempt,
   TaskSpec,
   TaskState,
@@ -147,4 +150,89 @@ export function createMission(yaml: string): Promise<{ id: string }> {
     },
     body: JSON.stringify({ yaml }),
   });
+}
+
+export function getProviders(): Promise<Provider[]> {
+  return requestJson<Provider[]>('/api/providers');
+}
+
+export function configureProvider(id: string, apiKey: string): Promise<void> {
+  return requestVoid(`/api/providers/${encodeURIComponent(id)}/configure`, {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+}
+
+export function testProvider(id: string): Promise<{ ok: boolean; error?: string }> {
+  return requestJson<{ ok: boolean; error?: string }>(
+    `/api/providers/${encodeURIComponent(id)}/test`,
+    { method: 'POST' },
+  );
+}
+
+export function updateProviderModels(
+  id: string,
+  enabledModels: string[],
+  defaultModel?: string,
+): Promise<void> {
+  return requestVoid(`/api/providers/${encodeURIComponent(id)}/models`, {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled_models: enabledModels, default_model: defaultModel }),
+  });
+}
+
+export function addOllamaModel(modelId: string): Promise<void> {
+  return requestVoid('/api/providers/ollama/models/add', {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model_id: modelId }),
+  });
+}
+
+export function deleteProvider(id: string): Promise<void> {
+  return requestVoid(`/api/providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function refreshProviderModels(id: string): Promise<{ refreshed: boolean; count?: number }> {
+  return requestJson<{ refreshed: boolean; count?: number }>(
+    `/api/providers/${encodeURIComponent(id)}/refresh`,
+    { method: 'POST' },
+  );
+}
+
+export function deactivateProvider(id: string): Promise<void> {
+  return requestVoid(`/api/providers/${encodeURIComponent(id)}/deactivate`, { method: 'POST' });
+}
+
+export function activateProvider(id: string): Promise<void> {
+  return requestVoid(`/api/providers/${encodeURIComponent(id)}/activate`, { method: 'POST' });
+}
+
+export function getDefaultModel(): Promise<{ model: string | null }> {
+  return requestJson<{ model: string | null }>('/api/models/default');
+}
+
+export function setDefaultModel(model: string | null): Promise<void> {
+  return requestVoid('/api/models/default', {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+  });
+}
+
+export function activateAgent(id: string): Promise<void> {
+  return requestVoid(`/api/agents/${encodeURIComponent(id)}/activate`, { method: 'POST' });
+}
+
+export function setAgentModel(id: string, model: string | null): Promise<void> {
+  return requestVoid(`/api/agents/${encodeURIComponent(id)}/model`, {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+  });
+}
+
+export function getConfig(): Promise<AppConfig> {
+  return requestJson<AppConfig>('/api/config');
+}
+
+export function getFilesystemListing(path: string): Promise<FilesystemListing> {
+  return requestJson<FilesystemListing>(`/api/filesystem?path=${encodeURIComponent(path)}`);
 }

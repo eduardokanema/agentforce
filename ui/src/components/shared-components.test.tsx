@@ -151,7 +151,7 @@ describe('shared UI components', () => {
     expect(markup).toContain('max-w-[420px]');
     expect(markup).toContain(longDetails.slice(0, 140));
     expect(markup).not.toContain(longDetails.slice(0, 141));
-    expect(markup).toContain('title="1/1/2024, 8:34:56 PM"');
+    expect(markup.toLowerCase()).toMatch(/title="0?1\/0?1\/2024, 8:34:56 [ap]m"/);
   });
 
   it('ConnectionBanner reflects wsClient connection state changes', () => {

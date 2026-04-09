@@ -13,6 +13,7 @@ dependencies = [
     "keyring>=25.0",
     "cryptography>=42.0",
     "pyyaml>=6.0",
+    "certifi>=2024.0",
 ]
 
 [project.optional-dependencies]
