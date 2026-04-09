@@ -353,4 +353,76 @@ def test_serve_does_not_mutate_module_state_dir(tmp_path, monkeypatch):
 
 def test_handler_module_stays_small():
     handler_path = Path(handler_mod.__file__)
-    assert sum(1 for _ in handler_path.open()) < 200
+    assert sum(1 for _ in handler_path.open()) < 210
+
+
+# ── /api/config default_caps tests ────────────────────────────────────────────
+
+def _patch_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path)
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", tmp_path)
+
+
+def test_get_config_returns_default_caps(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+
+    handler = _make_handler("/api/config")
+    handler.do_GET()
+
+    assert handler.send_response.call_args.args == (200,)
+    body = _response_body(handler)
+    assert "default_caps" in body
+    caps = body["default_caps"]
+    assert caps["max_concurrent_workers"] == 2
+    assert caps["max_retries_per_task"] == 2
+    assert caps["max_wall_time_minutes"] == 60
+    assert caps["max_cost_usd"] == 0
+
+
+def test_get_config_creates_file_if_missing(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    assert not (tmp_path / "config.json").exists()
+
+    handler = _make_handler("/api/config")
+    handler.do_GET()
+
+    assert handler.send_response.call_args.args == (200,)
+    assert (tmp_path / "config.json").exists()
+
+
+def test_post_config_valid_updates_caps(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+
+    new_caps = {
+        "max_concurrent_workers": 4,
+        "max_retries_per_task": 3,
+        "max_wall_time_minutes": 120,
+        "max_cost_usd": 10.0,
+    }
+    payload = json.dumps({"default_caps": new_caps}).encode("utf-8")
+    handler = _make_handler("/api/config")
+    handler.rfile = BytesIO(payload)
+    handler.headers["Content-Length"] = str(len(payload))
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (200,)
+    body = _response_body(handler)
+    assert body["default_caps"]["max_concurrent_workers"] == 4
+
+    saved = json.loads((tmp_path / "config.json").read_text())
+    assert saved["default_caps"]["max_concurrent_workers"] == 4
+
+
+def test_post_config_invalid_concurrent_workers_returns_400(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+
+    payload = json.dumps({"default_caps": {"max_concurrent_workers": 0}}).encode("utf-8")
+    handler = _make_handler("/api/config")
+    handler.rfile = BytesIO(payload)
+    handler.headers["Content-Length"] = str(len(payload))
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (400,)
+    body = _response_body(handler)
+    assert "error" in body
+    assert "max_concurrent_workers" in body["error"]

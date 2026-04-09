@@ -105,10 +105,27 @@ export default function RetryHistory({ missionId, taskId, currentRetryCount }: R
               onClick={() => setSelectedAttempt(index)}
             >
               {`Attempt ${attempt.attempt_number ?? index + 1}`}
+              {attempt.cost_usd != null && attempt.cost_usd > 0 ? (
+                <span className="ml-1.5 opacity-70">${attempt.cost_usd.toFixed(4)}</span>
+              ) : null}
             </button>
           );
         })}
       </div>
+
+      {currentAttempt.tokens_in != null || currentAttempt.tokens_out != null || currentAttempt.cost_usd != null ? (
+        <div className="mb-3 flex flex-wrap gap-3 text-[11px] text-dim">
+          {currentAttempt.tokens_in != null ? (
+            <span>↓ {currentAttempt.tokens_in.toLocaleString()} in</span>
+          ) : null}
+          {currentAttempt.tokens_out != null ? (
+            <span>↑ {currentAttempt.tokens_out.toLocaleString()} out</span>
+          ) : null}
+          {currentAttempt.cost_usd != null ? (
+            <span className="font-semibold text-text">${currentAttempt.cost_usd.toFixed(4)}</span>
+          ) : null}
+        </div>
+      ) : null}
 
       <Terminal lines={(currentAttempt.output ?? '').split('\n')} done={true} />
 

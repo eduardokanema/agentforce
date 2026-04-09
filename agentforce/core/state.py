@@ -4,11 +4,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 from ..utils import fmt_duration
 from .spec import MissionSpec, TaskStatus, Caps
+
+
+class CapsViolation(str, Enum):
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
 
 
 @dataclass
@@ -18,16 +23,19 @@ class TaskState:
     spec_summary: str = ""              # title + first 200 chars of description
     status: TaskStatus = TaskStatus.PENDING
     retries: int = 0
+    retry_not_before: float = 0.0
     worker_output: str = ""
     review_feedback: str = ""
     review_score: int = 0                # 0-10 from reviewer
     blocking_issues: list[str] = field(default_factory=list)
     human_intervention_needed: bool = False
     human_intervention_message: str = ""
+    hard_block_reason: Optional[str] = None
     error_message: str = ""
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    attempt_history: list = field(default_factory=list)
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -53,16 +61,19 @@ class TaskState:
             "spec_summary": self.spec_summary,
             "status": status_value,
             "retries": self.retries,
+            "retry_not_before": self.retry_not_before,
             "worker_output": self.worker_output,
             "review_feedback": self.review_feedback,
             "review_score": self.review_score,
             "blocking_issues": self.blocking_issues,
             "human_intervention_needed": self.human_intervention_needed,
             "human_intervention_message": self.human_intervention_message,
+            "hard_block_reason": self.hard_block_reason,
             "error_message": self.error_message,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "cost_usd": self.cost_usd,
+            "attempt_history": self.attempt_history,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "last_updated": self.last_updated,
@@ -75,16 +86,19 @@ class TaskState:
             "spec_summary": "",
             "status": TaskStatus.PENDING,
             "retries": 0,
+            "retry_not_before": 0.0,
             "worker_output": "",
             "review_feedback": "",
             "review_score": 0,
             "blocking_issues": [],
             "human_intervention_needed": False,
             "human_intervention_message": "",
+            "hard_block_reason": None,
             "error_message": "",
             "tokens_in": 0,
             "tokens_out": 0,
             "cost_usd": 0.0,
+            "attempt_history": [],
             "started_at": None,
             "completed_at": None,
             "last_updated": datetime.now(timezone.utc).isoformat(),
@@ -222,7 +236,7 @@ class MissionState:
     def interventions_exhausted(self) -> bool:
         return self.total_human_interventions >= self.caps.max_human_interventions
 
-    def check_caps(self) -> str | None:
+    def check_caps(self) -> CapsViolation | str | None:
         """Check if any caps have been hit. Returns cap description or None."""
         cap_checks = {
             "retry_budget": ("Retry budget exhausted", self.retry_budget_exhausted()),
@@ -233,6 +247,14 @@ class MissionState:
             if hit:
                 self.caps_hit[cap_name] = msg
                 return msg
+
+        max_cost = self.caps.max_cost_usd
+        if max_cost and max_cost > 0:
+            total_cost = sum(ts.cost_usd for ts in self.task_states.values())
+            if total_cost >= max_cost:
+                self.caps_hit["budget"] = CapsViolation.BUDGET_EXCEEDED
+                return CapsViolation.BUDGET_EXCEEDED
+
         return None
 
     def summary(self) -> str:

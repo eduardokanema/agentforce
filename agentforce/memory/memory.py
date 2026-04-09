@@ -171,7 +171,7 @@ class Memory:
 
     # ── Combined context for agents ──
 
-    def agent_context(self, project_id: str, task_id: str | None = None) -> str:
+    def agent_context(self, project_id: str, task_id: str | None = None, query: str | None = None) -> str:
         """Combine all memory layers into a single context string for agent injection."""
         parts = []
 

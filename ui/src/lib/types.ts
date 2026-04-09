@@ -206,10 +206,18 @@ export interface FilesystemListing {
   parent: string | null;
 }
 
+export interface DefaultCaps {
+  max_concurrent_workers: number;
+  max_retries_per_task: number;
+  max_wall_time_minutes: number;
+  max_cost_usd: number;
+}
+
 export interface AppConfig {
   filesystem: {
     allowed_base_paths: string[];
   };
+  default_caps: DefaultCaps;
 }
 
 export interface Model {
@@ -235,6 +243,9 @@ export interface TaskAttempt {
   output: string;
   review?: string | null;
   score?: number | null;
+  tokens_in?: number | null;
+  tokens_out?: number | null;
+  cost_usd?: number | null;
 }
 
 type Assert<T extends true> = T;

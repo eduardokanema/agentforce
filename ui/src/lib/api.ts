@@ -1,6 +1,7 @@
 import type {
   AppConfig,
   Connector,
+  DefaultCaps,
   FilesystemListing,
   Model,
   MissionState,
@@ -249,6 +250,14 @@ export function setAgentModel(id: string, model: string | null): Promise<void> {
 
 export function getConfig(): Promise<AppConfig> {
   return requestJson<AppConfig>('/api/config');
+}
+
+export function updateDefaultCaps(caps: DefaultCaps): Promise<{ default_caps: DefaultCaps }> {
+  return requestJson<{ default_caps: DefaultCaps }>('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ default_caps: caps }),
+  });
 }
 
 export function getFilesystemListing(path: string): Promise<FilesystemListing> {

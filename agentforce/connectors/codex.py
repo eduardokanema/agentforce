@@ -7,6 +7,8 @@ import subprocess
 import threading
 from pathlib import Path
 
+from agentforce.core.token_event import TokenEvent
+
 
 def available() -> bool:
     try:
@@ -44,13 +46,6 @@ def _format_event(event: dict) -> str | None:
                     parts.append(f"  … ({len(lines) - 30} more lines)")
             return "\n".join(parts)
 
-    elif t == "turn.completed":
-        usage = event.get("usage", {})
-        inp = usage.get("input_tokens", 0)
-        out = usage.get("output_tokens", 0)
-        cached = usage.get("cached_input_tokens", 0)
-        return f"── turn complete  in={inp} (cached={cached}) out={out} ──"
-
     return None
 
 
@@ -68,7 +63,7 @@ def run(
     stream_path: Path = None,
     variant: str = None,
     session_id: str = None,
-) -> tuple[bool, str, str, str | None]:
+) -> tuple[bool, str, str, str | None, TokenEvent]:
     """Run codex non-interactively via `codex exec --json`.
 
     --json makes codex emit JSONL events to stdout instead of a TUI,
@@ -76,7 +71,7 @@ def run(
     returned as session_id so retries can resume the same session.
 
     Returns:
-        (success, output, error, thread_id | None)
+        (success, output, error, thread_id | None, token_event)
     """
     if session_id:
         cmd = [
@@ -101,6 +96,8 @@ def run(
     text_parts: list[str] = []
     returned_thread_id: str | None = None
     timed_out = False
+    tokens_in = 0
+    tokens_out = 0
 
     try:
         proc = subprocess.Popen(
@@ -135,12 +132,18 @@ def run(
                     # Capture thread_id from the first event
                     if returned_thread_id is None:
                         returned_thread_id = event.get("thread_id")
-                    formatted = _format_event(event)
-                    if formatted:
-                        text_parts.append(formatted)
-                        if sf:
-                            sf.write(formatted + "\n")
-                            sf.flush()
+                    # Extract token counts from turn.completed — don't add to output
+                    if event.get("type") == "turn.completed":
+                        usage = event.get("usage", {})
+                        tokens_in += usage.get("input_tokens", 0)
+                        tokens_out += usage.get("output_tokens", 0)
+                    else:
+                        formatted = _format_event(event)
+                        if formatted is not None:
+                            text_parts.append(formatted)
+                            if sf:
+                                sf.write(formatted + "\n")
+                                sf.flush()
                 except (json.JSONDecodeError, AttributeError):
                     # Non-JSON line (banner, error) — pass through as-is
                     text_parts.append(raw_stripped)
@@ -153,12 +156,14 @@ def run(
             if sf:
                 sf.close()
 
+        token_event = TokenEvent(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=0.0)
         if timed_out:
-            return False, "\n".join(text_parts).strip(), "codex timed out", returned_thread_id
+            return False, "\n".join(text_parts).strip(), "codex timed out", returned_thread_id, token_event
 
         error = proc.stderr.read().strip()
         success = proc.returncode == 0
-        return success, "\n".join(text_parts).strip(), error, returned_thread_id
+        return success, "\n".join(text_parts).strip(), error, returned_thread_id, token_event
 
     except Exception as e:
-        return False, "\n".join(text_parts).strip(), str(e), returned_thread_id
+        token_event = TokenEvent(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=0.0)
+        return False, "\n".join(text_parts).strip(), str(e), returned_thread_id, token_event
