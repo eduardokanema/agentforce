@@ -144,6 +144,37 @@ class TestWorkerLifecycle:
         engine.apply_worker_result("01", False, error="Fail 2")
         assert engine.state.get_task("01").status == "failed"
 
+    def test_manual_retry_does_not_increment_retry_counters(self, tmp_path):
+        engine = make_engine(tmp_path)
+        task_state = engine.state.get_task("01")
+        task_state.status = "failed"
+        task_state.retries = 2
+        engine.state.total_retries = 4
+        engine._save()
+
+        engine.manual_retry("01")
+
+        task_state = engine.state.get_task("01")
+        assert task_state.status == "retry"
+        assert task_state.retries == 2
+        assert engine.state.total_retries == 4
+
+    def test_manual_retry_clears_human_intervention_flags(self, tmp_path):
+        engine = make_engine(tmp_path)
+        task_state = engine.state.get_task("01")
+        task_state.status = "needs_human"
+        task_state.human_intervention_needed = True
+        task_state.human_intervention_message = "Need approval"
+        engine._save()
+
+        engine.manual_retry("01")
+
+        task_state = engine.state.get_task("01")
+        assert task_state.status == "retry"
+        assert task_state.human_intervention_needed is False
+        assert task_state.human_intervention_message == ""
+        assert engine.state.needs_human() == []
+
 
 class TestReviewerLifecycle:
     def test_approved_review(self, tmp_path):

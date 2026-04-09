@@ -7,23 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from ..utils import fmt_duration
 from .spec import MissionSpec, TaskStatus, Caps
-
-
-def _fmt_duration(started_at: str, ended_at: str | None) -> str:
-    """Render elapsed time as a compact human-readable string."""
-    try:
-        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-        end_ts = ended_at or datetime.now(timezone.utc).isoformat()
-        ended = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
-        secs = int((ended - started).total_seconds())
-        if secs < 60:
-            return f"{secs}s"
-        if secs < 3600:
-            return f"{secs // 60}m {secs % 60}s"
-        return f"{secs // 3600}h {(secs % 3600) // 60}m"
-    except Exception:
-        return "?"
 
 
 @dataclass
@@ -31,7 +16,7 @@ class TaskState:
     """Runtime state for a single task."""
     task_id: str
     spec_summary: str = ""              # title + first 200 chars of description
-    status: str = TaskStatus.PENDING
+    status: TaskStatus = TaskStatus.PENDING
     retries: int = 0
     worker_output: str = ""
     review_feedback: str = ""
@@ -48,26 +33,25 @@ class TaskState:
     last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def can_progress(self) -> bool:
-        s = self.status.value if hasattr(self.status, 'value') else self.status
-        return s in (TaskStatus.PENDING.value, TaskStatus.RETRY.value,
-                     TaskStatus.SPEC_WRITING.value, TaskStatus.TESTS_WRITTEN.value)
+        return self.status in (TaskStatus.PENDING, TaskStatus.RETRY,
+                               TaskStatus.SPEC_WRITING, TaskStatus.TESTS_WRITTEN)
 
     def can_review(self) -> bool:
-        s = self.status.value if hasattr(self.status, 'value') else self.status
-        return s == TaskStatus.COMPLETED.value
+        return self.status == TaskStatus.COMPLETED
 
     def needs_human_attention(self) -> bool:
-        s = self.status.value if hasattr(self.status, 'value') else self.status
-        return self.human_intervention_needed or s == TaskStatus.NEEDS_HUMAN.value
+        return self.human_intervention_needed or self.status == TaskStatus.NEEDS_HUMAN
 
     def bump(self):
         self.last_updated = datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> dict:
+        # Serialize status enum to string for JSON
+        status_value = self.status.value if isinstance(self.status, TaskStatus) else self.status
         return {k: v for k, v in {
             "task_id": self.task_id,
             "spec_summary": self.spec_summary,
-            "status": self.status,
+            "status": status_value,
             "retries": self.retries,
             "worker_output": self.worker_output,
             "review_feedback": self.review_feedback,
@@ -106,6 +90,7 @@ class TaskState:
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
         defaults.update(d)
+        defaults["status"] = TaskStatus(d.get("status", "pending"))
         return cls(**defaults)
 
 
@@ -305,7 +290,7 @@ class MissionState:
             "done_tasks": done_tasks,
             "total_tasks": total_tasks,
             "pct": pct,
-            "duration": _fmt_duration(self.started_at, self.completed_at),
+            "duration": fmt_duration(self.started_at, self.completed_at),
             "worker_agent": self.worker_agent,
             "worker_model": self.worker_model,
             "started_at": self.started_at,

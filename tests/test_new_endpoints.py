@@ -7,7 +7,16 @@ from unittest.mock import MagicMock
 
 from agentforce.core.spec import Caps, MissionSpec, TaskSpec, TaskStatus
 from agentforce.core.state import MissionState, TaskState
+from agentforce.server import state_io
 from agentforce.server.handler import DashboardHandler
+
+
+def _set_handler_config(state_dir: Path) -> None:
+    DashboardHandler.config = DashboardHandler.config.__class__(
+        state_dir=Path(state_dir),
+        host="localhost",
+        port=8080,
+    )
 
 
 def _spec() -> MissionSpec:
@@ -69,15 +78,18 @@ def _seed_state(tmp_path: Path, monkeypatch) -> Path:
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     _state().save(state_dir / "mission-123.json")
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", state_dir)
+    _set_handler_config(state_dir)
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path / ".agentforce")
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", state_dir)
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", tmp_path / ".agentforce")
     return state_dir
 
 
 def test_get_models_returns_three_claude_models(tmp_path, monkeypatch):
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path / ".agentforce")
-    monkeypatch.setattr("agentforce.server.handler._check_agent_binary", lambda binary: binary == "claude")
-    monkeypatch.setattr("agentforce.server.handler._fetch_ollama_models", lambda: [])
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", tmp_path / ".agentforce")
+    monkeypatch.setattr("agentforce.server.routes.providers._check_agent_binary", lambda binary: binary == "claude")
+    monkeypatch.setattr("agentforce.server.routes.providers._fetch_ollama_models", lambda: [])
     monkeypatch.setattr("keyring.get_password", lambda *_args, **_kwargs: None)
 
     handler = _make_handler("/api/models")
@@ -235,7 +247,9 @@ def test_post_restart_requeues_matching_tasks(tmp_path, monkeypatch):
 
 def test_post_connectors_configure_persists_token(tmp_path, monkeypatch):
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path / ".agentforce")
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", tmp_path / "state")
+    _set_handler_config(tmp_path / "state")
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", tmp_path / ".agentforce")
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", tmp_path / "state")
     monkeypatch.setattr("keyring.set_password", MagicMock())
 
     payload = json.dumps({"token": "abc123"}).encode("utf-8")
@@ -252,12 +266,14 @@ def test_post_connectors_configure_persists_token(tmp_path, monkeypatch):
 
 def test_post_connectors_github_test_uses_minimal_request(tmp_path, monkeypatch):
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path / ".agentforce")
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", tmp_path / "state")
+    _set_handler_config(tmp_path / "state")
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", tmp_path / ".agentforce")
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", tmp_path / "state")
     monkeypatch.setattr("keyring.get_password", lambda *_args, **_kwargs: "gh-token")
 
     urlopen = MagicMock()
     urlopen.return_value.__enter__.return_value.read.return_value = b"{}"
-    monkeypatch.setattr("agentforce.server.handler.urllib_request.urlopen", urlopen)
+    monkeypatch.setattr("agentforce.server.routes.providers.urllib_request.urlopen", urlopen)
 
     handler = _make_handler("/api/connectors/github/test")
 
@@ -271,7 +287,9 @@ def test_post_connectors_github_test_uses_minimal_request(tmp_path, monkeypatch)
 
 def test_delete_connectors_github_returns_deleted(tmp_path, monkeypatch):
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path / ".agentforce")
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", tmp_path / "state")
+    _set_handler_config(tmp_path / "state")
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", tmp_path / ".agentforce")
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", tmp_path / "state")
     monkeypatch.setattr("keyring.delete_password", MagicMock())
 
     handler = _make_handler("/api/connectors/github")
