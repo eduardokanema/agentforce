@@ -1,0 +1,226 @@
+mission:
+  name: "Platform Evolution — Scalability & Simplicity Refactor"
+  goal: |
+    Refactor the AgentForce Python backend to fix a safety bug (retry cap bypass),
+    eliminate DRY violations (duplicated duration formatter and model-fetching logic),
+    split a 2033-line monolithic handler into route modules with a clean URL dispatch
+    table, normalize TaskStatus deserialization, and replace thread-unsafe global state
+    with a config object. No behavior changes. No new dependencies.
+  definition_of_done:
+    - "agentforce/utils.py exists with a single canonical fmt_duration function"
+    - "handler.py line count is under 200 lines"
+    - "agentforce/server/routes/ package exists with 7 route modules"
+    - "agentforce/server/state_io.py exists with shared server helpers"
+    - "TaskState.from_dict() always returns TaskStatus enum members, never raw strings"
+    - "engine.manual_retry(task_id) method exists and _post_task_retry routes through it"
+    - "No global STATE_DIR mutation in handler.py"
+    - "_inject_path() uses config.state_dir not AGENTFORCE_HOME"
+    - "All tests pass: pytest tests/ green"
+    - "Server starts and UI loads without errors"
+  caps:
+    max_concurrent_workers: 1
+    max_retries_per_task: 2
+    max_retries_global: 8
+    max_wall_time_minutes: 180
+    max_human_interventions: 3
+    review: enabled
+  working_dir: /Users/rent/Projects/agentforce
+
+tasks:
+  - id: "01"
+    title: "Extract shared utilities + normalize TaskStatus deserialization"
+    description: |
+      Create agentforce/utils.py with a single canonical fmt_duration function.
+      Use handler.py's _format_duration as the base (it handles None started_at
+      gracefully by returning "?"). Delete the local _fmt_duration copies from
+      state.py and render.py; delete _format_duration from handler.py. Update
+      all call sites to import from agentforce.utils.
+
+      Then fix the root cause of the TaskStatus type inconsistency: update
+      TaskState.from_dict() in state.py to coerce the deserialized status string
+      to a TaskStatus enum member using TaskStatus(d.get("status", "pending")).
+      Once this is in place, remove all hasattr(self.status, 'value') defensive
+      checks in can_progress() and anywhere else they appear in state.py.
+    acceptance_criteria:
+      - "from agentforce.utils import fmt_duration works from any module"
+      - "No _fmt_duration or _format_duration functions remain in state.py, render.py, or handler.py"
+      - "TaskState.from_dict({'status': 'pending', ...}).status is TaskStatus.PENDING (enum, not string)"
+      - "No hasattr(status, 'value') checks remain in state.py"
+      - "pytest tests/ passes"
+    tdd:
+      test_file: "tests/test_utils.py"
+      test_command: "pytest tests/test_utils.py tests/test_state.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/utils.py"
+      - "agentforce/core/state.py"
+      - "agentforce/server/render.py"
+
+  - id: "02"
+    title: "Split monolithic handler + add URL routing table + extract state_io helpers"
+    description: |
+      This is the largest task. Do it in three sub-steps to avoid circular imports:
+
+      STEP 1 — Extract agentforce/server/state_io.py FIRST.
+      Move these helpers out of handler.py into the new module:
+        _load_state(mission_id), _state_path(mission_id),
+        _broadcast_mission_refresh(), _task_status_value(),
+        _load_connectors_metadata(), _save_connectors_metadata(),
+        _load_providers_metadata(), _save_providers_metadata()
+      All subsequent route modules will import from state_io, NOT from handler.
+
+      STEP 2 — Create agentforce/server/routes/ package with 7 modules:
+        missions.py  — GET/POST/DELETE mission endpoints
+        tasks.py     — GET/POST task endpoints (stop, retry, inject, resolve)
+        providers.py — GET/POST/DELETE provider endpoints
+        models.py    — GET models endpoint
+        filesystem.py — GET filesystem browse endpoint
+        plan.py      — POST plan generation endpoint (SSE streaming)
+        static.py    — SPA serving + legacy SSE stream
+      Each route function signature: (handler: DashboardHandler, parts: list[str],
+      query: dict) -> tuple[int, dict | None].
+
+      STEP 3 — Replace the if/elif dispatch chains in do_GET, do_POST, do_DELETE
+      with a ROUTES list of (method: str, pattern: re.Pattern, handler_fn: Callable)
+      tuples. A single _dispatch(method, path) helper iterates ROUTES, matches,
+      and calls the handler function. do_GET/do_POST/do_DELETE each call _dispatch.
+
+      Update tests/test_api_routes.py for any moved imports. DashboardHandler
+      itself stays in handler.py (thin dispatcher), so most test imports are stable.
+    acceptance_criteria:
+      - "handler.py line count is under 200 lines"
+      - "agentforce/server/state_io.py exists and is importable"
+      - "agentforce/server/routes/ package exists with 7 .py files"
+      - "python -c 'from agentforce.server import handler; from agentforce.server.routes import missions, tasks, providers' runs with no errors"
+      - "All existing API endpoints respond identically — pytest tests/test_api_routes.py passes"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "pytest tests/test_api_routes.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/state_io.py"
+      - "agentforce/server/routes/__init__.py"
+      - "agentforce/server/routes/missions.py"
+      - "agentforce/server/routes/tasks.py"
+      - "agentforce/server/routes/providers.py"
+      - "agentforce/server/routes/models.py"
+      - "agentforce/server/routes/filesystem.py"
+      - "agentforce/server/routes/plan.py"
+      - "agentforce/server/routes/static.py"
+      - "agentforce/server/handler.py"
+
+  - id: "03"
+    title: "Fix _post_task_retry logic bypass (test-first)"
+    description: |
+      The current _post_task_retry (in handler.py or routes/tasks.py if Task 02
+      has landed) directly mutates task_state.retries += 1 and state.total_retries
+      += 1, bypassing the engine's cap-checking logic.
+
+      DO THIS IN ORDER:
+
+      1. Write the regression test FIRST (it must FAIL against current code).
+         In tests/test_api_routes.py, add a test that:
+           a) Sets up a mission with max_retries_per_task=2, task retries=2, status=FAILED
+           b) Calls POST /api/mission/{id}/task/{id}/retry
+           c) Asserts task_state.retries is still 2 (not 3)
+           d) Asserts task_state.status is "retry" or "pending"
+           e) Asserts state.total_retries is unchanged
+         Confirm the test fails before proceeding.
+
+      2. Add engine.manual_retry(task_id: str) -> None to MissionEngine in engine.py:
+           - Load task state
+           - Raise ValueError if task is not in FAILED or NEEDS_HUMAN status
+           - Set ts.status = TaskStatus.RETRY (do NOT increment ts.retries or
+             state.total_retries — this is a human-initiated reset, not a worker failure)
+           - Call self._save() and broadcast via WebSocket
+
+      3. In _post_task_retry (handler.py or routes/tasks.py), replace the direct
+         mutation block with a call to engine.manual_retry(task_id). The engine
+         instance is available via the autonomous runner — get it from the
+         running autonomous context or load it from state.
+
+      4. Confirm the regression test now passes.
+    acceptance_criteria:
+      - "The regression test from step 1 passes"
+      - "engine.manual_retry() method exists in engine.py"
+      - "_post_task_retry no longer contains retries += 1 or total_retries += 1"
+      - "Manually retrying a task does not increment task_state.retries"
+      - "pytest tests/ passes"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "pytest tests/test_api_routes.py -v -k retry"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/engine.py"
+
+  - id: "04"
+    title: "Consolidate duplicated model-fetching logic"
+    description: |
+      In handler.py (or routes/providers.py and routes/models.py if Task 02 landed),
+      the model-fetching blocks for _fetch_claude_code_models() and _fetch_codex_models()
+      are duplicated verbatim in both _providers_list() and _models_list(). Each call
+      does: load metadata, check cache staleness, fetch if needed, write cache, call
+      _save_providers_metadata(). Two concurrent requests can race and write
+      providers.json twice.
+
+      1. Extract _get_provider_models(provider_name: str) -> list[str] that encapsulates
+         the load/check/fetch/write cycle.
+      2. Add a module-level threading.Lock() (e.g., _PROVIDERS_FETCH_LOCK) around the
+         fetch + write block inside _get_provider_models to prevent the TOCTOU race.
+      3. Replace the duplicated blocks in _providers_list() and _models_list() with
+         calls to _get_provider_models().
+    acceptance_criteria:
+      - "_get_provider_models function exists as single source of truth"
+      - "No duplicated model-fetching blocks in _providers_list or _models_list"
+      - "_PROVIDERS_FETCH_LOCK or equivalent protects the fetch+write block"
+      - "pytest tests/ passes"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "pytest tests/test_api_routes.py -v -k model"
+      tests_must_pass: true
+
+  - id: "05"
+    title: "Fix global mutable state + _inject_path inconsistency"
+    description: |
+      Two related problems in handler.py:
+
+      1. GLOBAL STATE_DIR: serve() mutates a module-level global:
+         `global STATE_DIR; STATE_DIR = Path(state_dir)`
+         This hurts testability (tests must monkeypatch the global) and conceptually
+         is thread-unsafe (even if safe in practice due to startup ordering).
+
+         Fix: introduce a ServerConfig dataclass with state_dir: Path, host: str,
+         port: int. In serve(), set DashboardHandler.config = ServerConfig(...) before
+         serve_forever(). Remove the global STATE_DIR.
+
+      2. _inject_path() hardcodes AGENTFORCE_HOME / "state" independently of STATE_DIR:
+         `return AGENTFORCE_HOME / "state" / mission_id / f"{task_id}.inject"`
+         This means if state_dir is overridden (e.g. in tests), inject files go to the
+         wrong location. Fix: use self.config.state_dir instead.
+
+      3. Update tests/test_api_routes.py: replace
+         `monkeypatch.setattr("agentforce.server.handler.STATE_DIR", state_dir)`
+         with
+         `DashboardHandler.config = ServerConfig(state_dir=Path(state_dir), ...)`
+         so tests don't silently break.
+    acceptance_criteria:
+      - "No 'global STATE_DIR' statement in handler.py"
+      - "ServerConfig dataclass exists and DashboardHandler.config is set in serve()"
+      - "_inject_path() uses self.config.state_dir"
+      - "Tests that previously monkeypatched STATE_DIR are updated and pass"
+      - "pytest tests/ passes"
+    dependencies:
+      - "02"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "pytest tests/ -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/handler.py"
+      - "tests/test_api_routes.py"

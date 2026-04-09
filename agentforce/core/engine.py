@@ -455,6 +455,23 @@ class MissionEngine:
         self.state.log_event("task_failed", task_id, "Marked as failed by human")
         self._save()
 
+    def manual_retry(self, task_id: str) -> None:
+        """Reset a failed task back to retry without consuming retry budget."""
+        ts = self.state.get_task(task_id)
+        if not ts:
+            raise ValueError(f"Unknown task: {task_id}")
+
+        status = getattr(ts.status, "value", ts.status)
+        if status not in (TaskStatus.FAILED.value, TaskStatus.NEEDS_HUMAN.value):
+            raise ValueError(f"Task {task_id} cannot be manually retried from status {status!r}")
+
+        ts.human_intervention_needed = False
+        ts.human_intervention_message = ""
+        ts.status = TaskStatus.RETRY
+        ts.bump()
+        self.state.log_event("task_retry", task_id, "Manually retried task")
+        self._save()
+
     # ── Status queries ──
 
     def is_done(self) -> bool:
