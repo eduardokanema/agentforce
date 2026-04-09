@@ -187,16 +187,42 @@ class MissionEngine:
         """
         actions = []
 
+        if self.is_done():
+            if self.state.completed_at is None:
+                self.state.completed_at = datetime.now(timezone.utc).isoformat()
+                self.state.log_event("mission_completed", details="All tasks review approved")
+                if self.state.spec.caps.review == "disabled":
+                    self.state.log_event("review_skipped", details="Review disabled in caps")
+                self._save()
+            return actions
+
+        if self.is_failed():
+            if self.state.completed_at is None:
+                self.state.completed_at = datetime.now(timezone.utc).isoformat()
+                self.state.log_event("mission_failed", details="Mission already failed")
+                if self.state.spec.caps.review == "disabled":
+                    self.state.log_event("review_skipped", details="Review disabled in caps")
+                self._save()
+            return actions
+
         # Check caps
         cap_hit = self._check_caps()
         if cap_hit:
             self.state.log_event("mission_failed", details=cap_hit)
+            if self.state.spec.caps.review == "disabled":
+                self.state.log_event("review_skipped", details="Review disabled in caps")
+            if self.state.completed_at is None:
+                self.state.completed_at = datetime.now(timezone.utc).isoformat()
             self._save()
             return actions  # Stop all activity
 
         # Human interventions first — if we're past the limit, fail the mission
         if self.state.interventions_exhausted() and self.state.needs_human():
             self.state.log_event("mission_failed", details="Intervention limit exhausted")
+            if self.state.spec.caps.review == "disabled":
+                self.state.log_event("review_skipped", details="Review disabled in caps")
+            if self.state.completed_at is None:
+                self.state.completed_at = datetime.now(timezone.utc).isoformat()
             self._save()
             return actions
 

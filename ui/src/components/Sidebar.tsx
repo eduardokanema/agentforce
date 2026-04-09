@@ -7,7 +7,7 @@ type WsConnectionState = 'connecting' | 'open' | 'closed';
 const NAV_ITEMS = [
   { label: 'Mission Control', icon: '⌘', to: '/' },
   { label: 'Plan Mode', icon: '◈', to: '/plan' },
-  { label: 'Connectors', icon: '⬡', to: '/connectors' },
+  { label: 'Models', icon: '⬡', to: '/models' },
   { label: 'Telemetry', icon: '◎', to: '/telemetry' },
 ] as const;
 

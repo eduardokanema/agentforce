@@ -2,15 +2,21 @@ import { createContext, useEffect, useMemo, useRef, useState, type ReactNode } f
 
 export type ToastType = 'success' | 'error' | 'info';
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface ToastItem {
   id: string;
   message: string;
   type: ToastType;
+  action?: ToastAction;
 }
 
 export interface ToastContextValue {
   toasts: ToastItem[];
-  addToast: (message: string, type: ToastType) => string;
+  addToast: (message: string, type: ToastType, action?: ToastAction) => string;
   removeToast: (id: string) => void;
 }
 
@@ -47,9 +53,21 @@ export function ToastViewport({ toasts, onDismiss }: { toasts: ToastItem[]; onDi
         >
           <div className="flex items-start gap-3">
             <p className="min-w-0 flex-1">{toast.message}</p>
+            {toast.action ? (
+              <button
+                type="button"
+                className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.08em] transition-colors hover:text-text"
+                onClick={() => {
+                  toast.action!.onClick();
+                  onDismiss(toast.id);
+                }}
+              >
+                {toast.action.label}
+              </button>
+            ) : null}
             <button
               type="button"
-              className="text-[11px] uppercase tracking-[0.08em] text-dim transition-colors hover:text-text"
+              className="shrink-0 text-[11px] uppercase tracking-[0.08em] text-dim transition-colors hover:text-text"
               onClick={() => onDismiss(toast.id)}
             >
               Dismiss
@@ -79,9 +97,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 
   const addToast = useMemo(
-    () => (message: string, type: ToastType): string => {
+    () => (message: string, type: ToastType, action?: ToastAction): string => {
       const id = makeToastId();
-      setToasts((current) => [...current, { id, message, type }]);
+      setToasts((current) => [...current, { id, message, type, action }]);
 
       const timer = setTimeout(() => {
         timersRef.current.delete(id);

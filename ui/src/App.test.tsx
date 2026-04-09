@@ -94,7 +94,7 @@ describe('App routes', () => {
   });
 
   it('renders the connectors and telemetry routes', () => {
-    const connectors = renderAt('/connectors');
+    const connectors = renderAt('/models');
     expect(connectors.container.textContent).toContain('Connectors page');
     act(() => {
       connectors.root.unmount();
