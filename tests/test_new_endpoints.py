@@ -74,7 +74,12 @@ def _seed_state(tmp_path: Path, monkeypatch) -> Path:
     return state_dir
 
 
-def test_get_models_returns_three_claude_models():
+def test_get_models_returns_three_claude_models(tmp_path, monkeypatch):
+    monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path / ".agentforce")
+    monkeypatch.setattr("agentforce.server.handler._check_agent_binary", lambda binary: binary == "claude")
+    monkeypatch.setattr("agentforce.server.handler._fetch_ollama_models", lambda: [])
+    monkeypatch.setattr("keyring.get_password", lambda *_args, **_kwargs: None)
+
     handler = _make_handler("/api/models")
 
     handler.do_GET()

@@ -253,13 +253,9 @@ def _check_agent_binary(binary: str) -> bool:
 #   - The cache file is refreshed automatically whenever the user runs codex.
 
 _CLAUDE_CODE_MODELS: list[dict] = [
-    # ── Claude 4.x ────────────────────────────────────────────────────────────
-    {"id": "claude-opus-4-6",          "name": "Claude Opus 4.6",   "latency_label": "Powerful"},
-    {"id": "claude-sonnet-4-6",        "name": "Claude Sonnet 4.6", "latency_label": "Standard"},
-    # ── Claude 4.5 ────────────────────────────────────────────────────────────
     {"id": "claude-opus-4-5",          "name": "Claude Opus 4.5",   "latency_label": "Powerful"},
     {"id": "claude-sonnet-4-5",        "name": "Claude Sonnet 4.5", "latency_label": "Standard"},
-    {"id": "claude-haiku-4-5-20251001","name": "Claude Haiku 4.5",  "latency_label": "Fast"},
+    {"id": "claude-haiku-4-5",         "name": "Claude Haiku 4.5",  "latency_label": "Fast"},
 ]
 
 _CODEX_MODELS_STATIC_FALLBACK: list[dict] = [
@@ -670,6 +666,69 @@ def _delete_provider_data(provider_id: str) -> tuple[int, dict]:
     return 200, {"deleted": True}
 
 
+def _flags_path() -> Path:
+    return AGENTFORCE_HOME / "mission_flags.json"
+
+
+def _load_mission_flags() -> dict[str, dict]:
+    path = _flags_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = _jsonlib.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_mission_flags(flags: dict[str, dict]) -> None:
+    path = _flags_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        _jsonlib.dump(flags, fh, indent=2)
+
+
+def _archive_mission(mission_id: str) -> tuple[int, dict]:
+    state = _load_state(mission_id)
+    if not state:
+        return 404, {"error": f"Mission {mission_id!r} not found"}
+    flags = _load_mission_flags()
+    flags[state.mission_id] = {**flags.get(state.mission_id, {}), "archived": True, "archived_at": _now_iso()}
+    flags[state.mission_id].pop("deleted", None)
+    _save_mission_flags(flags)
+    _broadcast_mission_list_refresh()
+    return 200, {"archived": True}
+
+
+def _unarchive_mission(mission_id: str) -> tuple[int, dict]:
+    state = _load_state(mission_id)
+    if not state:
+        return 404, {"error": f"Mission {mission_id!r} not found"}
+    flags = _load_mission_flags()
+    entry = flags.get(state.mission_id, {})
+    entry.pop("archived", None)
+    entry.pop("archived_at", None)
+    if entry:
+        flags[state.mission_id] = entry
+    else:
+        flags.pop(state.mission_id, None)
+    _save_mission_flags(flags)
+    _broadcast_mission_list_refresh()
+    return 200, {"unarchived": True}
+
+
+def _soft_delete_mission(mission_id: str) -> tuple[int, dict]:
+    state = _load_state(mission_id)
+    if not state:
+        return 404, {"error": f"Mission {mission_id!r} not found"}
+    flags = _load_mission_flags()
+    flags[state.mission_id] = {**flags.get(state.mission_id, {}), "deleted": True, "deleted_at": _now_iso()}
+    _save_mission_flags(flags)
+    _broadcast_mission_list_refresh()
+    return 200, {"deleted": True}
+
+
 def _task_status_value(task_state) -> str:
     status = getattr(task_state.status, "value", task_state.status)
     return str(status)
@@ -782,15 +841,22 @@ def _connector_test_request(name: str, token: str) -> None:
         raise ValueError("no token configured")
 
 
-def _load_all_missions(state_dir: Path | None = None) -> list:
+def _load_all_missions(state_dir: Path | None = None, include_archived: bool = False) -> list:
     state_root = Path(state_dir) if state_dir is not None else STATE_DIR
     if not state_root.exists():
         return []
     from agentforce.core.state import MissionState
+    flags = _load_mission_flags()
     missions = []
     for sf in sorted(state_root.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
         try:
-            missions.append(MissionState.load(sf))
+            mission = MissionState.load(sf)
+            mf = flags.get(mission.mission_id, {})
+            if mf.get("deleted"):
+                continue
+            if mf.get("archived") and not include_archived:
+                continue
+            missions.append(mission)
         except Exception:
             pass
     return missions
@@ -919,6 +985,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[1] == "mission" and parts[3] == "restart":
                 self._post_mission_restart(parts[2])
                 return
+            if len(parts) == 4 and parts[1] == "mission" and parts[3] == "archive":
+                status, payload = _archive_mission(parts[2])
+                self._json(payload, status=status)
+                return
+            if len(parts) == 4 and parts[1] == "mission" and parts[3] == "unarchive":
+                status, payload = _unarchive_mission(parts[2])
+                self._json(payload, status=status)
+                return
+            if len(parts) == 4 and parts[1] == "mission" and parts[3] == "review":
+                self._post_mission_review(parts[2], body)
+                return
             if len(parts) == 6 and parts[1] == "mission" and parts[3] == "task":
                 if parts[5] == "stop":
                     self._post_task_stop(parts[2], parts[4])
@@ -987,6 +1064,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "providers":
             self._delete_provider(parts[2])
+            return
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "mission":
+            status, payload = _soft_delete_mission(parts[2])
+            self._json(payload, status=status)
             return
         self._json({"error": "Not found"}, status=404)
 
@@ -1203,6 +1284,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "mission" and parts[3] == "review":
+            mission_id = parts[2]
+            review_file = AGENTFORCE_HOME / "reviews" / f"{mission_id}_review.json"
+            skip_file = AGENTFORCE_HOME / "reviews" / f"{mission_id}_skipped"
+            if skip_file.exists():
+                self._json({"skipped": True, "mission_id": mission_id})
+                return
+            if not review_file.exists():
+                self._json({"error": "No review found. POST to /api/mission/{id}/review to generate."}, status=404)
+                return
+            self._json(_jsonlib.loads(review_file.read_text()))
+            return
+
         if len(parts) == 3 and parts[1] == "mission":
             state = _load_state(parts[2])
             if not state:
@@ -1228,6 +1322,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if task_spec:
                 payload.update(task_spec.to_dict())
             self._json(payload)
+            return
+
+        if len(parts) == 6 and parts[1] == "mission" and parts[3] == "task" and parts[5] == "output":
+            mission_id, task_id = parts[2], parts[4]
+            stream_file = _STREAMS_DIR / f"{mission_id}_{task_id}.log"
+            if not stream_file.exists():
+                self._json({"lines": []})
+                return
+            try:
+                content = stream_file.read_text(encoding="utf-8", errors="replace")
+                lines = content.splitlines()
+            except OSError:
+                lines = []
+            self._json({"lines": lines})
             return
 
         if len(parts) == 6 and parts[1] == "mission" and parts[3] == "task" and parts[5] == "attempts":
@@ -1626,6 +1734,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
         _broadcast_mission_list_refresh()
         self._json({"requeued": requeued})
 
+    def _post_mission_review(self, mission_id: str, body: dict) -> None:
+        from agentforce.review.config import is_review_enabled
+        if not is_review_enabled():
+            self._json({"error": "Review disabled globally"}, status=403)
+            return
+
+        review_file = AGENTFORCE_HOME / "reviews" / f"{mission_id}_review.json"
+        if review_file.exists():
+            import time as _t
+            age_s = _t.time() - review_file.stat().st_mtime
+            if age_s < 300:
+                self._json({"error": f"Review too recent ({age_s:.0f}s ago). Wait 5 minutes."}, status=429)
+                return
+
+        if body.get("skip"):
+            skip_file = AGENTFORCE_HOME / "reviews" / f"{mission_id}_skipped"
+            skip_file.parent.mkdir(parents=True, exist_ok=True)
+            skip_file.touch()
+            self._json({"skipped": True})
+            return
+
+        sf = STATE_DIR / f"{mission_id}.json"
+        if not sf.exists():
+            self._json({"error": f"Mission {mission_id!r} not found"}, status=404)
+            return
+
+        from agentforce.memory.memory import Memory
+        from agentforce.review.reviewer import MissionReviewer
+
+        memory = Memory(AGENTFORCE_HOME / "memory")
+        reviewer = MissionReviewer(memory=memory)
+        model = body.get("model") or None
+        try:
+            report = reviewer.review(mission_id, model=model)
+            self._json(report.to_dict())
+        except Exception as exc:
+            self._json({"error": str(exc)}, status=500)
+
     def _post_task_stop(self, mission_id: str, task_id: str) -> None:
         state = _load_state(mission_id)
         if not state:
@@ -1794,6 +1940,76 @@ class DashboardHandler(BaseHTTPRequestHandler):
         metadata.pop(name, None)
         _save_connectors_metadata(metadata)
         self._json({"deleted": True})
+
+
+def _watch_streams(
+    streams_dir: Path | None = None,
+    state_dir: Path | None = None,
+    stop_event: threading.Event | None = None,
+    poll_seconds: float = 1.0,
+) -> None:
+    """Background thread: tail active stream log files and broadcast via WebSocket."""
+    streams_root = streams_dir if streams_dir is not None else _STREAMS_DIR
+    state_root = Path(state_dir) if state_dir is not None else STATE_DIR
+    file_positions: dict[str, tuple[int, int]] = {}  # stem -> (pos, seq)
+    done_files: set[str] = set()
+
+    while stop_event is None or not stop_event.is_set():
+        _time.sleep(poll_seconds)
+        if not streams_root.exists():
+            continue
+
+        for log_file in streams_root.glob("*.log"):
+            stem = log_file.stem  # e.g. "ed018a6f_04"
+            if stem in done_files:
+                continue
+
+            # Parse mission_id and task_id from filename
+            parts = stem.split("_", 1)
+            if len(parts) != 2:
+                continue
+            mission_id, task_id = parts[0], parts[1]
+
+            pos, seq = file_positions.get(stem, (0, 0))
+
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(pos)
+                    chunk = f.read()
+                    new_pos = f.tell()
+            except OSError:
+                continue
+
+            if chunk:
+                for ln in chunk.splitlines():
+                    seq += 1
+                    try:
+                        ws.broadcast_stream_line(mission_id, task_id, ln, seq)
+                    except Exception:
+                        pass
+                file_positions[stem] = (new_pos, seq)
+
+            # Check for terminal status
+            try:
+                state_file = next(
+                    (sf for sf in state_root.glob("*.json")
+                     if sf.stem == mission_id or sf.stem.startswith(mission_id)),
+                    None,
+                )
+                if state_file:
+                    with open(state_file, encoding="utf-8") as sf:
+                        state_data = _jsonlib.load(sf)
+                    task_states = state_data.get("task_states", {})
+                    ts = task_states.get(task_id, {})
+                    status = ts.get("status", "")
+                    if status in _SSE_TERMINAL:
+                        done_files.add(stem)
+                        try:
+                            ws.broadcast_task_stream_done(mission_id, task_id)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
 
 def serve(port: int = 8080, state_dir: Path | None = None) -> None:
