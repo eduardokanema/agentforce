@@ -10,6 +10,8 @@ interface MissionCardProps {
   mission: MissionSummary;
   onStop: () => void;
   onRestart: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
 }
 
 function accentBarClassName(status: MissionSummary['status']): string {
@@ -75,7 +77,7 @@ function getModelChips(mission: MissionSummary): string[] {
   return mission.worker_model ? [mission.worker_model] : [];
 }
 
-export default function MissionCard({ mission, onStop, onRestart }: MissionCardProps) {
+export default function MissionCard({ mission, onStop, onRestart, onArchive, onDelete }: MissionCardProps) {
   const elapsed = useElapsedTime(mission.started_at);
   const accentClassName = accentBarClassName(mission.status);
   const running = isRunningStatus(mission.status);
@@ -173,6 +175,28 @@ export default function MissionCard({ mission, onStop, onRestart }: MissionCardP
               }}
             >
               ↺ Restart
+            </button>
+            <button
+              type="button"
+              className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-dim transition-colors hover:bg-surface"
+              onClick={onArchive}
+            >
+              ⊘ Archive
+            </button>
+            <button
+              type="button"
+              className="ml-auto inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-red/60 transition-colors hover:bg-red/10 hover:text-red"
+              onClick={() => {
+                setPendingAction({
+                  title: `Delete mission "${mission.name}"?`,
+                  message: 'This will permanently hide the mission. It cannot be undone.',
+                  confirmLabel: 'Delete',
+                  variant: 'danger',
+                  action: onDelete,
+                });
+              }}
+            >
+              ✕ Delete
             </button>
           </div>
         </div>

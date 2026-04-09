@@ -243,6 +243,76 @@ def cmd_metrics(args):
         print(f"{m['mission_id']:<10} {m['mission_name']:<30} {m['total_tasks']:<6} {dur:<10} {score:<6} {m.get('total_retries', 0):<8} {m.get('approved_on_first_try', 0)}/{m['total_tasks']}")
 
 
+def cmd_review(args):
+    """Run a mission retrospective."""
+    from agentforce.review.config import is_review_enabled
+    if not is_review_enabled():
+        print("Mission Review is disabled globally. Enable it in ~/.agentforce/config.json")
+        return
+
+    if args.skip:
+        skip_file = AGENTFORCE_HOME / "reviews" / f"{args.id}_skipped"
+        skip_file.parent.mkdir(parents=True, exist_ok=True)
+        skip_file.touch()
+        print(f"Review skipped for mission {args.id}")
+        return
+
+    sf = _find_state(args.id)
+    if not sf:
+        print(f"Mission not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+
+    memory = _memory()
+    from agentforce.review.reviewer import MissionReviewer
+    from agentforce.review.memory_writer import ReviewMemoryWriter
+
+    reviewer = MissionReviewer(memory=memory)
+    report = reviewer.review(sf.stem, model=args.model or None)
+
+    m = report.metrics
+    print(f"\n=== Mission Review: {report.mission_name} ===")
+    print(f"Quality Score:       {m.quality_score:.1f}/10")
+    print(f"First-Pass Rate:     {m.first_pass_rate:.0%}")
+    print(f"Rework Rate:         {m.rework_rate:.2f}")
+    print(f"Avg Review Score:    {m.avg_review_score:.1f}/10")
+    print(f"Human Escalation:    {m.human_escalation_rate:.0%}")
+    print(f"Wall Time/Task:      {m.wall_time_per_task_s:.0f}s")
+    print(f"Cost/Task:           ${m.cost_per_task_usd:.4f}")
+    print(f"Review Rejection:    {m.review_rejection_rate:.0%}")
+    if m.efficiency_gated is not None:
+        print(f"Token Efficiency:    {m.efficiency_gated:.0f} tokens/task")
+    else:
+        print(f"Token Efficiency:    GATED (quality < 7.0)")
+    if m.data_quality_warnings:
+        print(f"\nData Quality Warnings:")
+        for w in m.data_quality_warnings:
+            print(f"  * {w}")
+    if report.goodhart_warnings:
+        print(f"\n=== GOODHART WARNINGS ===")
+        for w in report.goodhart_warnings:
+            print(f"  WARNING: {w.message}")
+    for persona in ["quality_champion", "devils_advocate", "innovation_scout", "philosopher"]:
+        items = [i for i in report.retro_items if i.persona == persona]
+        cfg = __import__("agentforce.review.personas", fromlist=["PERSONA_CONFIGS"]).PERSONA_CONFIGS
+        if items:
+            print(f"\n--- {cfg[persona]['display_name']} ---")
+            for item in items:
+                print(f"  [{item.confidence:.0%}] {item.insight}")
+    if report.action_items:
+        print(f"\n=== Action Items ({len(report.action_items)}) ===")
+        for ai in report.action_items:
+            print(f"  [{ai.priority.upper()}] [{ai.action_type}] {ai.title}")
+            print(f"    {ai.description[:120]}")
+    print(f"\nReview cost: ${report.review_cost_usd:.4f}")
+    print(f"Report: ~/.agentforce/reviews/{sf.stem}_review.json")
+
+    if args.approve:
+        writer = ReviewMemoryWriter(memory)
+        writer.approve_all(report)
+        count = writer.write_approved_items(report)
+        print(f"\nApproved and wrote {count} action items to memory.")
+
+
 def cmd_pause(args):
     """Pause a running mission (creates a pause sentinel file)."""
     sf = _find_state(args.id)
@@ -288,6 +358,7 @@ def main():
     p = sub.add_parser("kill"); p.add_argument("id")
     sub.add_parser("cat").add_argument("id")
     p = sub.add_parser("metrics"); p.add_argument("--mission", help="Show single mission metrics")
+    p = sub.add_parser("review", help="run mission retrospective review"); p.add_argument("id", help="mission ID or partial name"); p.add_argument("--model", help="model to use (default: from connectors config)"); p.add_argument("--approve", action="store_true", help="approve and persist all action items"); p.add_argument("--skip", action="store_true", help="skip review for this mission")
     p = sub.add_parser("serve", help="start mission dashboard web server"); p.add_argument("--port", type=int, default=8080, help="port to listen on (default: 8080)")
     p = sub.add_parser("pause", help="pause a running mission"); p.add_argument("id")
     p = sub.add_parser("resume", help="resume a paused mission"); p.add_argument("id")
@@ -300,7 +371,7 @@ def main():
     cmds = {"start": cmd_start, "status": cmd_status, "list": cmd_list,
             "resolve": cmd_resolve, "fail": cmd_fail, "report": cmd_report,
             "kill": cmd_kill, "cat": cmd_cat, "metrics": cmd_metrics,
-            "serve": cmd_serve, "pause": cmd_pause, "resume": cmd_resume}
+            "review": cmd_review, "serve": cmd_serve, "pause": cmd_pause, "resume": cmd_resume}
     cmds[args.command](args)
 
 

@@ -76,7 +76,10 @@ type OutboundMessage =
   | { type: 'subscribe_all' }
   | { type: 'subscribe'; mission_id: string };
 
-const DEFAULT_WS_URL = 'ws://localhost:8080/ws';
+const DEFAULT_WS_URL =
+  typeof window !== 'undefined'
+    ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
+    : 'ws://localhost:8080';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

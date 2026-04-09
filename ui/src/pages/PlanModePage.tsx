@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import FileBrowser from '../components/FileBrowser';
 import ModelSelector from '../components/ModelSelector';
 import Terminal from '../components/Terminal';
 import { createMission, getModels } from '../lib/api';
@@ -140,7 +141,7 @@ export default function PlanModePage() {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>('compose');
   const [prompt, setPrompt] = useState('');
-  const [workspace, setWorkspace] = useState('');
+  const [workspaces, setWorkspaces] = useState<string[]>([]);
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [plan, setPlan] = useState<EditablePlanState | null>(null);
@@ -236,9 +237,9 @@ export default function PlanModePage() {
 
   const canGenerate = useMemo(() => (
     prompt.trim() !== ''
-    && workspace.trim() !== ''
+    && workspaces.length > 0
     && effectiveSelectedModels.length > 0
-  ), [effectiveSelectedModels.length, prompt, workspace]);
+  ), [effectiveSelectedModels.length, prompt, workspaces.length]);
 
   const updatePlan = (updater: (current: EditablePlanState) => EditablePlanState): void => {
     setPlan((current) => {
@@ -267,8 +268,8 @@ export default function PlanModePage() {
         },
           body: JSON.stringify({
             prompt,
-          approved_models: effectiveSelectedModels,
-            workspace,
+            approved_models: effectiveSelectedModels,
+            workspaces,
           }),
         });
 
@@ -397,16 +398,12 @@ export default function PlanModePage() {
           <div className="mt-1 text-right text-[11px] text-dim">{prompt.length} chars</div>
 
           <div className="mt-4">
-            <label className="block text-sm font-medium text-text" htmlFor="workspace">
-              Working directory for mission execution
+            <label className="block text-sm font-medium text-text">
+              Working directories
             </label>
-            <input
-              id="workspace"
-              className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text outline-none transition-colors placeholder:text-dim focus:border-cyan"
-              placeholder="/path/to/project"
-              value={workspace}
-              onInput={(event) => setWorkspace(event.currentTarget.value)}
-            />
+            <div className="mt-2">
+              <FileBrowser selected={workspaces} onSelect={setWorkspaces} />
+            </div>
           </div>
 
           <div className="mt-4">

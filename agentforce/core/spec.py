@@ -175,6 +175,10 @@ class Caps:
     max_human_interventions: int = 2
     max_cost_usd: Optional[float] = None
     max_concurrent_workers: int = 3
+    review: str = "enabled"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Caps) and self.to_dict() == other.to_dict()
 
     def to_dict(self) -> dict:
         return {
@@ -185,6 +189,7 @@ class Caps:
             "max_human_interventions": self.max_human_interventions,
             "max_cost_usd": self.max_cost_usd,
             "max_concurrent_workers": self.max_concurrent_workers,
+            "review": self.review,
         }
 
     @classmethod

@@ -94,6 +94,19 @@ class TestTick:
         actions = engine.tick()
         assert len(actions) == 0
 
+    def test_logs_review_skipped_when_review_disabled(self, tmp_path):
+        caps = Caps(max_retries_global=5, max_concurrent_workers=2, max_wall_time_minutes=60, review="disabled")
+        engine = make_engine(tmp_path, caps=caps)
+
+        for tid in ["01", "02"]:
+            engine.apply_worker_result(tid, True, "Done")
+            engine.apply_reviewer_result(tid, True, "Approved")
+
+        engine.tick()
+        event_types = [e.event_type for e in engine.state.event_log]
+        assert "mission_completed" in event_types
+        assert "review_skipped" in event_types
+
 
 class TestWorkerLifecycle:
     def test_successful_worker(self, tmp_path):
