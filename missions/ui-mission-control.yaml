@@ -33,7 +33,7 @@ mission:
     max_retries_global: 10
     max_wall_time_minutes: 180
     max_human_interventions: 3
-  working_dir: "/Users/rent/Projects/agentforce"
+  working_dir: "/Users/eduardo/Projects/agentforce"
 
 tasks:
   - id: "00"
@@ -62,7 +62,7 @@ tasks:
   - id: "01"
     title: "TokenLedger and token fields on state"
     description: |
-      Create /Users/rent/Projects/agentforce/agentforce/core/token_ledger.py.
+      Create /Users/eduardo/Projects/agentforce/agentforce/core/token_ledger.py.
       Class TokenLedger with:
         - parse_usage_line(line: str) -> dict | None
           Parses JSON lines like: {"type":"usage","input_tokens":N,"output_tokens":N,"cost_usd":F}
@@ -75,7 +75,7 @@ tasks:
           Returns aggregate {"tokens_in": N, "tokens_out": N, "cost_usd": F} across all tasks.
         - reset_task(task_id: str): clears task entry.
 
-      Update /Users/rent/Projects/agentforce/agentforce/core/state.py:
+      Update /Users/eduardo/Projects/agentforce/agentforce/core/state.py:
         - Add to TaskState dataclass: tokens_in: int = 0, tokens_out: int = 0, cost_usd: float = 0.0
         - Add to MissionState dataclass: tokens_in: int = 0, tokens_out: int = 0, cost_usd: float = 0.0
         - Ensure to_dict() and to_summary_dict() include these new fields
@@ -103,7 +103,7 @@ tasks:
   - id: "02"
     title: "Inject prompt queue in autonomous.py"
     description: |
-      Update /Users/rent/Projects/agentforce/agentforce/autonomous.py to support
+      Update /Users/eduardo/Projects/agentforce/agentforce/autonomous.py to support
       mid-execution prompt injection via file queue.
 
       Add helper function:

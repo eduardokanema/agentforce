@@ -41,13 +41,13 @@ mission:
     max_human_interventions: 3
     review: enabled
 
-  working_dir: "/Users/rent/Projects/agentforce"
+  working_dir: "/Users/eduardo/Projects/agentforce"
 
 tasks:
   - id: "01"
     title: "Data models, Caps.review field, and global config opt-out"
     description: |
-      In /Users/rent/Projects/agentforce:
+      In /Users/eduardo/Projects/agentforce:
 
       1. Create agentforce/review/__init__.py:
            from .models import ReviewReport, RetroItem, ActionItem, MetricsSnapshot, GoodhartWarning
@@ -208,7 +208,7 @@ tasks:
   - id: "02"
     title: "Metrics collector with Goodhart detection"
     description: |
-      In /Users/rent/Projects/agentforce, create agentforce/review/collector.py.
+      In /Users/eduardo/Projects/agentforce, create agentforce/review/collector.py.
 
       from agentforce.core.state import MissionState, TaskStatus
       from agentforce.review.models import MetricsSnapshot, GoodhartWarning
@@ -312,7 +312,7 @@ tasks:
   - id: "03"
     title: "Persona prompt templates and JSON response parser"
     description: |
-      In /Users/rent/Projects/agentforce, create agentforce/review/personas.py.
+      In /Users/eduardo/Projects/agentforce, create agentforce/review/personas.py.
 
       from agentforce.core.state import MissionState
       from agentforce.review.models import MetricsSnapshot, RetroItem
@@ -460,7 +460,7 @@ tasks:
   - id: "04"
     title: "Review orchestrator with model resolution and resilience"
     description: |
-      In /Users/rent/Projects/agentforce, create agentforce/review/reviewer.py.
+      In /Users/eduardo/Projects/agentforce, create agentforce/review/reviewer.py.
 
       from anthropic import Anthropic
       from agentforce.core.state import MissionState
@@ -625,7 +625,7 @@ tasks:
   - id: "05"
     title: "Memory writer with versioned baselines and approval flow"
     description: |
-      In /Users/rent/Projects/agentforce, create agentforce/review/memory_writer.py.
+      In /Users/eduardo/Projects/agentforce, create agentforce/review/memory_writer.py.
 
       from agentforce.memory.memory import Memory
       from agentforce.review.models import ReviewReport, ActionItem
@@ -708,7 +708,7 @@ tasks:
   - id: "06"
     title: "CLI subcommand and API endpoints with opt-out controls"
     description: |
-      In /Users/rent/Projects/agentforce:
+      In /Users/eduardo/Projects/agentforce:
 
       1. Update agentforce/cli/cli.py — add the `review` subcommand.
 
@@ -903,7 +903,7 @@ tasks:
   - id: "07"
     title: "End-to-end tests and full test suite verification"
     description: |
-      In /Users/rent/Projects/agentforce:
+      In /Users/eduardo/Projects/agentforce:
 
       1. Create tests/review/test_e2e.py with a comprehensive end-to-end test.
 
