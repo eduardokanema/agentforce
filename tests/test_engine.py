@@ -2,10 +2,12 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agentforce.core.engine import MissionEngine, ReviewerDelegation, WorkerDelegation
-from agentforce.core.spec import MissionSpec, TaskSpec
+from agentforce.core.spec import ExecutionConfig, ExecutionProfile, MissionSpec, TaskSpec
 from agentforce.memory import Memory
 
 
@@ -15,6 +17,10 @@ def make_engine(tmp_path, task: TaskSpec, worker_model: str = "mission-worker", 
         goal="Test goal",
         definition_of_done=["All tasks pass"],
         tasks=[task],
+        execution_defaults=ExecutionConfig(
+            worker=ExecutionProfile(agent="codex"),
+            reviewer=ExecutionProfile(agent="codex"),
+        ),
     )
     state_dir = tmp_path / "state"
     memory_dir = tmp_path / "memory"
@@ -100,3 +106,135 @@ def test_outcome_memory_truncation_uses_2000_chars(tmp_path):
     )
 
     assert stored_feedback == feedback[:2000]
+
+
+def test_launch_rejects_worker_execution_without_model(tmp_path):
+    spec = MissionSpec.from_dict({
+        "name": "Execution Validation",
+        "goal": "Reject invalid execution profiles at launch",
+        "definition_of_done": ["pytest tests/ passes with exit code 0"],
+        "tasks": [{
+            "id": "01",
+            "title": "Task",
+            "description": "Do it",
+            "acceptance_criteria": ['response includes "ok"'],
+            "execution": {
+                "worker": {
+                    "agent": "codex",
+                }
+            },
+        }],
+    })
+    state_dir = tmp_path / "state"
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError, match="worker execution"):
+        MissionEngine(
+            spec=spec,
+            state_dir=state_dir,
+            memory=Memory(memory_dir),
+        )
+
+
+def test_worker_and_reviewer_delegations_carry_resolved_execution_settings(tmp_path):
+    spec = MissionSpec(
+        name="Resolved execution",
+        goal="Resolve role settings",
+        definition_of_done=["All tasks pass"],
+        execution_defaults=ExecutionConfig(
+            worker=ExecutionProfile(agent="mission-worker-agent", model="mission-worker-model", thinking="medium"),
+            reviewer=ExecutionProfile(agent="mission-reviewer-agent", model="mission-reviewer-model", thinking="low"),
+        ),
+        tasks=[
+            TaskSpec(
+                id="01",
+                title="Task",
+                description="Do it",
+                acceptance_criteria=["done"],
+                execution=ExecutionConfig(
+                    worker=ExecutionProfile(model="task-worker-model", thinking="high"),
+                    reviewer=ExecutionProfile(agent="task-reviewer-agent"),
+                ),
+            )
+        ],
+    )
+    state_dir = tmp_path / "state"
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    engine = MissionEngine(spec=spec, state_dir=state_dir, memory=Memory(memory_dir))
+
+    actions = engine.tick()
+    worker = next(action for action in actions if isinstance(action, WorkerDelegation))
+    assert worker.agent == "mission-worker-agent"
+    assert worker.model == "task-worker-model"
+    assert worker.thinking == "high"
+
+    engine.apply_worker_result("01", True, "done")
+    review_actions = engine.tick()
+    reviewer = next(action for action in review_actions if isinstance(action, ReviewerDelegation))
+    assert reviewer.agent == "task-reviewer-agent"
+    assert reviewer.model == "mission-reviewer-model"
+    assert reviewer.thinking == "low"
+
+
+def test_resume_uses_persisted_execution_settings_not_new_launch_defaults(tmp_path):
+    spec = MissionSpec(
+        name="Resume execution",
+        goal="Persist launch defaults",
+        definition_of_done=["All tasks pass"],
+        tasks=[
+            TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["done"]),
+        ],
+    )
+    state_dir = tmp_path / "state"
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    engine = MissionEngine(
+        spec=spec,
+        state_dir=state_dir,
+        memory=Memory(memory_dir),
+        worker_model="stored-worker-model",
+        reviewer_model="stored-reviewer-model",
+    )
+
+    state_file = engine.state_file
+    resumed = MissionEngine.load(state_file, Memory(memory_dir))
+
+    actions = resumed.tick()
+    worker = next(action for action in actions if isinstance(action, WorkerDelegation))
+    assert worker.model == "stored-worker-model"
+    assert resumed.state.execution_defaults.worker is not None
+    assert resumed.state.execution_defaults.worker.model == "stored-worker-model"
+
+    resumed.apply_worker_result("01", True, "done")
+    review_actions = resumed.tick()
+    reviewer = next(action for action in review_actions if isinstance(action, ReviewerDelegation))
+    assert reviewer.model == "stored-reviewer-model"
+
+
+def test_launch_defaults_fill_explicit_worker_runtime_fallback_fields(tmp_path):
+    spec = MissionSpec(
+        name="Fallback execution",
+        goal="Fill fallback values",
+        definition_of_done=["All tasks pass"],
+        tasks=[
+            TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["done"]),
+        ],
+    )
+    state_dir = tmp_path / "state"
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    engine = MissionEngine(
+        spec=spec,
+        state_dir=state_dir,
+        memory=Memory(memory_dir),
+        worker_model="cli-worker-model",
+    )
+
+    actions = engine.tick()
+    worker = next(action for action in actions if isinstance(action, WorkerDelegation))
+
+    assert worker.agent == "opencode"
+    assert worker.model == "cli-worker-model"
+    assert worker.thinking == "high"

@@ -4,11 +4,13 @@ from __future__ import annotations
 import json as _jsonlib
 import threading
 import time as _time
+import uuid
 from pathlib import Path
 
 import yaml
 
 from .. import state_io, ws
+from ..plan_drafts import PlanDraftStore
 
 
 def _now_iso() -> str:
@@ -22,6 +24,7 @@ def _make_mission_state_from_spec(spec):
 
     mission_id = spec.short_id()
     state = MissionState(mission_id=mission_id, spec=spec)
+    state.execution_defaults = spec.execution_defaults.__class__.from_dict(spec.execution_defaults.to_dict())
     state.working_dir = str(Path(spec.working_dir or f"./missions-{mission_id}").resolve())
     for task_spec in spec.tasks:
         state.task_states[task_spec.id] = TaskState(
@@ -192,6 +195,26 @@ def _post_missions(body: dict) -> tuple[int, dict]:
     return 200, {"id": state.mission_id, "status": "started"}
 
 
+def _post_readjust_trajectory(mission_id: str) -> tuple[int, dict]:
+    state = _load_state(mission_id)
+    if not state:
+        return 404, {"error": f"Mission {mission_id!r} not found"}
+
+    draft = PlanDraftStore().create(
+        str(uuid.uuid4()),
+        status="draft",
+        draft_spec=state.spec.to_dict(),
+        turns=[],
+        validation={},
+        activity_log=[{"type": "readjust_trajectory_seeded", "mission_id": mission_id}],
+        approved_models=[],
+        workspace_paths=[path for path in [state.working_dir or state.spec.working_dir] if path],
+        companion_profile={},
+        draft_notes=[],
+    )
+    return 200, {"id": draft.id, "revision": draft.revision}
+
+
 def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
     if len(parts) == 2 and parts[1] == "missions":
         missions = state_io._load_all_missions()
@@ -298,6 +321,8 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
         return _unarchive_mission(parts[2])
     if len(parts) == 4 and parts[1] == "mission" and parts[3] == "review":
         return _post_mission_review(parts[2], handler._read_json_body())
+    if len(parts) == 4 and parts[1] == "mission" and parts[3] == "readjust-trajectory":
+        return _post_readjust_trajectory(parts[2])
 
     return 404, {"error": "Not found"}
 

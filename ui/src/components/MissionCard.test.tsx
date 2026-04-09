@@ -174,4 +174,33 @@ describe("MissionCard", () => {
 
     expect(container.innerHTML).toContain("bg-green");
   });
+
+  it("falls back to execution defaults when summary model chips are mixed", () => {
+    const mission: MissionSummary = {
+      mission_id: "mission-789",
+      name: "Mixed execution",
+      status: "active",
+      done_tasks: 1,
+      total_tasks: 2,
+      pct: 50,
+      duration: "15m",
+      worker_agent: "opencode",
+      worker_model: "",
+      started_at: "2026-04-08T00:00:00Z",
+      cost_usd: 0.12,
+      execution: {
+        defaults: {
+          worker: { agent: "codex", model: "gpt-5.4", thinking: "medium" },
+          reviewer: { agent: "codex", model: "gpt-5.4-mini", thinking: "low" },
+        },
+        mixed_roles: ["worker", "reviewer"],
+        task_overrides: { worker: 1, reviewer: 1 },
+      },
+    };
+
+    const { container } = renderCard(mission);
+
+    expect(container.textContent).toContain("worker:gpt-5.4");
+    expect(container.textContent).toContain("reviewer:gpt-5.4-mini");
+  });
 });

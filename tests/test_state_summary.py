@@ -1,7 +1,7 @@
-"""Test MissionState.to_summary_dict()"""
+"""Test MissionState summary/detail execution metadata."""
 import pytest
 from agentforce.core.state import MissionState, TaskState
-from agentforce.core.spec import MissionSpec, TaskSpec, Caps, TaskStatus
+from agentforce.core.spec import MissionSpec, TaskSpec, Caps, TaskStatus, ExecutionConfig, ExecutionProfile
 
 
 def test_to_summary_dict_basic():
@@ -206,6 +206,66 @@ def test_to_summary_dict_pct_calculation():
     assert summary["done_tasks"] == 2
     assert summary["total_tasks"] == 4
     assert summary["pct"] == 50  # 2/4 * 100 = 50
+
+
+def test_summary_and_detail_include_execution_metadata_for_mixed_profiles():
+    spec = MissionSpec(
+        name="mixed-execution",
+        goal="Mixed execution metadata mission",
+        definition_of_done=["Done"],
+        execution_defaults=ExecutionConfig(
+            worker=ExecutionProfile(agent="codex", model="worker-default", thinking="medium"),
+            reviewer=ExecutionProfile(agent="codex", model="reviewer-default", thinking="low"),
+        ),
+        tasks=[
+            TaskSpec(
+                id="task1",
+                title="Task 1",
+                description="First task",
+                execution=ExecutionConfig(
+                    worker=ExecutionProfile(model="worker-override"),
+                ),
+            ),
+            TaskSpec(
+                id="task2",
+                title="Task 2",
+                description="Second task",
+                execution=ExecutionConfig(
+                    reviewer=ExecutionProfile(model="reviewer-override", thinking="high"),
+                ),
+            ),
+        ],
+        caps=Caps(
+            max_concurrent_workers=2,
+            max_retries_global=3,
+            max_wall_time_minutes=60,
+            max_human_interventions=5,
+        ),
+    )
+
+    state = MissionState(
+        mission_id="mixed-123",
+        spec=spec,
+        execution_defaults=ExecutionConfig(
+            worker=ExecutionProfile(agent="codex", model="worker-launch", thinking="medium"),
+            reviewer=ExecutionProfile(agent="codex", model="reviewer-launch", thinking="low"),
+        ),
+    )
+    state.task_states["task1"] = TaskState(task_id="task1", status=TaskStatus.REVIEW_APPROVED)
+    state.task_states["task2"] = TaskState(task_id="task2", status=TaskStatus.IN_PROGRESS)
+
+    summary = state.to_summary_dict()
+    detail = state.to_dict()
+
+    assert summary["execution"]["defaults"]["worker"]["model"] == "worker-launch"
+    assert summary["execution"]["defaults"]["reviewer"]["model"] == "reviewer-launch"
+    assert set(summary["execution"]["mixed_roles"]) == {"worker", "reviewer"}
+    assert summary["execution"]["task_overrides"] == {"worker": 1, "reviewer": 1}
+
+    assert detail["execution"]["tasks"]["task1"]["worker"]["model"] == "worker-override"
+    assert detail["execution"]["tasks"]["task1"]["reviewer"]["model"] == "reviewer-launch"
+    assert detail["execution"]["tasks"]["task2"]["worker"]["model"] == "worker-launch"
+    assert detail["execution"]["tasks"]["task2"]["reviewer"]["model"] == "reviewer-override"
 
 
 if __name__ == "__main__":

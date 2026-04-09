@@ -9,6 +9,7 @@ let missionForHook: MissionState;
 const apiHarness = vi.hoisted(() => ({
   stopMission: vi.fn(async () => undefined),
   restartMission: vi.fn(async () => undefined),
+  createReadjustedDraft: vi.fn(async () => ({ id: 'draft-321', revision: 1 })),
 }));
 const toastHarness = vi.hoisted(() => ({
   addToast: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock('../hooks/useMission', () => ({
 vi.mock('../lib/api', () => ({
   stopMission: apiHarness.stopMission,
   restartMission: apiHarness.restartMission,
+  createReadjustedDraft: apiHarness.createReadjustedDraft,
 }));
 
 vi.mock('../hooks/useToast', () => ({
@@ -91,6 +93,14 @@ const mockMission: MissionState = {
   working_dir: '/tmp/work',
   worker_agent: 'opencode',
   worker_model: 'gpt-5',
+  execution: {
+    defaults: {
+      worker: { agent: 'codex', model: 'gpt-5', thinking: 'medium' },
+      reviewer: { agent: 'codex', model: 'gpt-5-mini', thinking: 'low' },
+    },
+    mixed_roles: ['worker', 'reviewer'],
+    task_overrides: { worker: 1, reviewer: 1 },
+  },
 };
 
 missionForHook = mockMission;
@@ -99,6 +109,7 @@ describe('MissionDetailPage', () => {
   afterEach(() => {
     apiHarness.stopMission.mockClear();
     apiHarness.restartMission.mockClear();
+    apiHarness.createReadjustedDraft.mockClear();
     toastHarness.addToast.mockClear();
     document.body.innerHTML = '';
   });
@@ -119,6 +130,9 @@ describe('MissionDetailPage', () => {
     expect(markup).toContain('↑ 23 out');
     expect(markup).toContain('$0.5000');
     expect(markup).toContain('Workspace path');
+    expect(markup).toContain('worker codex · gpt-5 · medium');
+    expect(markup).toContain('reviewer codex · gpt-5-mini · low');
+    expect(markup).toContain('mixed worker, reviewer');
     expect(markup).toContain('Mission Control');
     expect(markup).toContain('/mission/mission-123/task/task-1');
     expect(markup).toContain('Event Log');
@@ -199,10 +213,10 @@ describe('MissionDetailPage', () => {
     });
 
     const buttons = Array.from(container.querySelectorAll('button'));
-    expect(buttons).toHaveLength(2);
+    expect(buttons).toHaveLength(3);
 
     await act(async () => {
-      buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      buttons[1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(container.textContent).toContain('Stop mission "Mission Alpha"?');
     const stopDialog = container.querySelector('[role="dialog"]') as HTMLElement;
@@ -216,7 +230,7 @@ describe('MissionDetailPage', () => {
     expect(toastHarness.addToast).toHaveBeenCalledWith('Mission stopped', 'success');
 
     await act(async () => {
-      buttons[1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      buttons[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(container.textContent).toContain('Restart mission "Mission Alpha"?');
     const restartDialog = container.querySelector('[role="dialog"]') as HTMLElement;
@@ -228,6 +242,40 @@ describe('MissionDetailPage', () => {
 
     expect(apiHarness.restartMission).toHaveBeenCalledWith('mission-123');
     expect(toastHarness.addToast).toHaveBeenCalledWith('Mission restarted', 'success');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('offers a visible Readjust Trajectory action that returns to seeded planning', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/mission/mission-123']}>
+          <Routes>
+            <Route path="/mission/:id" element={<MissionDetailPage />} />
+            <Route path="/plan" element={<div data-testid="plan-route">Plan Route</div>} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+
+    const readjustButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Readjust Trajectory'),
+    ) as HTMLButtonElement | undefined;
+
+    expect(readjustButton).toBeTruthy();
+
+    await act(async () => {
+      readjustButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiHarness.createReadjustedDraft).toHaveBeenCalledWith('mission-123');
+    expect(container.querySelector('[data-testid="plan-route"]')).toBeTruthy();
 
     act(() => {
       root.unmount();

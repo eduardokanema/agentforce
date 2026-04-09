@@ -442,3 +442,176 @@ caps:
 
     assert result.returncode == 0
     assert "[CAPS ADVISORY]" in result.stderr
+
+
+def test_execution_legacy_task_model_loads_into_worker_execution_model():
+    spec = MissionSpec.from_dict({
+        "name": "Legacy Model",
+        "goal": "Load legacy task model",
+        "definition_of_done": ['GET /health returns HTTP 200 with {"status": "ok"}'],
+        "tasks": [{
+            "id": "01",
+            "title": "Task 1",
+            "description": "Do work",
+            "acceptance_criteria": ['response includes "ok"'],
+            "model": "claude-haiku-4-5",
+        }],
+    })
+
+    task = spec.tasks[0]
+    assert task.execution.worker is not None
+    assert task.execution.worker.model == "claude-haiku-4-5"
+    assert task.model == "claude-haiku-4-5"
+
+
+def test_execution_to_dict_emits_execution_blocks_for_new_specs():
+    spec = MissionSpec.from_dict({
+        "name": "Execution Blocks",
+        "goal": "Serialize new execution schema",
+        "definition_of_done": ['GET /health returns HTTP 200 with {"status": "ok"}'],
+        "execution_defaults": {
+            "worker": {"agent": "codex", "model": "gpt-5", "thinking": "medium"},
+            "reviewer": {"agent": "codex", "model": "gpt-5-mini", "thinking": "low"},
+        },
+        "tasks": [{
+            "id": "01",
+            "title": "Task 1",
+            "description": "Do work",
+            "acceptance_criteria": ['response includes "ok"'],
+            "execution": {
+                "worker": {"agent": "codex", "model": "gpt-5-codex", "thinking": "high"},
+                "reviewer": {"agent": "codex", "model": "gpt-5-mini", "thinking": "low"},
+            },
+        }],
+    })
+
+    payload = spec.to_dict()
+
+    assert payload["execution_defaults"]["worker"]["model"] == "gpt-5"
+    assert payload["execution_defaults"]["reviewer"]["agent"] == "codex"
+    assert payload["tasks"][0]["execution"]["worker"]["model"] == "gpt-5-codex"
+    assert payload["tasks"][0]["execution"]["reviewer"]["thinking"] == "low"
+    assert "model" not in payload["tasks"][0]
+
+
+def test_execution_round_trip_preserves_reviewer_settings():
+    raw = {
+        "name": "Reviewer Round Trip",
+        "goal": "Preserve reviewer execution",
+        "definition_of_done": ['GET /health returns HTTP 200 with {"status": "ok"}'],
+        "execution_defaults": {
+            "reviewer": {"agent": "codex", "model": "gpt-5-mini", "thinking": "medium"},
+        },
+        "tasks": [{
+            "id": "01",
+            "title": "Task 1",
+            "description": "Do work",
+            "acceptance_criteria": ['response includes "ok"'],
+            "execution": {
+                "reviewer": {"agent": "claude", "model": "sonnet", "thinking": "high"},
+            },
+        }],
+    }
+
+    payload = MissionSpec.from_dict(raw).to_dict()
+    round_tripped = MissionSpec.from_dict(payload)
+
+    assert round_tripped.execution_defaults.reviewer is not None
+    assert round_tripped.execution_defaults.reviewer.model == "gpt-5-mini"
+    assert round_tripped.tasks[0].execution.reviewer is not None
+    assert round_tripped.tasks[0].execution.reviewer.agent == "claude"
+    assert round_tripped.tasks[0].execution.reviewer.thinking == "high"
+
+
+def test_execution_validation_rejects_missing_agent_or_model_at_launch():
+    spec = MissionSpec.from_dict({
+        "name": "Invalid Execution",
+        "goal": "Reject incomplete execution settings",
+        "definition_of_done": ['GET /health returns HTTP 200 with {"status": "ok"}'],
+        "tasks": [
+            {
+                "id": "01",
+                "title": "Missing Agent",
+                "description": "Do work",
+                "acceptance_criteria": ['response includes "ok"'],
+                "execution": {
+                    "worker": {"model": "gpt-5"},
+                },
+            },
+            {
+                "id": "02",
+                "title": "Missing Model",
+                "description": "Review work",
+                "acceptance_criteria": ['response includes "ok"'],
+                "execution": {
+                    "reviewer": {"agent": "codex"},
+                },
+            },
+        ],
+    })
+
+    issues = spec.validate(stage="launch")
+
+    assert "task 01 worker execution is missing agent" in issues
+    assert "task 02 reviewer execution is missing model" in issues
+
+
+def test_yaml_draft_stage_validation_is_non_blocking_for_incomplete_planner_turns():
+    spec = MissionSpec.from_dict({
+        "name": "",
+        "goal": "",
+        "definition_of_done": [],
+        "tasks": [],
+    })
+
+    assert spec.validate(stage="draft") == []
+
+
+def test_yaml_launch_validation_rejects_blank_definition_of_done_items():
+    spec = MissionSpec.from_dict({
+        "name": "Broken Launch Spec",
+        "goal": "Reject blank DoD entries",
+        "definition_of_done": [" "],
+        "tasks": [
+            {
+                "id": "01",
+                "title": "Task 1",
+                "description": "Do work",
+                "acceptance_criteria": ["response includes \"ok\""],
+            },
+        ],
+    })
+
+    issues = spec.validate(stage="launch")
+
+    assert "Definition of Done item 1 is required" in issues
+
+
+def test_quality_and_yaml_launch_validation_blocks_empty_task_fields_and_invalid_dependency_graph():
+    spec = MissionSpec.from_dict({
+        "name": "Broken Launch Spec",
+        "goal": "Reject incomplete launch data",
+        "definition_of_done": ["Deploy safely"],
+        "tasks": [
+                {
+                    "id": "01",
+                    "title": "",
+                    "description": "",
+                    "acceptance_criteria": [],
+                },
+            {
+                "id": "02",
+                "title": "Task 2",
+                "description": "Depends on an unknown task",
+                "acceptance_criteria": ["response includes \"ok\""],
+                "dependencies": ["99"],
+            },
+        ],
+    })
+
+    issues = spec.validate(stage="launch")
+
+    assert "task 01 title is required" in issues
+    assert "task 01 description is required" in issues
+    assert "task 01 acceptance criteria are required" in issues
+    assert "Task 02 depends on unknown task: 99" in issues

@@ -9,32 +9,30 @@ from agentforce.core.token_ledger import TokenLedger
 # Reviewer session caching tests
 # ---------------------------------------------------------------------------
 
-def test_reviewer_session_id_not_none_on_first_call():
-    """Reviewer gets a non-None session_id even when session_ids dict is empty."""
+def test_reviewer_session_id_none_on_first_call():
+    """Reviewer gets no session_id until a connector returns a real one."""
     from agentforce.autonomous import _get_or_create_session_id
 
     session_ids = {}
     sid = _get_or_create_session_id(session_ids, "task-1", "reviewer")
-    assert sid is not None
-    assert isinstance(sid, str)
-    assert len(sid) > 0
+    assert sid is None
 
 
-def test_reviewer_session_id_registered_after_first_call():
-    """Reviewer session_id is stored in session_ids dict after first call."""
+def test_reviewer_session_id_not_registered_before_first_result():
+    """Reviewer session_id is not fabricated before a connector returns one."""
     from agentforce.autonomous import _get_or_create_session_id
 
     session_ids = {}
     sid = _get_or_create_session_id(session_ids, "task-1", "reviewer")
-    assert "task-1_reviewer" in session_ids
-    assert session_ids["task-1_reviewer"] == sid
+    assert sid is None
+    assert "task-1_reviewer" not in session_ids
 
 
 def test_reviewer_session_id_reused_across_calls():
-    """Same session_id is returned for the same task on subsequent reviewer calls."""
+    """Same stored reviewer session_id is returned on subsequent calls."""
     from agentforce.autonomous import _get_or_create_session_id
 
-    session_ids = {}
+    session_ids = {"task-1_reviewer": "review-thread-123"}
     sid1 = _get_or_create_session_id(session_ids, "task-1", "reviewer")
     sid2 = _get_or_create_session_id(session_ids, "task-1", "reviewer")
     assert sid1 == sid2
@@ -44,7 +42,10 @@ def test_reviewer_session_ids_are_task_scoped():
     """Different tasks get different reviewer session_ids."""
     from agentforce.autonomous import _get_or_create_session_id
 
-    session_ids = {}
+    session_ids = {
+        "task-1_reviewer": "review-thread-123",
+        "task-2_reviewer": "review-thread-456",
+    }
     sid_a = _get_or_create_session_id(session_ids, "task-1", "reviewer")
     sid_b = _get_or_create_session_id(session_ids, "task-2", "reviewer")
     assert sid_a != sid_b
@@ -141,6 +142,73 @@ def test_token_ledger_multiple_usage_lines_in_output():
     assert totals["tokens_in"] == 30
     assert totals["tokens_out"] == 15
     assert totals["cost_usd"] == pytest.approx(0.003)
+
+
+def test_autonomous_prefers_resolved_delegation_model_over_cli_default(tmp_path, monkeypatch):
+    """A resolved per-delegation model must win over the mission-global CLI model."""
+    from agentforce.autonomous import run_autonomous
+    from agentforce.core.engine import WorkerDelegation
+    from agentforce.core.spec import ExecutionConfig, ExecutionProfile, MissionSpec, TaskSpec
+    from agentforce.core.state import MissionState, TaskState
+
+    mission_id = "mission-model-precedence"
+    state_root = tmp_path / ".agentforce" / "state"
+    memory_root = tmp_path / ".agentforce" / "memory"
+    state_root.mkdir(parents=True, exist_ok=True)
+    memory_root.mkdir(parents=True, exist_ok=True)
+
+    spec = MissionSpec(
+        name="Autonomous precedence",
+        goal="Keep per-delegation model",
+        definition_of_done=["done"],
+        tasks=[
+            TaskSpec(
+                id="01",
+                title="Task",
+                description="Do it",
+                acceptance_criteria=["done"],
+                execution=ExecutionConfig(
+                    worker=ExecutionProfile(agent="codex", model="task-model", thinking="high"),
+                ),
+            )
+        ],
+    )
+    state = MissionState(mission_id=mission_id, spec=spec, working_dir=str(tmp_path))
+    state.task_states["01"] = TaskState(task_id="01")
+    state_file = state_root / f"{mission_id}.json"
+    state.save(state_file)
+
+    monkeypatch.setattr("agentforce.autonomous.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._ensure_pkg", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._detect_agent", lambda: "codex")
+
+    captured = {}
+
+    def fake_run_agent(prompt, workdir, timeout=300, agent="auto", model=None, stream_path=None, variant=None, session_id=None):
+        captured["agent"] = agent
+        captured["model"] = model
+        captured["variant"] = variant
+        return True, "worker ok", "", "session-1", None
+
+    monkeypatch.setattr("agentforce.autonomous._run_agent", fake_run_agent)
+
+    def fake_apply_worker_result(self, task_id, success, output="", error=""):
+        self.state.task_states[task_id].status = "review_approved"
+
+    monkeypatch.setattr("agentforce.core.engine.MissionEngine.apply_worker_result", fake_apply_worker_result)
+
+    run_autonomous(
+        mission_id,
+        workdir=str(tmp_path),
+        agent="codex",
+        model="cli-model",
+        variant="cli-thinking",
+        max_ticks=3,
+    )
+
+    assert captured["agent"] == "codex"
+    assert captured["model"] == "task-model"
+    assert captured["variant"] == "high"
 
 
 # ---------------------------------------------------------------------------

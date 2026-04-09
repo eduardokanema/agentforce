@@ -110,6 +110,68 @@ class TDDSpec:
 
 
 @dataclass
+class ExecutionProfile:
+    """Runtime execution settings for one role."""
+    agent: Optional[str] = None
+    model: Optional[str] = None
+    thinking: Optional[str] = None
+
+    def configured(self) -> bool:
+        return any([self.agent, self.model, self.thinking])
+
+    def merged(self, defaults: Optional[ExecutionProfile]) -> ExecutionProfile:
+        if defaults is None:
+            return ExecutionProfile(agent=self.agent, model=self.model, thinking=self.thinking)
+        return ExecutionProfile(
+            agent=self.agent or defaults.agent,
+            model=self.model or defaults.model,
+            thinking=self.thinking or defaults.thinking,
+        )
+
+    def to_dict(self) -> dict:
+        data = {}
+        if self.agent is not None:
+            data["agent"] = self.agent
+        if self.model is not None:
+            data["model"] = self.model
+        if self.thinking is not None:
+            data["thinking"] = self.thinking
+        return data
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> Optional[ExecutionProfile]:
+        if not d:
+            return None
+        fields = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        profile = cls(**fields)
+        return profile if profile.configured() else None
+
+
+@dataclass
+class ExecutionConfig:
+    """Worker/reviewer execution settings."""
+    worker: Optional[ExecutionProfile] = None
+    reviewer: Optional[ExecutionProfile] = None
+
+    def to_dict(self) -> dict:
+        data = {}
+        if self.worker and self.worker.configured():
+            data["worker"] = self.worker.to_dict()
+        if self.reviewer and self.reviewer.configured():
+            data["reviewer"] = self.reviewer.to_dict()
+        return data
+
+    @classmethod
+    def from_dict(cls, d: Optional[dict]) -> ExecutionConfig:
+        if not d:
+            return cls()
+        return cls(
+            worker=ExecutionProfile.from_dict(d.get("worker")),
+            reviewer=ExecutionProfile.from_dict(d.get("reviewer")),
+        )
+
+
+@dataclass
 class TaskSpec:
     """A single task's specification — the atomic unit of work."""
     id: str
@@ -121,7 +183,22 @@ class TaskSpec:
     working_dir: Optional[str] = None        # Relative path within mission workdir
     max_retries: int = 3
     output_artifacts: list[str] = field(default_factory=list)  # Expected file paths
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     model: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        worker = self.execution.worker
+        if self.model:
+            if worker is None:
+                worker = ExecutionProfile(model=self.model)
+            elif not worker.model:
+                worker.model = self.model
+        if worker and worker.configured():
+            self.execution.worker = worker
+            self.model = worker.model
+        else:
+            self.execution.worker = None
+            self.model = None
 
     def generate_worker_prompt(self) -> str:
         """Generate a structured prompt for the worker agent."""
@@ -241,8 +318,10 @@ RESPOND WITH VALID JSON ONLY:
             "working_dir": self.working_dir,
             "max_retries": self.max_retries,
             "output_artifacts": self.output_artifacts,
-            "model": self.model,
         }
+        execution = self.execution.to_dict()
+        if execution:
+            d["execution"] = execution
         if self.tdd:
             d["tdd"] = self.tdd.to_dict()
         return d
@@ -251,10 +330,12 @@ RESPOND WITH VALID JSON ONLY:
     def from_dict(cls, d: dict) -> TaskSpec:
         raw = dict(d)
         tdd = TDDSpec.from_dict(raw.pop("tdd", {})) if raw.get("tdd") else None
+        execution = ExecutionConfig.from_dict(raw.get("execution"))
         # Pop fields we're extracting explicitly
         fields = {k: v for k, v in raw.items() if k in cls.__dataclass_fields__}
         if tdd:
             fields["tdd"] = tdd
+        fields["execution"] = execution
         fields["model"] = raw.get("model")
         return cls(**fields)
 
@@ -299,6 +380,7 @@ class MissionSpec:
     definition_of_done: list[str]
     tasks: list[TaskSpec]
     caps: Caps = field(default_factory=Caps)
+    execution_defaults: ExecutionConfig = field(default_factory=ExecutionConfig)
     working_dir: Optional[str] = None         # Root working directory for the mission
     project_memory_file: Optional[str] = None # Path to project memory file
 
@@ -324,6 +406,7 @@ class MissionSpec:
         mission_raw = d.get("mission", d)
         task_defs = d.get("tasks", mission_raw.pop("tasks", []))
         caps_raw = mission_raw.pop("caps", {})
+        execution_defaults_raw = mission_raw.pop("execution_defaults", {})
         
         tasks = []
         for i, td in enumerate(task_defs):
@@ -337,20 +420,23 @@ class MissionSpec:
                 "working_dir": td.get("working_dir"),
                 "max_retries": td.get("max_retries", 3),
                 "output_artifacts": td.get("output_artifacts", []),
+                "execution": ExecutionConfig.from_dict(td.get("execution")),
                 "model": td.get("model"),
             }
             tasks.append(TaskSpec(**td_with_defaults))
 
         caps = Caps.from_dict(caps_raw)
+        execution_defaults = ExecutionConfig.from_dict(execution_defaults_raw)
         
         spec_raw = {k: v for k, v in mission_raw.items() if k in cls.__dataclass_fields__}
         spec_raw["tasks"] = tasks
         spec_raw["caps"] = caps
+        spec_raw["execution_defaults"] = execution_defaults
         
         return cls(**spec_raw)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "name": self.name,
             "goal": self.goal,
             "definition_of_done": self.definition_of_done,
@@ -359,16 +445,32 @@ class MissionSpec:
             "project_memory_file": self.project_memory_file,
             "tasks": [t.to_dict() for t in self.tasks],
         }
+        execution_defaults = self.execution_defaults.to_dict()
+        if execution_defaults:
+            data["execution_defaults"] = execution_defaults
+        return data
 
-    def validate(self) -> list[str]:
-        """Validate the mission spec. Returns list of issues (empty = valid)."""
+    def validate(
+        self,
+        stage: str = "launch",
+        worker_model_override: Optional[str] = None,
+        reviewer_model_override: Optional[str] = None,
+    ) -> list[str]:
+        """Validate the mission spec. Launch blocks incomplete execution profiles."""
+        if stage != "launch":
+            return []
+
         issues = []
-        if not self.name:
+        if not self.name.strip():
             issues.append("Mission name is required")
-        if not self.goal:
+        if not self.goal.strip():
             issues.append("Mission goal is required")
         if not self.definition_of_done:
             issues.append("Definition of Done must have at least one criterion")
+        for index, item in enumerate(self.definition_of_done, start=1):
+            if not str(item).strip():
+                issues.append(f"Definition of Done item {index} is required")
+                break
         if not self.tasks:
             issues.append("At least one task is required")
         
@@ -377,7 +479,20 @@ class MissionSpec:
             if t.id in task_ids:
                 issues.append(f"Duplicate task ID: {t.id}")
             task_ids.add(t.id)
+            if not t.title.strip():
+                issues.append(f"task {t.id} title is required")
+            if not t.description.strip():
+                issues.append(f"task {t.id} description is required")
+            if not t.acceptance_criteria:
+                issues.append(f"task {t.id} acceptance criteria are required")
+            for index, criterion in enumerate(t.acceptance_criteria, start=1):
+                if not str(criterion).strip():
+                    issues.append(f"task {t.id} acceptance criterion {index} is required")
+                    break
             for dep in t.dependencies:
+                if not str(dep).strip():
+                    issues.append(f"Task {t.id} depends on unknown task: {dep}")
+                    continue
                 if dep not in task_ids and not any(tid == dep for tid in [t.id for t in self.tasks]):
                     # Only warn if the dep doesn't exist anywhere
                     pass  # Will catch this in dependency validation
@@ -411,7 +526,92 @@ class MissionSpec:
             if has_cycle(t.id):
                 issues.append("Circular dependency detected in task graph")
                 break
+
+        if stage == "launch":
+            issues.extend(
+                self._validate_execution_profiles(
+                    worker_model_override=worker_model_override,
+                    reviewer_model_override=reviewer_model_override,
+                )
+            )
         
+        return issues
+
+    def resolve_execution_profile(
+        self,
+        task: TaskSpec,
+        role: str,
+        mission_defaults: Optional[ExecutionConfig] = None,
+        cli_default: Optional[ExecutionProfile] = None,
+        runtime_fallback: Optional[ExecutionProfile] = None,
+    ) -> Optional[ExecutionProfile]:
+        default_config = mission_defaults or self.execution_defaults
+        task_profile = getattr(task.execution, role)
+        default_profile = getattr(default_config, role)
+        if task_profile and task_profile.configured():
+            resolved = task_profile.merged(default_profile)
+        elif default_profile and default_profile.configured():
+            resolved = default_profile
+        else:
+            resolved = None
+
+        if cli_default and cli_default.configured():
+            resolved = cli_default if resolved is None else resolved.merged(cli_default)
+        if runtime_fallback and runtime_fallback.configured():
+            resolved = runtime_fallback if resolved is None else resolved.merged(runtime_fallback)
+        return resolved
+
+    def effective_execution_profile(self, task: TaskSpec, role: str) -> Optional[ExecutionProfile]:
+        return self.resolve_execution_profile(task, role)
+
+    def _validate_execution_profiles(
+        self,
+        worker_model_override: Optional[str] = None,
+        reviewer_model_override: Optional[str] = None,
+    ) -> list[str]:
+        issues: list[str] = []
+        for task in self.tasks:
+            raw_worker = task.execution.worker or self.execution_defaults.worker
+            if raw_worker and raw_worker.configured():
+                effective_worker = self.effective_execution_profile(task, "worker")
+                if effective_worker and worker_model_override and not effective_worker.model:
+                    effective_worker = ExecutionProfile(
+                        agent=effective_worker.agent,
+                        model=worker_model_override,
+                        thinking=effective_worker.thinking,
+                    )
+                issues.extend(
+                    self._validate_execution_profile(
+                        effective_worker,
+                        f"task {task.id} worker execution",
+                    )
+                )
+            raw_reviewer = task.execution.reviewer or self.execution_defaults.reviewer
+            if raw_reviewer and raw_reviewer.configured():
+                effective_reviewer = self.effective_execution_profile(task, "reviewer")
+                if effective_reviewer and reviewer_model_override and not effective_reviewer.model:
+                    effective_reviewer = ExecutionProfile(
+                        agent=effective_reviewer.agent,
+                        model=reviewer_model_override,
+                        thinking=effective_reviewer.thinking,
+                    )
+                issues.extend(
+                    self._validate_execution_profile(
+                        effective_reviewer,
+                        f"task {task.id} reviewer execution",
+                    )
+                )
+        return issues
+
+    @staticmethod
+    def _validate_execution_profile(profile: Optional[ExecutionProfile], label: str) -> list[str]:
+        if not profile or not profile.configured():
+            return []
+        issues: list[str] = []
+        if not profile.agent:
+            issues.append(f"{label} is missing agent")
+        if not profile.model:
+            issues.append(f"{label} is missing model")
         return issues
 
     def validate_quality(self) -> QualityIssues:

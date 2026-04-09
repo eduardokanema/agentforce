@@ -1,3 +1,5 @@
+import type { Caps, ExecutionConfig, ExecutionProfile, MissionSpec, TaskSpec } from './types';
+
 export interface EditableTaskPlan {
   id: string;
   title: string;
@@ -12,6 +14,100 @@ export interface EditableMissionPlan {
   definition_of_done: string[];
   tasks: EditableTaskPlan[];
   working_dir?: string;
+}
+
+function yamlScalar(value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'null';
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return JSON.stringify(String(value));
+}
+
+function pushExecutionProfile(lines: string[], indent: string, label: string, profile?: ExecutionProfile | null): void {
+  if (!profile) {
+    return;
+  }
+  lines.push(`${indent}${label}:`);
+  if (profile.agent !== undefined && profile.agent !== null) {
+    lines.push(`${indent}  agent: ${yamlScalar(profile.agent)}`);
+  }
+  if (profile.model !== undefined && profile.model !== null) {
+    lines.push(`${indent}  model: ${yamlScalar(profile.model)}`);
+  }
+  if (profile.thinking !== undefined && profile.thinking !== null) {
+    lines.push(`${indent}  thinking: ${yamlScalar(profile.thinking)}`);
+  }
+}
+
+function pushExecutionConfig(lines: string[], indent: string, key: string, execution?: ExecutionConfig | null): void {
+  if (!execution) {
+    return;
+  }
+  const hasWorker = Boolean(execution.worker);
+  const hasReviewer = Boolean(execution.reviewer);
+  if (!hasWorker && !hasReviewer) {
+    return;
+  }
+  lines.push(`${indent}${key}:`);
+  pushExecutionProfile(lines, `${indent}  `, 'worker', execution.worker);
+  pushExecutionProfile(lines, `${indent}  `, 'reviewer', execution.reviewer);
+}
+
+function pushTask(lines: string[], task: TaskSpec): void {
+  lines.push(`  - id: ${yamlScalar(task.id)}`);
+  lines.push(`    title: ${yamlScalar(task.title)}`);
+  lines.push(`    description: ${yamlScalar(task.description)}`);
+  lines.push('    acceptance_criteria:');
+  for (const criterion of task.acceptance_criteria) {
+    lines.push(`      - ${yamlScalar(criterion)}`);
+  }
+  if (task.dependencies.length > 0) {
+    lines.push('    dependencies:');
+    for (const dependency of task.dependencies) {
+      lines.push(`      - ${yamlScalar(dependency)}`);
+    }
+  }
+  if (task.working_dir) {
+    lines.push(`    working_dir: ${yamlScalar(task.working_dir)}`);
+  }
+  lines.push(`    max_retries: ${task.max_retries}`);
+  if (task.output_artifacts.length > 0) {
+    lines.push('    output_artifacts:');
+    for (const artifact of task.output_artifacts) {
+      lines.push(`      - ${yamlScalar(artifact)}`);
+    }
+  }
+  if (task.tdd) {
+    lines.push('    tdd:');
+    if (task.tdd.test_file !== undefined && task.tdd.test_file !== null) {
+      lines.push(`      test_file: ${yamlScalar(task.tdd.test_file)}`);
+    }
+    if (task.tdd.test_command !== undefined && task.tdd.test_command !== null) {
+      lines.push(`      test_command: ${yamlScalar(task.tdd.test_command)}`);
+    }
+    lines.push(`      tests_must_pass: ${task.tdd.tests_must_pass}`);
+    if (task.tdd.coverage_threshold !== undefined && task.tdd.coverage_threshold !== null) {
+      lines.push(`      coverage_threshold: ${task.tdd.coverage_threshold}`);
+    }
+  }
+  pushExecutionConfig(lines, '    ', 'execution', task.execution);
+}
+
+function pushCaps(lines: string[], caps: Caps): void {
+  lines.push('caps:');
+  lines.push(`  max_tokens_per_task: ${caps.max_tokens_per_task}`);
+  lines.push(`  max_retries_global: ${caps.max_retries_global}`);
+  lines.push(`  max_retries_per_task: ${caps.max_retries_per_task}`);
+  lines.push(`  max_wall_time_minutes: ${caps.max_wall_time_minutes}`);
+  lines.push(`  max_human_interventions: ${caps.max_human_interventions}`);
+  lines.push(`  max_cost_usd: ${yamlScalar(caps.max_cost_usd)}`);
+  lines.push(`  max_concurrent_workers: ${caps.max_concurrent_workers}`);
+  if (caps.review !== undefined) {
+    lines.push(`  review: ${yamlScalar(caps.review)}`);
+  }
 }
 
 function parseScalar(value: string): string {
@@ -164,7 +260,7 @@ export function parseMissionPlanYaml(yaml: string): EditableMissionPlan {
   return plan;
 }
 
-export function serializeMissionPlanYaml(plan: EditableMissionPlan): string {
+export function serializeMissionPlanYaml(plan: MissionSpec): string {
   const lines: string[] = [];
 
   lines.push(`name: ${stringifyScalar(plan.name)}`);
@@ -174,23 +270,24 @@ export function serializeMissionPlanYaml(plan: EditableMissionPlan): string {
     lines.push(`working_dir: ${stringifyScalar(plan.working_dir)}`);
   }
 
+  if (plan.project_memory_file) {
+    lines.push(`project_memory_file: ${stringifyScalar(plan.project_memory_file)}`);
+  }
+
   lines.push('definition_of_done:');
   for (const criterion of plan.definition_of_done) {
     lines.push(`  - ${stringifyScalar(criterion)}`);
   }
 
+  pushCaps(lines, plan.caps);
+
+  if (plan.execution_defaults) {
+    pushExecutionConfig(lines, '', 'execution_defaults', plan.execution_defaults);
+  }
+
   lines.push('tasks:');
   for (const task of plan.tasks) {
-    lines.push(`  - id: ${stringifyScalar(task.id)}`);
-    lines.push(`    title: ${stringifyScalar(task.title)}`);
-    lines.push(`    description: ${stringifyScalar(task.description)}`);
-    lines.push('    acceptance_criteria:');
-    for (const criterion of task.acceptance_criteria) {
-      lines.push(`      - ${stringifyScalar(criterion)}`);
-    }
-    if (task.model) {
-      lines.push(`    model: ${stringifyScalar(task.model)}`);
-    }
+    pushTask(lines, task);
   }
 
   return `${lines.join('\n')}\n`;

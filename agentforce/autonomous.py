@@ -243,16 +243,14 @@ def _get_or_create_session_id(session_ids: dict, tid: str, role: str) -> str | N
 
     Workers: return None on first call so the agent creates a fresh session;
              return the stored session_id on subsequent calls.
-    Reviewers: generate and store a UUID on first call so the session is reused
-               across all review passes for the same task.
+    Reviewers: also return None on first call, then reuse the connector-returned
+               session/thread id on subsequent review passes when available.
     """
     if role == "worker":
         return session_ids.get(tid)
 
     key = f"{tid}_reviewer"
-    if key not in session_ids:
-        session_ids[key] = str(uuid.uuid4())
-    return session_ids[key]
+    return session_ids.get(key)
 
 
 def _record_usage(ledger, task_id: str, output: str) -> None:
@@ -296,6 +294,7 @@ def run_autonomous(
     """
     _ensure_pkg()
     from agentforce.core.engine import MissionEngine
+    from agentforce.core.spec import ExecutionConfig, ExecutionProfile, TaskSpec
     from agentforce.core.token_ledger import TokenLedger
     from agentforce.memory import Memory
     from agentforce.telemetry import TelemetryStore, TaskMetrics, MissionMetrics
@@ -305,18 +304,49 @@ def run_autonomous(
         print(f"No mission state found: {mission_id}")
         sys.exit(1)
 
-    resolved_agent = agent if agent != "auto" else _detect_agent()
-
     from agentforce.core.spec import TaskStatus
 
     memory = Memory(Path.home() / ".agentforce" / "memory")
     engine = MissionEngine.load(state_file, memory)
-    eff_model = model or _DEFAULT_MODEL
-    eff_variant = variant or _DEFAULT_VARIANT
+    persisted_defaults = engine.state.resolved_execution_defaults()
 
-    engine.state.worker_agent = resolved_agent
-    engine.state.worker_model = eff_model
+    def _resolve_role_default(role: str) -> ExecutionProfile:
+        persisted = getattr(persisted_defaults, role)
+        resolved_agent = (
+            agent if agent != "auto"
+            else (persisted.agent if persisted and persisted.agent else None)
+        )
+        if resolved_agent is None:
+            resolved_agent = _detect_agent()
+        return ExecutionProfile(
+            agent=resolved_agent,
+            model=model or (persisted.model if persisted and persisted.model else _DEFAULT_MODEL),
+            thinking=variant or (persisted.thinking if persisted and persisted.thinking else _DEFAULT_VARIANT),
+        )
+
+    worker_runtime = _resolve_role_default("worker")
+    reviewer_runtime = _resolve_role_default("reviewer")
+
+    engine.state.execution_defaults = ExecutionConfig(
+        worker=engine.spec.resolve_execution_profile(
+            TaskSpec(id="__defaults__", title="", description=""),
+            "worker",
+            mission_defaults=engine.state.execution_defaults,
+            runtime_fallback=worker_runtime,
+        ),
+        reviewer=engine.spec.resolve_execution_profile(
+            TaskSpec(id="__defaults__", title="", description=""),
+            "reviewer",
+            mission_defaults=engine.state.execution_defaults,
+            runtime_fallback=reviewer_runtime,
+        ),
+    )
+    engine._sync_execution_telemetry()
     engine.state.caps_hit = {}
+
+    resolved_agent = worker_runtime.agent
+    eff_model = worker_runtime.model
+    eff_variant = worker_runtime.thinking
 
     if extend_caps:
         # Raise all caps well above current counters so none trigger this run.
@@ -390,7 +420,9 @@ def run_autonomous(
         role = action.role
         tid = action.task_id
         timeout = getattr(action, "timeout", 300 if role == "worker" else 120)
-        effective_model = eff_model or getattr(action, "model", None)
+        effective_agent = getattr(action, "agent", None) or resolved_agent
+        effective_model = getattr(action, "model", None) or eff_model
+        effective_variant = getattr(action, "thinking", None) or eff_variant
 
         # Reuse session for the same task across retries (enables caching)
         session_id = _get_or_create_session_id(session_ids, tid, role)
@@ -427,7 +459,7 @@ def run_autonomous(
 
         fut = executor.submit(
             _run_agent, action.context, _wdir, timeout,
-            resolved_agent, effective_model, sp, eff_variant, session_id,
+            effective_agent, effective_model, sp, effective_variant, session_id,
         )
         in_flight[key] = (fut, action)
         print(f"  ↑ [{role}] task {tid} dispatched")
@@ -446,9 +478,12 @@ def run_autonomous(
                 from agentforce.core.token_event import TokenEvent
                 success, output, error, returned_sid, token_event = False, "", str(exc), None, TokenEvent(0, 0, 0.0)
 
-            # Store session ID for reuse across worker retries
-            if role == "worker" and returned_sid and tid not in session_ids:
-                session_ids[tid] = returned_sid
+            # Store returned connector session/thread IDs for reuse on retries.
+            if returned_sid:
+                if role == "worker" and tid not in session_ids:
+                    session_ids[tid] = returned_sid
+                elif role == "reviewer" and f"{tid}_reviewer" not in session_ids:
+                    session_ids[f"{tid}_reviewer"] = returned_sid
 
             if role == "worker":
                 now = datetime.now(timezone.utc).isoformat()

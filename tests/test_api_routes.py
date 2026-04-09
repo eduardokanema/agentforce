@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
+import yaml
 
 from agentforce.core.spec import Caps, MissionSpec, TaskSpec
 from agentforce.core.state import MissionState, TaskState
@@ -65,6 +69,10 @@ def _make_handler(path: str) -> DashboardHandler:
 
 def _response_body(handler: DashboardHandler) -> dict | list:
     return json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+
+def _sse_body(handler: DashboardHandler) -> str:
+    return handler.wfile.getvalue().decode("utf-8")
 
 
 def _set_handler_config(state_dir: Path) -> None:
@@ -361,6 +369,496 @@ def test_handler_module_stays_small():
 def _patch_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path)
     monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", tmp_path)
+
+
+def _json_request(handler: DashboardHandler, payload: dict) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    handler.rfile = BytesIO(body)
+    handler.headers["Content-Length"] = str(len(body))
+
+
+def test_plan_draft_create_and_get_round_trip(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+
+    create_payload = {
+        "prompt": "Draft a calculator mission",
+        "approved_models": ["claude-sonnet"],
+        "workspace_paths": ["/workspace/app"],
+        "companion_profile": {"id": "planner", "label": "Planner"},
+    }
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, create_payload)
+
+    create_handler.do_POST()
+
+    assert create_handler.send_response.call_args.args == (200,)
+    created_body = _response_body(create_handler)
+    assert created_body["id"]
+    assert created_body["revision"] == 1
+
+    get_handler = _make_handler(f"/api/plan/drafts/{created_body['id']}")
+    get_handler.do_GET()
+
+    assert get_handler.send_response.call_args.args == (200,)
+    loaded_body = _response_body(get_handler)
+    assert loaded_body["id"] == created_body["id"]
+    assert loaded_body["revision"] == 1
+    assert loaded_body["draft_spec"]["goal"] == "Draft a calculator mission"
+    assert loaded_body["approved_models"] == ["claude-sonnet"]
+    assert loaded_body["workspace_paths"] == ["/workspace/app"]
+    assert loaded_body["companion_profile"] == {"id": "planner", "label": "Planner"}
+
+
+def test_plan_draft_messages_stream_status_and_final_and_persist_checkpoint(tmp_path, monkeypatch):
+    from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+
+    class FakePlanner(planner_adapter_mod.PlannerAdapter):
+        def plan_turn(self, draft: dict, user_message: str) -> planner_adapter_mod.PlannerTurnResult:
+            updated = dict(draft["draft_spec"])
+            updated["name"] = "Calculator Draft"
+            updated["tasks"] = [
+                {
+                    "id": "01",
+                    "title": "Add parser",
+                    "description": "Parse CLI args",
+                    "acceptance_criteria": ["pytest tests/test_cli.py -k parser passes"],
+                }
+            ]
+            return planner_adapter_mod.PlannerTurnResult(
+                events=[
+                    planner_adapter_mod.PlannerEvent(phase="planning", status="started"),
+                    planner_adapter_mod.PlannerEvent(
+                        phase="planning",
+                        status="completed",
+                        content="I updated the draft with an initial task.",
+                    ),
+                ],
+                assistant_message="I updated the draft with an initial task.",
+                draft_spec=updated,
+            )
+
+    monkeypatch.setattr(plan_routes.planner_adapter, "get_planner_adapter", lambda: FakePlanner())
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a calculator mission"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    message_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
+    _json_request(message_handler, {"content": "Add a parsing task"})
+    message_handler.do_POST()
+
+    assert message_handler.send_response.call_args.args == (200,)
+    stream_body = _sse_body(message_handler)
+    assert '"type": "status"' in stream_body
+    assert '"phase": "planning"' in stream_body
+    assert '"type": "assistant"' in stream_body
+    assert "I updated the draft with an initial task." in stream_body
+    assert "data: [DONE]" in stream_body
+
+    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    get_handler.do_GET()
+    loaded_body = _response_body(get_handler)
+    assert loaded_body["revision"] == 2
+    assert loaded_body["draft_spec"]["name"] == "Calculator Draft"
+    assert loaded_body["turns"][-1]["role"] == "assistant"
+
+
+def test_planner_adapter_default_is_live_boundary():
+    from agentforce.server import planner_adapter as planner_adapter_mod
+
+    adapter = planner_adapter_mod.get_planner_adapter()
+
+    assert adapter.__class__.__name__ == "LivePlannerAdapter"
+    assert not isinstance(adapter, planner_adapter_mod.DeterministicPlannerAdapter)
+
+
+def test_plan_draft_messages_retries_persistence_on_revision_conflict(tmp_path, monkeypatch):
+    from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server.plan_drafts import PlanDraftStore
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    store = PlanDraftStore()
+    monkeypatch.setattr(plan_routes, "_store", lambda: store)
+
+    class FakePlanner(planner_adapter_mod.PlannerAdapter):
+        def plan_turn(self, draft: dict, user_message: str) -> planner_adapter_mod.PlannerTurnResult:
+            updated = dict(draft["draft_spec"])
+            updated["name"] = "Retried Calculator Draft"
+            return planner_adapter_mod.PlannerTurnResult(
+                events=[
+                    planner_adapter_mod.PlannerEvent(phase="planning", status="started"),
+                    planner_adapter_mod.PlannerEvent(
+                        phase="planning",
+                        status="completed",
+                        content="Planner merged after retry.",
+                    ),
+                ],
+                assistant_message="Planner merged after retry.",
+                draft_spec=updated,
+            )
+
+    monkeypatch.setattr(plan_routes.planner_adapter, "get_planner_adapter", lambda: FakePlanner())
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a calculator mission"})
+    create_handler.do_POST()
+    created = _response_body(create_handler)
+    draft_id = created["id"]
+
+    original_save = store.save
+    save_calls = {"count": 0}
+
+    def conflict_then_save(draft, *, expected_revision):
+        save_calls["count"] += 1
+        if save_calls["count"] == 1:
+            concurrent = store.load(draft.id)
+            assert concurrent is not None
+            original_save(
+                concurrent.copy_with(
+                    draft_spec={
+                        **concurrent.draft_spec,
+                        "goal": "Concurrent edit",
+                    },
+                    activity_log=list(concurrent.activity_log) + [{"type": "concurrent_edit"}],
+                ),
+                expected_revision=expected_revision,
+            )
+        return original_save(draft, expected_revision=expected_revision)
+
+    monkeypatch.setattr(store, "save", conflict_then_save)
+
+    message_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
+    _json_request(message_handler, {"content": "Refine the draft"})
+    message_handler.do_POST()
+
+    assert message_handler.send_response.call_args.args == (200,)
+    assert "Planner merged after retry." in _sse_body(message_handler)
+
+    persisted = store.load(draft_id)
+    assert persisted is not None
+    assert persisted.revision == 3
+    assert persisted.draft_spec["goal"] == "Concurrent edit"
+    assert persisted.draft_spec["name"] == "Retried Calculator Draft"
+    assert persisted.turns[-1]["content"] == "Planner merged after retry."
+
+
+def test_plan_draft_spec_patch_rejects_stale_revision(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a calculator mission"})
+    create_handler.do_POST()
+    created = _response_body(create_handler)
+
+    patch_handler = _make_handler(f"/api/plan/drafts/{created['id']}/spec")
+    _json_request(
+        patch_handler,
+        {
+            "expected_revision": created["revision"],
+            "draft_spec": {
+                "name": "Calculator Mission",
+                "goal": "Build a calculator mission",
+                "definition_of_done": [],
+                "tasks": [],
+                "caps": {},
+            },
+        },
+    )
+    patch_handler.do_PATCH()
+    assert patch_handler.send_response.call_args.args == (200,)
+
+    stale_handler = _make_handler(f"/api/plan/drafts/{created['id']}/spec")
+    _json_request(
+        stale_handler,
+        {
+            "expected_revision": created["revision"],
+            "draft_spec": {
+                "name": "Stale Write",
+                "goal": "Should conflict",
+                "definition_of_done": [],
+                "tasks": [],
+                "caps": {},
+            },
+        },
+    )
+    stale_handler.do_PATCH()
+
+    assert stale_handler.send_response.call_args.args == (409,)
+    assert _response_body(stale_handler)["error"] == "draft revision conflict"
+
+
+def test_plan_draft_import_yaml_replaces_spec_only_when_valid(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a calculator mission"})
+    create_handler.do_POST()
+    created = _response_body(create_handler)
+
+    invalid_handler = _make_handler(f"/api/plan/drafts/{created['id']}/import-yaml")
+    _json_request(
+        invalid_handler,
+        {"expected_revision": created["revision"], "yaml": "name: Broken\n"},
+    )
+    invalid_handler.do_POST()
+
+    assert invalid_handler.send_response.call_args.args == (400,)
+    invalid_body = _response_body(invalid_handler)
+    assert invalid_body["error"].startswith("invalid mission yaml:")
+
+    unchanged_handler = _make_handler(f"/api/plan/drafts/{created['id']}")
+    unchanged_handler.do_GET()
+    unchanged_body = _response_body(unchanged_handler)
+    assert unchanged_body["revision"] == 1
+    assert unchanged_body["draft_spec"]["goal"] == "Build a calculator mission"
+
+    valid_yaml = """
+name: Calculator Mission
+goal: Build a Rust CLI calculator
+definition_of_done:
+  - cargo test passes
+tasks:
+  - id: "01"
+    title: Parse args
+    description: Parse CLI args
+    acceptance_criteria:
+      - cargo test --test cli passes
+caps:
+  max_concurrent_workers: 1
+"""
+    valid_handler = _make_handler(f"/api/plan/drafts/{created['id']}/import-yaml")
+    _json_request(
+        valid_handler,
+        {"expected_revision": created["revision"], "yaml": valid_yaml},
+    )
+    valid_handler.do_POST()
+
+    assert valid_handler.send_response.call_args.args == (200,)
+    valid_body = _response_body(valid_handler)
+    assert valid_body["revision"] == 2
+    assert valid_body["draft_spec"]["name"] == "Calculator Mission"
+    assert valid_body["draft_spec"]["tasks"][0]["id"] == "01"
+
+
+def test_planner_readjust_trajectory_seeds_new_draft_from_mission_spec(tmp_path, monkeypatch):
+    _seed_state(tmp_path, monkeypatch)
+    _patch_home(monkeypatch, tmp_path)
+
+    readjust_handler = _make_handler("/api/mission/mission-123/readjust-trajectory")
+    readjust_handler.do_POST()
+
+    assert readjust_handler.send_response.call_args.args == (200,)
+    readjusted = _response_body(readjust_handler)
+    assert readjusted["id"]
+    assert readjusted["revision"] == 1
+
+    get_handler = _make_handler(f"/api/plan/drafts/{readjusted['id']}")
+    get_handler.do_GET()
+    draft_body = _response_body(get_handler)
+    assert draft_body["draft_spec"]["name"] == "API Mission"
+    assert draft_body["draft_spec"]["goal"] == "Exercise API routes"
+    assert draft_body["draft_spec"]["tasks"][0]["id"] == "task-1"
+
+
+def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monkeypatch):
+    from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    state_dir = tmp_path / "state"
+    _set_handler_config(state_dir)
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", state_dir)
+    monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *_args, **_kwargs: None)
+
+    class FakePlanner(planner_adapter_mod.PlannerAdapter):
+        def plan_turn(self, draft: dict, user_message: str) -> planner_adapter_mod.PlannerTurnResult:
+            if not draft["turns"]:
+                draft_spec = {
+                    "name": "Rust Calculator Draft",
+                    "goal": "Draft a Rust CLI calculator mission",
+                    "definition_of_done": [
+                        "cargo test passes",
+                        "cargo run -- --help prints usage text",
+                    ],
+                    "tasks": [
+                        {
+                            "id": "01",
+                            "title": "Parse CLI arguments",
+                            "description": "Parse calculator operands and flags from the command line.",
+                            "acceptance_criteria": [
+                                "cargo test --test cli passes",
+                            ],
+                            "execution": {
+                                "worker": {
+                                    "agent": "codex",
+                                    "model": "rust-calculator-worker-v1",
+                                    "thinking": "medium",
+                                }
+                            },
+                        }
+                    ],
+                    "execution_defaults": {
+                        "worker": {
+                            "agent": "codex",
+                            "model": "rust-calculator-worker-default",
+                            "thinking": "high",
+                        },
+                        "reviewer": {
+                            "agent": "codex",
+                            "model": "rust-calculator-reviewer-default",
+                            "thinking": "low",
+                        },
+                    },
+                    "caps": {"max_concurrent_workers": 1},
+                }
+                message = f"Seeded a Rust calculator draft from: {user_message}"
+            else:
+                draft_spec = {
+                    "name": "Rust Calculator Draft",
+                    "goal": "Draft a Rust CLI calculator mission",
+                    "definition_of_done": [
+                        "cargo test passes",
+                        "cargo run -- --help prints usage text",
+                    ],
+                    "tasks": [
+                        {
+                            "id": "01",
+                            "title": "Parse CLI arguments",
+                            "description": "Parse calculator operands and flags from the command line.",
+                            "acceptance_criteria": [
+                                "cargo test --test cli passes",
+                            ],
+                            "execution": {
+                                "worker": {
+                                    "agent": "codex",
+                                    "model": "rust-calculator-worker-v2",
+                                    "thinking": "high",
+                                }
+                            },
+                        },
+                        {
+                            "id": "02",
+                            "title": "Implement arithmetic operations",
+                            "description": "Add add, subtract, multiply, and divide operations.",
+                            "acceptance_criteria": [
+                                "cargo test --test calculator passes",
+                                "cargo run -- 2 + 2 prints 4",
+                            ],
+                            "execution": {
+                                "reviewer": {
+                                    "agent": "codex",
+                                    "model": "rust-calculator-reviewer-v2",
+                                    "thinking": "medium",
+                                }
+                            },
+                        },
+                    ],
+                    "execution_defaults": {
+                        "worker": {
+                            "agent": "codex",
+                            "model": "rust-calculator-worker-default",
+                            "thinking": "high",
+                        },
+                        "reviewer": {
+                            "agent": "codex",
+                            "model": "rust-calculator-reviewer-default",
+                            "thinking": "low",
+                        },
+                    },
+                    "caps": {"max_concurrent_workers": 1},
+                }
+                message = f"Refined the Rust calculator draft from: {user_message}"
+
+            return planner_adapter_mod.PlannerTurnResult(
+                events=[
+                    planner_adapter_mod.PlannerEvent(phase="planning", status="started"),
+                    planner_adapter_mod.PlannerEvent(
+                        phase="planning",
+                        status="completed",
+                        content=message,
+                    ),
+                ],
+                assistant_message=message,
+                draft_spec=draft_spec,
+            )
+
+    monkeypatch.setattr(plan_routes.planner_adapter, "get_planner_adapter", lambda: FakePlanner())
+    monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *_args, **_kwargs: None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Draft a Rust CLI calculator mission"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    first_turn_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
+    _json_request(first_turn_handler, {"content": "Seed the calculator with a parser task"})
+    first_turn_handler.do_POST()
+    assert first_turn_handler.send_response.call_args.args == (200,)
+
+    second_turn_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
+    _json_request(second_turn_handler, {"content": "Add a second task and execution details"})
+    second_turn_handler.do_POST()
+
+    assert second_turn_handler.send_response.call_args.args == (200,)
+    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    get_handler.do_GET()
+    revised_draft = _response_body(get_handler)
+
+    assert revised_draft["revision"] == 3
+    assert len(revised_draft["draft_spec"]["tasks"]) >= 2
+    assert all(task["acceptance_criteria"] for task in revised_draft["draft_spec"]["tasks"])
+
+    launch_handler = _make_handler("/api/missions")
+    _json_request(launch_handler, {"yaml": yaml.safe_dump(revised_draft["draft_spec"], sort_keys=False)})
+    launch_handler.do_POST()
+
+    assert launch_handler.send_response.call_args.args == (200,)
+    launch_body = _response_body(launch_handler)
+    mission_id = launch_body["id"]
+    state_path = state_dir / f"{mission_id}.json"
+    assert state_path.exists()
+
+    mission_state = MissionState.load(state_path)
+    mission_dict = mission_state.to_dict()
+
+    assert mission_dict["spec"]["goal"] == "Draft a Rust CLI calculator mission"
+    assert len(mission_dict["spec"]["tasks"]) >= 2
+    assert all(task["acceptance_criteria"] for task in mission_dict["spec"]["tasks"])
+    assert mission_dict["spec"]["definition_of_done"] == [
+        "cargo test passes",
+        "cargo run -- --help prints usage text",
+    ]
+    assert mission_dict["execution_defaults"]["worker"]["model"] == "rust-calculator-worker-default"
+    assert mission_dict["execution_defaults"]["reviewer"]["model"] == "rust-calculator-reviewer-default"
+    assert mission_dict["execution"]["defaults"]["worker"]["model"] == "rust-calculator-worker-default"
+    assert mission_dict["execution"]["defaults"]["reviewer"]["model"] == "rust-calculator-reviewer-default"
+    assert mission_dict["execution"]["tasks"]["01"]["worker"]["model"] == "rust-calculator-worker-v2"
+    assert mission_dict["execution"]["tasks"]["02"]["reviewer"]["model"] == "rust-calculator-reviewer-v2"
+    assert mission_dict["execution"]["task_overrides"] == {"worker": 1, "reviewer": 1}
+
+    readjust_handler = _make_handler(f"/api/mission/{mission_id}/readjust-trajectory")
+    readjust_handler.do_POST()
+    assert readjust_handler.send_response.call_args.args == (200,)
+    readjusted = _response_body(readjust_handler)
+
+    seeded_handler = _make_handler(f"/api/plan/drafts/{readjusted['id']}")
+    seeded_handler.do_GET()
+    seeded_draft = _response_body(seeded_handler)
+
+    assert seeded_draft["revision"] == 1
+    assert seeded_draft["draft_spec"] == mission_dict["spec"]
+
+
+def test_plan_draft_launch_rust_calculator_real_companion_smoke_manual_only():
+    """Opt-in manual smoke for a real companion model; not part of CI."""
+    if os.environ.get("AGENTFORCE_REAL_COMPANION_SMOKE") != "1":
+        pytest.skip("Set AGENTFORCE_REAL_COMPANION_SMOKE=1 to run the manual smoke.")
+    pytest.skip("Manual smoke placeholder: run the same launch flow locally with a live companion adapter.")
 
 
 def test_get_config_returns_default_caps(tmp_path, monkeypatch):

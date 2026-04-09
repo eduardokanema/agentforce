@@ -15,12 +15,15 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .state import MissionState, TaskState
-from .spec import MissionSpec, TaskSpec, TaskStatus
+from .spec import ExecutionConfig, ExecutionProfile, MissionSpec, TaskSpec, TaskStatus
 
 logger = logging.getLogger("agentforce.engine")
 
 BACKOFF_BASE_SECONDS = 5
 BACKOFF_MAX_SECONDS = 60
+DEFAULT_RUNTIME_AGENT = "opencode"
+DEFAULT_RUNTIME_MODEL = "opencode/nemotron-3-super-free"
+DEFAULT_RUNTIME_THINKING = "high"
 
 
 # ── Delegation descriptors ──
@@ -33,7 +36,9 @@ class WorkerDelegation:
     goal: str = ""
     context: str = ""
     toolsets: list[str] = field(default_factory=lambda: ["terminal", "file"])
+    agent: Optional[str] = None
     model: Optional[str] = None
+    thinking: Optional[str] = None
     timeout: int = 300
 
 
@@ -45,7 +50,9 @@ class ReviewerDelegation:
     goal: str = ""
     context: str = ""
     toolsets: list[str] = field(default_factory=lambda: ["file"])
+    agent: Optional[str] = None
     model: Optional[str] = None
+    thinking: Optional[str] = None
     timeout: int = 120
 
 
@@ -92,6 +99,14 @@ class MissionEngine:
         worker_model: str = None,
         reviewer_model: str = None,
     ):
+        issues = spec.validate(
+            stage="launch",
+            worker_model_override=worker_model,
+            reviewer_model_override=reviewer_model,
+        )
+        if issues:
+            raise ValueError("; ".join(issues))
+
         self.spec = spec
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -102,6 +117,8 @@ class MissionEngine:
         mid = mission_id or spec.short_id()
         self.state = MissionState(mission_id=mid, spec=spec)
         self.state.working_dir = str(Path(spec.working_dir or f"./missions-{mid}").resolve())
+        self.state.execution_defaults = self._normalized_execution_defaults()
+        self._sync_execution_telemetry()
         
         # Initialize task states
         for ts in spec.tasks:
@@ -164,7 +181,57 @@ class MissionEngine:
         engine.reviewer_model = None
         engine.state = state
         engine._state_file = Path(state_file)
+        engine._sync_execution_telemetry()
         return engine
+
+    def _cli_execution_profile(self, role: str) -> Optional[ExecutionProfile]:
+        model = self.worker_model if role == "worker" else self.reviewer_model
+        if not model:
+            return None
+        return ExecutionProfile(model=model)
+
+    def _runtime_fallback_profile(self) -> ExecutionProfile:
+        return ExecutionProfile(
+            agent=DEFAULT_RUNTIME_AGENT,
+            model=DEFAULT_RUNTIME_MODEL,
+            thinking=DEFAULT_RUNTIME_THINKING,
+        )
+
+    def _normalized_execution_defaults(self) -> ExecutionConfig:
+        return ExecutionConfig(
+            worker=self.spec.resolve_execution_profile(
+                TaskSpec(id="__defaults__", title="", description=""),
+                "worker",
+                cli_default=self._cli_execution_profile("worker"),
+                runtime_fallback=self._runtime_fallback_profile(),
+            ),
+            reviewer=self.spec.resolve_execution_profile(
+                TaskSpec(id="__defaults__", title="", description=""),
+                "reviewer",
+                cli_default=self._cli_execution_profile("reviewer"),
+                runtime_fallback=self._runtime_fallback_profile(),
+            ),
+        )
+
+    def _resolve_execution_profile(
+        self,
+        task_spec: TaskSpec,
+        role: str,
+        runtime_fallback: Optional[ExecutionProfile] = None,
+    ) -> Optional[ExecutionProfile]:
+        return self.spec.resolve_execution_profile(
+            task_spec,
+            role,
+            mission_defaults=self.state.resolved_execution_defaults(),
+            cli_default=self._cli_execution_profile(role),
+            runtime_fallback=runtime_fallback or self._runtime_fallback_profile(),
+        )
+
+    def _sync_execution_telemetry(self) -> None:
+        defaults = self.state.resolved_execution_defaults()
+        worker = defaults.worker
+        self.state.worker_agent = worker.agent if worker and worker.agent else ""
+        self.state.worker_model = worker.model if worker and worker.model else ""
 
     # ── Caps ──
 
@@ -298,14 +365,16 @@ class MissionEngine:
 
         self.state.log_event("task_dispatched", task_id, f"Worker dispatched for {task_spec.title}")
         logger.info("Dispatching worker: %s - %s", task_id, task_spec.title)
-        effective_model = task_spec.model or self.worker_model
-        logger.debug("task %s worker model: %s", task_id, effective_model)
+        execution = self._resolve_execution_profile(task_spec, "worker")
+        logger.debug("task %s worker model: %s", task_id, execution.model if execution else None)
 
         return WorkerDelegation(
             task_id=task_id,
             goal=f"Complete task {task_id}: {task_spec.title}",
             context=prompt,
-            model=effective_model,
+            agent=execution.agent if execution else None,
+            model=execution.model if execution else None,
+            thinking=execution.thinking if execution else None,
             timeout=min(600, self.state.caps.max_wall_time_minutes * 60) if self.state.caps.max_wall_time_minutes else 600,
         )
 
@@ -333,12 +402,15 @@ class MissionEngine:
 
         self.state.log_event("review_started", task_id, f"Review started for {task_spec.title}")
         logger.info("Dispatching reviewer: %s", task_id)
+        execution = self._resolve_execution_profile(task_spec, "reviewer")
 
         return ReviewerDelegation(
             task_id=task_id,
             goal=f"Review task {task_id}: {task_spec.title}",
             context=prompt,
-            model=self.reviewer_model,
+            agent=execution.agent if execution else None,
+            model=execution.model if execution else None,
+            thinking=execution.thinking if execution else None,
             timeout=120,
         )
 

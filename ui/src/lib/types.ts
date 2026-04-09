@@ -22,6 +22,27 @@ export interface TDDSpec {
   coverage_threshold?: number | null;
 }
 
+export interface ExecutionProfile {
+  agent?: string | null;
+  model?: string | null;
+  thinking?: string | null;
+}
+
+export interface ExecutionConfig {
+  worker?: ExecutionProfile | null;
+  reviewer?: ExecutionProfile | null;
+}
+
+export interface ExecutionMetadata {
+  defaults: ExecutionConfig;
+  mixed_roles: Array<'worker' | 'reviewer'>;
+  task_overrides: {
+    worker: number;
+    reviewer: number;
+  };
+  tasks?: Record<string, ExecutionConfig>;
+}
+
 export interface TaskSpec {
   id: string;
   title: string;
@@ -32,6 +53,7 @@ export interface TaskSpec {
   working_dir?: string | null;
   max_retries: number;
   output_artifacts: string[];
+  execution?: ExecutionConfig | null;
 }
 
 export interface Caps {
@@ -42,6 +64,7 @@ export interface Caps {
   max_human_interventions: number;
   max_cost_usd?: number | null;
   max_concurrent_workers: number;
+  review?: string;
 }
 
 export interface MissionSpec {
@@ -50,8 +73,28 @@ export interface MissionSpec {
   definition_of_done: string[];
   tasks: TaskSpec[];
   caps: Caps;
+  execution_defaults?: ExecutionConfig | null;
   working_dir?: string | null;
   project_memory_file?: string | null;
+}
+
+export interface DraftTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface MissionDraft {
+  id: string;
+  revision: number;
+  status: string;
+  draft_spec: MissionSpec;
+  turns: DraftTurn[];
+  validation: Record<string, unknown>;
+  activity_log: unknown[];
+  approved_models: string[];
+  workspace_paths: string[];
+  companion_profile: Record<string, unknown>;
+  draft_notes: Record<string, unknown>[];
 }
 
 export interface TaskState {
@@ -97,6 +140,8 @@ export interface MissionState {
   event_log?: EventLogEntry[];
   completed_at?: string | null;
   caps_hit?: Record<string, string>;
+  execution_defaults?: ExecutionConfig | null;
+  execution?: ExecutionMetadata | null;
   working_dir?: string;
   worker_agent?: string;
   worker_model?: string;
@@ -158,6 +203,7 @@ export interface MissionSummary {
   retries?: number;
   tokens_in?: number;
   tokens_out?: number;
+  execution?: ExecutionMetadata | null;
   workspace?: string;
   models?: string[];
   active_task_title?: string;

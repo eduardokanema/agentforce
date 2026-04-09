@@ -21,7 +21,8 @@ Create high-quality AgentForce mission YAML specifications using a structured 6-
 ## Overview
 
 This skill guides creation of AgentForce mission specs that consistently score 8.0+/10 on quality metrics. It enforces:
-- **Code Principles:** YAGNI, Occam's Razor, Miller's Law (7 tasks max, 5 criteria max), SOLID/SRP, DRY, Safety First
+- **Code Principles:** YAGNI, Occam's Razor, Miller's Law (
+asks max, 5 criteria max), SOLID/SRP, DRY, Safety First
 - **Reviewer Dimensions:** Spec Compliance, Acceptance, TDD, Quality, Security, Edge Cases, Scope Creep, Contradictions
 - **Task Discipline:** Single responsibility per task, concrete output artifacts, testable acceptance criteria
 
@@ -102,8 +103,8 @@ This skill guides creation of AgentForce mission specs that consistently score 8
      - **Dependency:** "Does this task depend on another?" — document as `depends_on: [task_id]`
 
 3. **Miller's Law check:**
-   - If task count > 7: Ask user to prioritize top 7 and suggest follow-on mission for the rest
-   - Enforce: max 7 tasks per mission
+   - If task count > 20: Ask user to prioritize top 20 and suggest follow-on mission for the rest
+   - Enforce: max 20 tasks per mission
 
 4. **Draw dependency DAG (ASCII):**
    ```
@@ -124,7 +125,7 @@ This skill guides creation of AgentForce mission specs that consistently score 8
 6. **Checkpoint:** Confirm task list, dependencies, and artifacts before Phase 3.
 
 **Exit Criteria:**
-- 1–7 tasks defined
+- 1–20 tasks defined
 - Each task has: name, description, output artifacts, dependencies
 - Dependency DAG is acyclic (no circular deps)
 - SRP validated for each task
@@ -263,7 +264,7 @@ Issue found? → Challenge: "Could we achieve this DoD with less code/complexity
 
 **4. Miller's Law (7±2 / 5±2)**
 ```
-□ Max 7 tasks (already enforced in Phase 2)
+□ Max 20 tasks (already enforced in Phase 2)
 □ Max 5 acceptance criteria per task
 □ Max ~10 lines per task description
 
@@ -544,7 +545,7 @@ If user provides existing spec file, skip Phases 1–4 and jump to Phase 5 (Qual
    Safety First:     ✓ No hardcoded secrets
    YAGNI:            ✓ All tasks in scope
    Occam's Razor:    ⚠ Task 03 could use stdlib regex instead of regex library
-   Miller's Law:     ✓ 5 tasks (< 7 limit)
+   Miller's Law:     ✓ 5 tasks (< 20 limit)
    SOLID/SRP:        ✓ Each task has single concern
    DRY:              ✓ No duplicate criteria
 
@@ -581,7 +582,7 @@ If user provides existing spec file, skip Phases 1–4 and jump to Phase 5 (Qual
 | **Safety First** | No hardcoded credentials, assumes explicit error handling | API key in code, no null checks |
 | **YAGNI** | No speculative tasks ("might be useful later") | Task: "Build payment system for future monetization" |
 | **Occam's Razor** | Simplest solution that meets DoD | Task uses 3 libraries when stdlib works |
-| **Miller's Law** | Max 7 tasks, max 5 criteria per task | 10 tasks, 8 criteria per task |
+| **Miller's Law** | Max 20 tasks, max 5 criteria per task | 10 tasks, 8 criteria per task |
 | **SOLID/SRP** | Each task has ONE reason to change | Task: "Setup API and add caching" (two reasons) |
 | **DRY** | No duplicate work across tasks | Two tasks both implement logging |
 
@@ -620,9 +621,3 @@ Located in `./missions/`:
 - **YAML generation:** Use PyYAML or similar; ensure proper indentation and valid syntax
 - **File I/O:** Confirm file write success; warn if file will overwrite existing spec
 - **Review mode:** If no quality issues found, skip recommendations; just confirm ready to run
-
----
-
-**Skill version:** 1.0
-**Last updated:** 2026-04-09
-**Reference:** /Users/rent/Projects/agentforce/docs/IMPROVEMENTS.md

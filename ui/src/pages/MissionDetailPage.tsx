@@ -1,11 +1,11 @@
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMemo, useState } from "react";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Breadcrumb from "../components/Breadcrumb";
 import EventLogTable from "../components/EventLogTable";
 import StatusBadge from "../components/StatusBadge";
 import TokenMeter from "../components/TokenMeter";
-import { restartMission, stopMission } from "../lib/api";
+import { createReadjustedDraft, restartMission, stopMission } from "../lib/api";
 import { useElapsedTime } from "../hooks/useElapsedTime";
 import { useMission } from "../hooks/useMission";
 import { useToast } from "../hooks/useToast";
@@ -79,6 +79,19 @@ function formatScore(score: number): string {
   return Number.isInteger(score) ? `${score}/10` : `${score.toFixed(1)}/10`;
 }
 
+function formatExecutionProfile(profile?: {
+  agent?: string | null;
+  model?: string | null;
+  thinking?: string | null;
+} | null): string | null {
+  if (!profile) {
+    return null;
+  }
+
+  const parts = [profile.agent, profile.model, profile.thinking].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 function getTaskState(
   taskState: TaskState | undefined,
   taskSpec: { id: string },
@@ -136,6 +149,7 @@ function MissionDetailPageLoading({ message }: { message: string }) {
 }
 
 function MissionDetailPageContent({ missionId }: { missionId: string }) {
+  const navigate = useNavigate();
   const { mission, loading, error } = useMission(missionId);
   const { addToast } = useToast();
   const elapsedWallTime = useElapsedTime(mission?.started_at);
@@ -187,6 +201,8 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   const missionStatus = getMissionStatus(mission.task_states);
   const workspacePath =
     mission.working_dir?.trim() || mission.spec.working_dir?.trim() || "—";
+  const workerExecution = formatExecutionProfile(mission.execution?.defaults.worker);
+  const reviewerExecution = formatExecutionProfile(mission.execution?.defaults.reviewer);
   let runningTaskIndex = 0;
 
   const confirmPendingAction = async (): Promise<void> => {
@@ -241,6 +257,21 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
           >
             {workspacePath}
           </span>
+          {workerExecution ? (
+            <span className="inline-flex rounded-full border border-border bg-surface px-3 py-0.5 font-mono text-[11px] text-muted">
+              worker {workerExecution}
+            </span>
+          ) : null}
+          {reviewerExecution ? (
+            <span className="inline-flex rounded-full border border-border bg-surface px-3 py-0.5 font-mono text-[11px] text-muted">
+              reviewer {reviewerExecution}
+            </span>
+          ) : null}
+          {mission.execution?.mixed_roles.length ? (
+            <span className="inline-flex rounded-full border border-cyan/30 bg-cyan/10 px-3 py-0.5 text-[10px] uppercase tracking-[0.08em] text-cyan">
+              mixed {mission.execution.mixed_roles.join(", ")}
+            </span>
+          ) : null}
         </div>
 
         <TokenMeter
@@ -254,6 +285,24 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
       <div className="mb-6">
         <div className="section-title mb-2">Mission Control</div>
         <div className="flex gap-2">
+          <button
+            type="button"
+            className="rounded border border-cyan/30 px-3 py-1 text-[12px] text-cyan transition-colors hover:bg-cyan/10"
+            onClick={() => {
+              void createReadjustedDraft(missionId)
+                .then((draft) => {
+                  navigate(`/plan?draft=${draft.id}`);
+                })
+                .catch((error) => {
+                  addToast(
+                    error instanceof Error ? error.message : "Failed to reopen planning",
+                    "error",
+                  );
+                });
+            }}
+          >
+            Readjust Trajectory
+          </button>
           <button
             type="button"
             className="rounded border border-red/30 px-3 py-1 text-[12px] text-red transition-colors hover:bg-red/10"

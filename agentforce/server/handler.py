@@ -33,12 +33,14 @@ _ROUTES: list[tuple[str, re.Pattern[str], object]] = [
     ("GET", re.compile(r"^/api/config$"), filesystem.get),
     ("POST", re.compile(r"^/api/config$"), caps_config.post),
     ("GET", re.compile(r"^/api/filesystem$"), filesystem.get),
+    ("GET", re.compile(r"^/api/plan(?:/.*)?$"), plan.get),
+    ("POST", re.compile(r"^/api/plan(?:/.*)?$"), plan.post),
+    ("PATCH", re.compile(r"^/api/plan(?:/.*)?$"), plan.patch),
     ("GET", re.compile(r"^/api/mission/[^/]+/task/[^/]+(?:/.*)?$"), tasks.get),
     ("POST", re.compile(r"^/api/mission/[^/]+/task/[^/]+(?:/.*)?$"), tasks.post),
     ("GET", re.compile(r"^/api/mission(?:/.*)?$"), missions.get),
     ("POST", re.compile(r"^/api/mission(?:/.*)?$"), missions.post),
     ("DELETE", re.compile(r"^/api/mission(?:/.*)?$"), missions.delete),
-    ("POST", re.compile(r"^/api/plan$"), plan.post),
     ("GET", re.compile(r"^(?!/api).*$"), static.get),
 ]
 
@@ -71,13 +73,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._dispatch("POST")
 
+    def do_PATCH(self):
+        self._dispatch("PATCH")
+
     def do_DELETE(self):
         self._dispatch("DELETE")
 
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 

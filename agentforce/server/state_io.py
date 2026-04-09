@@ -8,7 +8,8 @@ from typing import Any
 
 from . import ws
 
-AGENTFORCE_HOME = Path(os.path.expanduser("~/.agentforce"))
+_DEFAULT_AGENTFORCE_HOME = Path(os.path.expanduser("~/.agentforce"))
+AGENTFORCE_HOME = _DEFAULT_AGENTFORCE_HOME
 STATE_DIR = AGENTFORCE_HOME / "state"
 _DEFAULT_STATE_DIR = STATE_DIR
 _STATE_DIR_OVERRIDE: Path | None = None
@@ -24,6 +25,8 @@ def _handler_module():
 
 
 def get_agentforce_home() -> Path:
+    if AGENTFORCE_HOME != _DEFAULT_AGENTFORCE_HOME:
+        return AGENTFORCE_HOME
     handler_mod = _handler_module()
     if handler_mod is not None and hasattr(handler_mod, "AGENTFORCE_HOME"):
         return Path(getattr(handler_mod, "AGENTFORCE_HOME"))

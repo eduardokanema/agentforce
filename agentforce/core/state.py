@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..utils import fmt_duration
-from .spec import MissionSpec, TaskStatus, Caps
+from .spec import MissionSpec, TaskStatus, Caps, ExecutionConfig
 
 
 class CapsViolation(str, Enum):
@@ -142,6 +142,7 @@ class MissionState:
     tokens_out: int = 0
     cost_usd: float = 0.0
     caps_hit: dict[str, str] = field(default_factory=dict)  # cap_name -> description
+    execution_defaults: ExecutionConfig = field(default_factory=ExecutionConfig)
     
     # Derived from spec but we store snapshot
     working_dir: str = ""
@@ -273,6 +274,50 @@ class MissionState:
             parts.append(f"HUMAN ATTENTION: {', '.join(self.needs_human())}")
         return "\n".join(parts)
 
+    def resolved_execution_defaults(self) -> ExecutionConfig:
+        def _merge_role(role: str):
+            state_profile = getattr(self.execution_defaults, role)
+            spec_profile = getattr(self.spec.execution_defaults, role)
+            if state_profile and state_profile.configured():
+                return state_profile.merged(spec_profile)
+            if spec_profile and spec_profile.configured():
+                return spec_profile
+            return None
+
+        return ExecutionConfig(
+            worker=_merge_role("worker"),
+            reviewer=_merge_role("reviewer"),
+        )
+
+    def execution_metadata(self, include_tasks: bool = False) -> dict:
+        defaults = self.resolved_execution_defaults()
+        mixed_roles: list[str] = []
+        task_overrides = {"worker": 0, "reviewer": 0}
+        task_payload: dict[str, dict] = {}
+
+        for role in ("worker", "reviewer"):
+            profiles = set()
+            for task in self.spec.tasks:
+                task_profile = getattr(task.execution, role)
+                if task_profile and task_profile.configured():
+                    task_overrides[role] += 1
+                resolved = self.spec.resolve_execution_profile(task, role, mission_defaults=defaults)
+                if resolved and resolved.configured():
+                    profiles.add(tuple(sorted(resolved.to_dict().items())))
+                    if include_tasks:
+                        task_payload.setdefault(task.id, {})[role] = resolved.to_dict()
+            if len(profiles) > 1:
+                mixed_roles.append(role)
+
+        payload = {
+            "defaults": defaults.to_dict(),
+            "mixed_roles": mixed_roles,
+            "task_overrides": task_overrides,
+        }
+        if include_tasks:
+            payload["tasks"] = task_payload
+        return payload
+
     def to_dict(self) -> dict:
         return {
             "mission_id": self.mission_id,
@@ -284,6 +329,8 @@ class MissionState:
             "total_retries": self.total_retries,
             "total_human_interventions": self.total_human_interventions,
             "caps_hit": self.caps_hit,
+            "execution_defaults": self.execution_defaults.to_dict(),
+            "execution": self.execution_metadata(include_tasks=True),
             "working_dir": self.working_dir,
             "worker_agent": self.worker_agent,
             "worker_model": self.worker_model,
@@ -315,6 +362,7 @@ class MissionState:
             "duration": fmt_duration(self.started_at, self.completed_at),
             "worker_agent": self.worker_agent,
             "worker_model": self.worker_model,
+            "execution": self.execution_metadata(),
             "started_at": self.started_at,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
@@ -339,6 +387,7 @@ class MissionState:
             tokens_out=d.get("tokens_out", 0),
             cost_usd=d.get("cost_usd", 0.0),
             caps_hit=d.get("caps_hit", {}),
+            execution_defaults=ExecutionConfig.from_dict(d.get("execution_defaults")),
             working_dir=d.get("working_dir", ""),
             worker_agent=d.get("worker_agent", ""),
             worker_model=d.get("worker_model", ""),

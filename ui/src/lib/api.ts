@@ -4,6 +4,7 @@ import type {
   DefaultCaps,
   FilesystemListing,
   Model,
+  MissionDraft,
   MissionState,
   MissionSummary,
   Provider,
@@ -168,6 +169,111 @@ export function createMission(yaml: string): Promise<{ id: string }> {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ yaml }),
+  });
+}
+
+export function createPlanDraft(payload: {
+  prompt: string;
+  approved_models: string[];
+  workspace_paths: string[];
+  companion_profile: Record<string, unknown>;
+}): Promise<{ id: string; revision: number }> {
+  return requestJson<{ id: string; revision: number }>('/api/plan/drafts', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getPlanDraft(id: string): Promise<MissionDraft> {
+  return requestJson<MissionDraft>(`/api/plan/drafts/${encodeURIComponent(id)}`);
+}
+
+export function patchPlanDraftSpec(
+  id: string,
+  expectedRevision: number,
+  draftSpec: MissionDraft['draft_spec'],
+): Promise<{ id: string; revision: number }> {
+  return fetch(`${BASE_URL}/api/plan/drafts/${encodeURIComponent(id)}/spec`, {
+    method: 'PATCH',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      expected_revision: expectedRevision,
+      draft_spec: draftSpec,
+    }),
+  }).then(async (response) => {
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = typeof payload?.error === 'string'
+        ? payload.error
+        : `Request failed with status ${response.status} ${response.statusText}`;
+      throw Object.assign(new Error(message), {
+        status: response.status,
+        payload,
+      });
+    }
+    return payload as { id: string; revision: number };
+  });
+}
+
+export function importPlanDraftYaml(
+  id: string,
+  expectedRevision: number,
+  yaml: string,
+): Promise<{ id: string; revision: number; draft_spec: MissionDraft['draft_spec'] }> {
+  return fetch(`${BASE_URL}/api/plan/drafts/${encodeURIComponent(id)}/import-yaml`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      expected_revision: expectedRevision,
+      yaml,
+    }),
+  }).then(async (response) => {
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = typeof payload?.error === 'string'
+        ? payload.error
+        : `Request failed with status ${response.status} ${response.statusText}`;
+      throw Object.assign(new Error(message), {
+        status: response.status,
+        payload,
+      });
+    }
+    return payload as { id: string; revision: number; draft_spec: MissionDraft['draft_spec'] };
+  });
+}
+
+export async function sendPlanDraftMessage(
+  id: string,
+  content: string,
+): Promise<Response> {
+  const response = await fetch(`${BASE_URL}/api/plan/drafts/${encodeURIComponent(id)}/messages`, {
+    method: 'POST',
+    headers: {
+      Accept: 'text/event-stream',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ content }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status} ${response.statusText}`);
+  }
+
+  return response;
+}
+
+export function createReadjustedDraft(missionId: string): Promise<{ id: string; revision: number }> {
+  return requestJson<{ id: string; revision: number }>(`/api/mission/${encodeURIComponent(missionId)}/readjust-trajectory`, {
+    method: 'POST',
   });
 }
 

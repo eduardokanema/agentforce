@@ -1,0 +1,306 @@
+mission:
+  name: "Plan Mode Flight Director"
+  goal: |
+    Transform /plan from a one-shot YAML generator into a server-persisted,
+    chat-first Mission Control workflow that lets a user iteratively draft a
+    mission with a selected companion model, apply Code Principles and initial
+    validations, edit the draft structurally, configure task-level worker and
+    reviewer execution settings, and launch the final mission through the
+    existing /api/missions seam. The implementation must preserve backwards
+    compatibility for legacy mission specs, keep YAML as an import/export
+    artifact rather than the canonical draft state, and validate the flow with
+    a deterministic Rust CLI calculator proof scenario.
+  definition_of_done:
+    - "A persisted MissionDraftV1 contract exists with revision-based optimistic concurrency and canonical draft_spec state"
+    - "GET/POST/PATCH draft endpoints exist for create, load, planner turn streaming, structured edits, and YAML import"
+    - "Plan Mode UI resumes an existing draft, streams planner status, and edits the same canonical draft without duplicating state"
+    - "Mid-draft flight checks render as advisory hints only; launch-time validation blocks invalid drafts"
+    - "Mission YAML can round-trip from draft_spec export and import without losing task ids, acceptance criteria, or execution settings"
+    - "MissionSpec supports mission-level execution defaults plus task-level worker and reviewer execution overrides"
+    - "MissionEngine and autonomous dispatch resolve agent, model, and thinking per delegation using one precedence resolver"
+    - "Legacy specs with task.model still load and launch by mapping task.model to task.execution.worker.model"
+    - "A launched mission exposes a 'Readjust Trajectory' or 'Back to Planning' path that reopens planning from the current mission spec"
+    - "A deterministic automated proof creates a Rust CLI calculator draft, refines it once, launches it, and verifies the created mission spec/state"
+    - "python3 -m pytest tests/test_api_routes.py tests/test_engine.py tests/test_autonomous.py tests/test_spec.py -v passes"
+    - "cd ui && npm test -- PlanModePage.test.tsx passes"
+    - "cd ui && npm run build passes"
+  caps:
+    max_concurrent_workers: 2
+    max_retries_per_task: 2
+    max_retries_global: 8
+    max_wall_time_minutes: 180
+    max_human_interventions: 3
+    max_cost_usd: 0.75
+    review: enabled
+  working_dir: "/Users/eduardo/Projects/hermes/data/projects/agentforce"
+
+tasks:
+  - id: "01"
+    title: "Define MissionDraftV1 and durable draft store"
+    description: |
+      Create the canonical draft contract before changing the planner or UI.
+      Add a MissionDraftV1 model and file-backed draft store under
+      ~/.agentforce/drafts with owner-only file permissions, explicit revision
+      numbers, and single-writer optimistic concurrency. The draft contract must
+      separate authored state from derived or ephemeral state:
+
+      - canonical authored state: draft_spec, workspace_paths, approved_models,
+        companion profile, draft notes
+      - durable conversation state: completed user/assistant turns
+      - durable advisory state: validation summaries and high-level activity log
+      - non-durable state: token-by-token stream chunks and transient catalog UI
+
+      Add retention/redaction helpers so persisted planner content strips obvious
+      secret literals and finalized/cancelled drafts can be pruned after 30 days.
+      Do not introduce a second live YAML-backed draft representation.
+    acceptance_criteria:
+      - "agentforce/server/plan_drafts.py serializes 'id', 'revision', 'status', 'draft_spec', 'turns', 'validation', 'activity_log', 'approved_models', 'workspace_paths', and 'companion_profile'"
+      - "tests/test_plan_drafts.py verifies revision changes from 1 to 2 after exactly one successful save"
+      - "tests/test_plan_drafts.py verifies a stale revision write returns 'conflict' instead of overwriting newer draft data"
+      - "Draft files are created under ~/.agentforce/drafts and are not world-readable"
+      - "tests/test_plan_drafts.py verifies persisted turn content removes strings matching 'Bearer ' or 'sk-' secret patterns"
+      - "python3 -m pytest tests/test_plan_drafts.py -v passes"
+    tdd:
+      test_file: "tests/test_plan_drafts.py"
+      test_command: "python3 -m pytest tests/test_plan_drafts.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/plan_drafts.py"
+      - "tests/test_plan_drafts.py"
+    model: "gpt-5.4"
+
+  - id: "02"
+    title: "Add draft planner API with deterministic planner adapter"
+    description: |
+      Replace the single POST /api/plan contract with draft-oriented routes
+      while keeping the existing handler/routing style. Add endpoints for:
+
+      - POST /api/plan/drafts
+      - GET /api/plan/drafts/:id
+      - POST /api/plan/drafts/:id/messages
+      - PATCH /api/plan/drafts/:id/spec
+      - POST /api/plan/drafts/:id/import-yaml
+      - POST /api/mission/:id/readjust-trajectory
+
+      Planner turns must stream structured SSE events for phase, status, and
+      final assistant content, then persist the merged draft checkpoint once the
+      turn completes. Add a planner adapter boundary so automated tests use a
+      deterministic fake planner instead of live model output. Preserve YAML as
+      export/import only; planner endpoints operate on MissionDraftV1 and
+      draft_spec, not raw YAML text. The readjust-trajectory route must seed a
+      new planning draft from the current launched mission spec so the user can
+      return to planning after mission start without rebuilding the draft from
+      scratch.
+    acceptance_criteria:
+      - "POST /api/plan/drafts returns 200 JSON with a persisted draft id and revision"
+      - "GET /api/plan/drafts/:id returns the same canonical draft_spec that was last saved"
+      - "POST /api/plan/drafts/:id/messages streams at least one status event and one final assistant event before [DONE]"
+      - "PATCH /api/plan/drafts/:id/spec rejects stale revisions with a conflict response"
+      - "POST /api/plan/drafts/:id/import-yaml replaces draft_spec only when the YAML parses into a valid MissionSpec-shaped structure"
+      - "POST /api/mission/:id/readjust-trajectory returns 200 JSON with a new draft id seeded from the mission's current spec"
+      - "tests/test_api_routes.py contains deterministic coverage for '/api/plan/drafts', '/api/plan/drafts/:id/messages', spec patch, and YAML import"
+      - "python3 -m pytest tests/test_api_routes.py -v -k 'plan_draft or planner' passes"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "python3 -m pytest tests/test_api_routes.py -v -k 'plan_draft or planner'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/routes/plan.py"
+      - "tests/test_api_routes.py"
+    model: "gpt-5.4"
+
+  - id: "03"
+    title: "Build chat-first Flight Director cockpit UI"
+    description: |
+      Rebuild PlanModePage into a composed chat-first cockpit that loads and
+      edits MissionDraftV1 instead of keeping parallel plan/yaml state in the
+      route component. Split the page into focused UI modules for transcript,
+      planner stream, summary, task timeline, execution profile controls,
+      validation board, and YAML drawer. Keep the existing mission-control HUD
+      language, but make the left side the Flight Director conversation and the
+      right side the engineering controls.
+
+      The page must support:
+      - create draft from prompt + workspaces + approved models + companion model
+      - resume existing draft by id
+      - send follow-up turns into the planner stream
+      - apply structured edits to mission summary and tasks against revisioned draft state
+      - render stream status without persisting token-level chunks in the browser state
+      - open a launched mission back in planning through a visible "Readjust Trajectory"
+        or "Back to Planning" action that loads a seeded draft
+    acceptance_criteria:
+      - "ui/src/pages/PlanModePage.test.tsx covers model load, draft creation, and draft resume from '/api/plan/drafts/:id'"
+      - "ui/src/pages/PlanModePage.tsx no longer keeps separate mutable 'plan' and 'yaml' state as the canonical live draft"
+      - "ui/src/pages/PlanModePage.test.tsx verifies a follow-up planner turn updates both transcript text and rendered draft summary"
+      - "ui/src/pages/PlanModePage.test.tsx verifies a stale revision response renders a visible 'conflict' recovery message"
+      - "cd ui && npm test -- PlanModePage.test.tsx passes with transcript and engineering panels rendered in the same screen"
+      - "ui/src/pages/MissionDetailPage.test.tsx verifies a visible 'Readjust Trajectory' or 'Back to Planning' action links into a seeded planning draft"
+      - "cd ui && npm test -- PlanModePage.test.tsx ModelSelector.test.tsx passes"
+    dependencies:
+      - "01"
+      - "02"
+    tdd:
+      test_file: "ui/src/pages/PlanModePage.test.tsx"
+      test_command: "cd ui && npm test -- PlanModePage.test.tsx ModelSelector.test.tsx"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/src/pages/PlanModePage.tsx"
+      - "ui/src/pages/PlanModePage.test.tsx"
+      - "ui/src/components/ModelSelector.tsx"
+      - "ui/src/lib/api.ts"
+      - "ui/src/lib/types.ts"
+    model: "gpt-5.4"
+
+  - id: "04"
+    title: "Add YAML import export and advisory flight checks"
+    description: |
+      Implement the YAML drawer and validation board on top of canonical
+      draft_spec state. YAML must be derived from draft_spec on export and must
+      re-enter the system only through an explicit import/apply action. Do not
+      make raw YAML a second live editor that races with structured state.
+
+      Add advisory mid-draft flight checks for:
+      - vague definition_of_done or acceptance_criteria
+      - dependency cycles or unknown dependencies
+      - more than 7 tasks
+      - missing worker/reviewer execution settings
+      - use of models outside the approved active set
+      - draft-only notes leaking into launchable spec data
+
+      Blocking validation is allowed only on YAML import and launch. Advisory
+      flight checks must annotate the draft and remain non-blocking during chat.
+    acceptance_criteria:
+      - "ui/src/lib/planYaml.ts exports YAML containing 'name', 'goal', 'definition_of_done', 'tasks', and execution settings from the current draft_spec"
+      - "ui/src/pages/PlanModePage.test.tsx verifies importing invalid YAML shows a visible 'parse error' message and leaves the existing draft_spec unchanged"
+      - "Importing valid YAML replaces draft_spec and refreshes the rendered task cards in ui/src/pages/PlanModePage.tsx"
+      - "ui/src/pages/PlanModePage.test.tsx verifies advisory warnings render without disabling the 'Send' planner action"
+      - "python3 -m pytest tests/test_spec.py -v verifies launch validation blocks missing DoD items, empty task fields, invalid dependencies, or invalid execution settings"
+      - "cd ui && npm test -- PlanModePage.test.tsx passes"
+      - "python3 -m pytest tests/test_spec.py -v -k 'quality or yaml' passes"
+    dependencies:
+      - "03"
+    tdd:
+      test_file: "tests/test_spec.py"
+      test_command: "python3 -m pytest tests/test_spec.py -v -k 'quality or yaml'"
+      tests_must_pass: true
+    output_artifacts:
+      - "ui/src/lib/planYaml.ts"
+      - "ui/src/pages/PlanModePage.tsx"
+      - "agentforce/core/spec.py"
+      - "tests/test_spec.py"
+    model: "gpt-5.4-mini"
+
+  - id: "05"
+    title: "Extend mission schema with execution profiles and compatibility mapping"
+    description: |
+      Add first-class execution profiles to the launchable mission schema:
+
+      - ExecutionProfile { agent, model, thinking }
+      - mission.execution_defaults.worker
+      - mission.execution_defaults.reviewer
+      - task.execution.worker
+      - task.execution.reviewer
+
+      Keep backwards compatibility by mapping legacy task.model into
+      task.execution.worker.model during load and serialization. Make provider a
+      UI/catalog concept rather than an independent runtime dispatch field.
+      MissionSpec validation must reject invalid execution combinations at
+      launch, but drafts may hold advisory warnings earlier in the flow.
+    acceptance_criteria:
+      - "tests/test_spec.py verifies MissionSpec.from_dict loads legacy 'task.model' into 'task.execution.worker.model'"
+      - "tests/test_spec.py verifies MissionSpec.to_dict emits 'execution_defaults' and 'task.execution' blocks for new specs"
+      - "tests/test_spec.py verifies MissionSpec load/save round-trip preserves reviewer execution settings"
+      - "tests/test_spec.py verifies validation rejects execution profiles missing 'agent' or 'model' at launch time"
+      - "python3 -m pytest tests/test_engine.py tests/test_spec.py -v -k 'execution or model' passes"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_engine.py"
+      test_command: "python3 -m pytest tests/test_engine.py tests/test_spec.py -v -k 'execution or model'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/spec.py"
+      - "tests/test_engine.py"
+      - "tests/test_spec.py"
+    model: "gpt-5.4"
+
+  - id: "06"
+    title: "Resolve execution profiles in engine autonomous state and telemetry"
+    description: |
+      Extend MissionEngine, autonomous dispatch, persisted mission state, and
+      mission summary/detail surfaces so every worker and reviewer delegation
+      uses one shared resolver with this precedence:
+
+      1. task.execution.<role>
+      2. mission.execution_defaults.<role>
+      3. launch-time CLI default for that role
+      4. connector/runtime fallback
+
+      Delegations must carry resolved agent, model, and thinking explicitly.
+      Resume/restart must preserve the normalized execution settings without
+      depending on the current CLI invocation. Update summary/detail telemetry
+      surfaces that currently assume one worker_model so mixed-profile missions
+      remain inspectable after launch.
+    acceptance_criteria:
+      - "tests/test_engine.py verifies WorkerDelegation and ReviewerDelegation both carry resolved 'agent', 'model', and 'thinking' values"
+      - "tests/test_autonomous.py verifies autonomous.py does not let one mission-global model override a resolved per-delegation model"
+      - "tests/test_engine.py verifies mission resume uses execution settings stored in mission spec/state rather than launch-time defaults"
+      - "tests/test_state_summary.py verifies summary/detail payloads include execution metadata for mixed worker/reviewer settings"
+      - "python3 -m pytest tests/test_engine.py tests/test_autonomous.py tests/test_state_summary.py -v passes"
+    dependencies:
+      - "05"
+    tdd:
+      test_file: "tests/test_autonomous.py"
+      test_command: "python3 -m pytest tests/test_engine.py tests/test_autonomous.py tests/test_state_summary.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/engine.py"
+      - "agentforce/autonomous.py"
+      - "agentforce/core/state.py"
+      - "agentforce/server/render.py"
+      - "ui/src/lib/types.ts"
+      - "tests/test_autonomous.py"
+    model: "gpt-5.4"
+
+  - id: "07"
+    title: "Prove launch flow with deterministic Rust calculator mission draft"
+    description: |
+      Add an end-to-end proof that exercises the new planner and launch path
+      without relying on live model behavior. Use the fake planner adapter to
+      simulate a user drafting a simple Rust CLI calculator mission:
+
+      1. create draft with a Rust calculator prompt
+      2. send one follow-up refinement turn
+      3. persist revised draft_spec with at least two tasks
+      4. launch through /api/missions
+      5. verify the created mission state/spec contains Rust calculator tasks,
+         DoD items, and resolved worker/reviewer execution settings
+      6. trigger the readjust-trajectory flow from the launched mission and
+         verify the returned draft is seeded from that mission spec
+
+      Also document an opt-in manual smoke for a real companion model, but do
+      not make that live-model run part of the automated CI gate.
+    acceptance_criteria:
+      - "tests/test_api_routes.py creates a Rust calculator draft, revises it once, launches it, and verifies the created mission state on disk"
+      - "tests/test_api_routes.py verifies the launched Rust calculator mission contains at least two tasks and non-empty 'acceptance_criteria' lists"
+      - "tests/test_api_routes.py verifies the launched mission preserves 'execution_defaults' and any task execution overrides selected in the draft"
+      - "tests/test_api_routes.py uses a fake planner adapter, not a live provider response"
+      - "tests/test_api_routes.py verifies '/api/mission/:id/readjust-trajectory' creates a seeded planning draft from the launched mission"
+      - "ui/package.json script 'build' succeeds via `cd ui && npm run build`"
+      - "python3 -m pytest tests/test_api_routes.py tests/test_engine.py tests/test_autonomous.py -v -k 'calculator or plan_draft_launch' passes"
+    dependencies:
+      - "02"
+      - "04"
+      - "06"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "python3 -m pytest tests/test_api_routes.py tests/test_engine.py tests/test_autonomous.py -v -k 'calculator or plan_draft_launch'"
+      tests_must_pass: true
+    output_artifacts:
+      - "tests/test_api_routes.py"
+      - "tests/test_engine.py"
+      - "tests/test_autonomous.py"
+      - "README.md"
+    model: "gpt-5.4-mini"

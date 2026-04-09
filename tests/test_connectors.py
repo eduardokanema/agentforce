@@ -443,6 +443,20 @@ class TestSessionCaching:
 
         assert session_id is None
 
+    def test_reviewer_session_reused_only_after_real_returned_id(self, tmp_path):
+        """Reviewer should reuse only a connector-returned reviewer session id."""
+        from agentforce.autonomous import _get_or_create_session_id
+
+        session_ids: dict[str, str] = {}
+
+        assert _get_or_create_session_id(session_ids, "01", "reviewer") is None
+
+        returned_sid = "thread_real_123"
+        if returned_sid and "01_reviewer" not in session_ids:
+            session_ids["01_reviewer"] = returned_sid
+
+        assert _get_or_create_session_id(session_ids, "01", "reviewer") == "thread_real_123"
+
 
 # ── opencode TokenEvent emission ─────────────────────────────────────────────
 

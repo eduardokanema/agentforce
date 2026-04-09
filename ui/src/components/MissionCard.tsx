@@ -74,6 +74,15 @@ function getModelChips(mission: MissionSummary): string[] {
     return models;
   }
 
+  const workerModel = mission.execution?.defaults.worker?.model?.trim();
+  const reviewerModel = mission.execution?.defaults.reviewer?.model?.trim();
+  if (workerModel || reviewerModel) {
+    return [
+      workerModel ? `worker:${workerModel}` : '',
+      reviewerModel && reviewerModel !== workerModel ? `reviewer:${reviewerModel}` : '',
+    ].filter(Boolean);
+  }
+
   return mission.worker_model ? [mission.worker_model] : [];
 }
 
