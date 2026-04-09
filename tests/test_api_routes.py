@@ -138,6 +138,7 @@ def test_api_unknown_task_returns_404_json(tmp_path, monkeypatch):
 
 def test_html_routes_still_render_html(tmp_path, monkeypatch):
     _seed_state(tmp_path, monkeypatch)
+    monkeypatch.setattr("agentforce.server.handler._UI_DIST", tmp_path / "missing-ui-dist")
 
     handler = _make_handler("/mission/mission-123")
     handler.do_GET()

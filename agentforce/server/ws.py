@@ -232,3 +232,46 @@ def broadcast_task_stream_done(mission_id: str, task_id: str) -> None:
         }
     )
     _broadcast_to_subscribers(mission_id, message)
+
+
+def broadcast_mission_cost_update(
+    mission_id: str, tokens_in: int, tokens_out: int, cost_usd: float
+) -> None:
+    message = json.dumps(
+        {
+            "type": "mission_cost_update",
+            "mission_id": mission_id,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd": cost_usd,
+        }
+    )
+    _broadcast_to_subscribers(mission_id, message)
+
+
+def broadcast_task_cost_update(
+    mission_id: str, task_id: str, tokens_in: int, tokens_out: int, cost_usd: float
+) -> None:
+    message = json.dumps(
+        {
+            "type": "task_cost_update",
+            "mission_id": mission_id,
+            "task_id": task_id,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd": cost_usd,
+        }
+    )
+    _broadcast_to_subscribers(mission_id, message)
+
+
+def broadcast_task_attempt_start(mission_id: str, task_id: str, attempt_number: int) -> None:
+    message = json.dumps(
+        {
+            "type": "task_attempt_start",
+            "mission_id": mission_id,
+            "task_id": task_id,
+            "attempt_number": attempt_number,
+        }
+    )
+    _broadcast_to_subscribers(mission_id, message)

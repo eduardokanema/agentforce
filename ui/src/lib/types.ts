@@ -58,9 +58,13 @@ export interface TaskState {
   task_id: string;
   status: TaskStatus;
   retries: number;
+  retry_count?: number;
   review_score: number;
   human_intervention_needed: boolean;
   last_updated: string;
+  tokens_in?: number;
+  tokens_out?: number;
+  cost_usd?: number;
   spec_summary?: string;
   worker_output?: string;
   review_feedback?: string;
@@ -87,6 +91,9 @@ export interface MissionState {
   total_human_interventions: number;
   total_tokens_used: number;
   estimated_cost_usd: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  cost_usd?: number;
   event_log?: EventLogEntry[];
   completed_at?: string | null;
   caps_hit?: Record<string, string>;
@@ -97,7 +104,44 @@ export interface MissionState {
   daemon_started_at?: string | null;
 }
 
-export type MissionSummaryStatus = 'active' | 'complete' | 'failed' | 'needs_human';
+export interface TelemetryMissionByCost {
+  mission_id: string;
+  name: string;
+  cost_usd: number;
+  tokens_in: number;
+  tokens_out: number;
+  duration: string;
+  retries: number;
+}
+
+export interface TelemetryTaskByCost {
+  mission_id: string;
+  task_id: string;
+  task: string;
+  mission: string;
+  model: string;
+  cost_usd: number;
+  retries: number;
+}
+
+export interface TelemetryCostPoint {
+  mission_name: string;
+  cumulative_cost: number;
+}
+
+export interface TelemetryData {
+  total_missions: number;
+  total_tasks: number;
+  total_cost_usd: number;
+  total_tokens_in: number;
+  total_tokens_out: number;
+  missions_by_cost: TelemetryMissionByCost[];
+  tasks_by_cost: TelemetryTaskByCost[];
+  retry_distribution: Record<string, number>;
+  cost_over_time: TelemetryCostPoint[];
+}
+
+export type MissionSummaryStatus = 'active' | 'in_progress' | 'complete' | 'completed' | 'review_approved' | 'failed' | 'needs_human';
 
 export interface MissionSummary {
   mission_id: string;
@@ -110,6 +154,37 @@ export interface MissionSummary {
   worker_agent: string;
   worker_model: string;
   started_at: string;
+  cost_usd: number;
+  retries?: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  workspace?: string;
+  models?: string[];
+  active_task_title?: string;
+}
+
+export interface Connector {
+  name: string;
+  display_name: string;
+  active: boolean;
+  last_configured?: string;
+  token_last4?: string;
+}
+
+export interface Model {
+  id: string;
+  name: string;
+  provider: string;
+  cost_per_1k_input: number;
+  cost_per_1k_output: number;
+  latency_label: string;
+}
+
+export interface TaskAttempt {
+  attempt_number: number;
+  output: string;
+  review?: string | null;
+  score?: number | null;
 }
 
 type Assert<T extends true> = T;
