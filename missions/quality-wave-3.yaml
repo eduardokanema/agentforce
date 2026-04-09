@@ -1,0 +1,227 @@
+mission:
+  name: "AgentForce Reviewer Quality Wave 3"
+  goal: |
+    Deepen reviewer calibration and add spec-time quality gates.
+    Add Code Principles as a 9th reviewer checklist dimension with concrete
+    pass/fail examples. Implement per-criterion hard blocks that mark tasks
+    NEEDS_HUMAN (not RETRY) when Security or TDD scores fall below threshold.
+    Add mission start validation that rejects vague Definition of Done and
+    vague acceptance criteria with actionable error messages before any worker
+    runs. No new dependencies. No behavior changes beyond what is listed.
+  definition_of_done:
+    - "generate_reviewer_prompt() returns a prompt with exactly 9 checklist dimensions"
+    - "Security score < 7 halts task as NEEDS_HUMAN with HARD BLOCK message"
+    - "TDD score < 7 halts task as NEEDS_HUMAN with HARD BLOCK message"
+    - "mission start exits code 1 for DoD containing 'it works', 'done', 'complete', or similar vague terms"
+    - "mission start exits code 1 for any task with vague or empty acceptance criteria"
+    - "Validation reports all failing criteria in one pass before any worker starts"
+    - "pytest tests/ passes with no regressions"
+  caps:
+    max_concurrent_workers: 4
+    max_retries_per_task: 3
+    max_retries_global: 12
+    max_wall_time_minutes: 60
+    max_cost_usd: 0
+    max_human_interventions: 3
+    review: enabled
+  working_dir: /Users/eduardo/Projects/agentforce
+
+tasks:
+  - id: "01"
+    title: "Add Code Principles as 9th reviewer checklist dimension"
+    description: |
+      In agentforce/core/spec.py, update generate_reviewer_prompt() to include
+      a 9th checklist dimension titled "Code Principles" appended after the
+      existing 8 dimensions (SPEC COMPLIANCE, ACCEPTANCE, TDD, QUALITY,
+      SECURITY, EDGE CASES, SCOPE CREEP, CONTRADICTIONS).
+
+      The Code Principles dimension must cover all 6 principles with concrete
+      pass/fail anchor examples for each:
+
+        9. CODE PRINCIPLES
+        □ Safety First: No hardcoded credentials; secrets via env vars only
+            FAIL example: API key string literal in task output → score < 7
+        □ YAGNI: Implementation contains only what acceptance criteria require
+            FAIL example: Caching added with no criterion requiring it → score < 8
+        □ Occam's Razor: Simplest implementation that satisfies all criteria
+            FAIL example: 3 libraries used where stdlib suffices → score < 8
+        □ SOLID/SRP: Each function/class has one reason to change
+            FAIL example: Function handles both parsing AND writing → score < 8
+        □ DRY: No duplicated logic; reuses existing utilities
+            FAIL example: fmt_duration reimplemented instead of imported → score < 8
+        □ Miller's Law: Functions have ≤5 parameters; modules ≤7 public methods
+            FAIL example: Function with 8 parameters → score < 8
+
+      Score anchors for this dimension (consistent with Mission A Task 02 BARS):
+        8 = Good: all 6 principles followed
+        9 = Excellent: principles followed with notable care (e.g. extracted utility)
+        10 = Perfect: exemplary adherence; could be used as a reference
+
+      Do not modify the existing 8 dimensions. Place Code Principles last.
+    acceptance_criteria:
+      - "generate_reviewer_prompt() output contains exactly '9.' or '9)' dimension heading"
+      - "All 6 Code Principles appear with FAIL examples in the prompt"
+      - "Existing 8 dimensions are present and unmodified"
+      - "Code Principles dimension appears after all 8 existing dimensions"
+      - "pytest tests/ -k 'reviewer_prompt' passes"
+    tdd:
+      test_file: "tests/test_spec.py"
+      test_command: "pytest tests/test_spec.py -v -k 'reviewer_prompt'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/spec.py"
+
+  - id: "02"
+    title: "Per-criterion hard blocks for Security and TDD reviewer scores"
+    description: |
+      In agentforce/autonomous.py, find the review threshold enforcement logic
+      (the function or block that checks reviewer scores and decides pass/retry/fail).
+
+      Add hard-block logic for Security and TDD dimensions that bypasses the
+      normal retry flow and marks the task as NEEDS_HUMAN immediately.
+
+      STEP 1 — Parse Security and TDD scores from the reviewer response:
+        The reviewer returns a structured score block. Extract:
+          security_score = reviewer_result.scores.get("security", 10)
+          tdd_score = reviewer_result.scores.get("tdd", 10)
+        If score parsing fails, default to 10 (do not false-positive hard block).
+
+      STEP 2 — Apply hard block before soft threshold check:
+        HARD_BLOCK_THRESHOLD = 7  # scores strictly below 7 trigger hard block
+
+        if security_score < HARD_BLOCK_THRESHOLD:
+            task_state.status = TaskStatus.NEEDS_HUMAN
+            task_state.hard_block_reason = (
+                f"HARD BLOCK: Security score {security_score}/10 below threshold "
+                f"({HARD_BLOCK_THRESHOLD}). Fix security issues before retrying."
+            )
+            log and broadcast the hard block reason
+            return  # do not proceed to retry
+
+        if tdd_score < HARD_BLOCK_THRESHOLD:
+            task_state.status = TaskStatus.NEEDS_HUMAN
+            task_state.hard_block_reason = (
+                f"HARD BLOCK: TDD score {tdd_score}/10 below threshold "
+                f"({HARD_BLOCK_THRESHOLD}). Tests must be defined before approval."
+            )
+            log and broadcast the hard block reason
+            return
+
+      STEP 3 — If TaskState does not have a hard_block_reason field, add it
+        to the TaskState dataclass in core/state.py as Optional[str] = None.
+
+      Hard blocks must NOT consume a retry slot. The task goes directly to
+      NEEDS_HUMAN status with the reason message stored for UI display.
+      All other dimensions continue to use the existing soft threshold logic.
+    acceptance_criteria:
+      - "Security reviewer score < 7 sets task status to NEEDS_HUMAN with HARD BLOCK message"
+      - "TDD reviewer score < 7 sets task status to NEEDS_HUMAN with HARD BLOCK message"
+      - "Hard-blocked tasks do not consume a retry slot (task_state.retries unchanged)"
+      - "Scores >= 7 for both Security and TDD proceed to existing soft threshold logic"
+      - "pytest tests/ -k 'hard_block or review_threshold' passes"
+    tdd:
+      test_file: "tests/test_autonomous.py"
+      test_command: "pytest tests/test_autonomous.py -v -k 'hard_block or review_threshold'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/autonomous.py"
+      - "agentforce/core/state.py"
+
+  - id: "03"
+    title: "DoD vagueness validation at mission start"
+    description: |
+      In agentforce/core/spec.py, add or extend a validate_quality() method
+      on the Mission or MissionSpec class that checks the mission-level
+      definition_of_done for vague language.
+
+      STEP 1 — Define vagueness blocklist (case-insensitive, whole-phrase match):
+        DOD_VAGUE_PHRASES = [
+            "it works", "works correctly", "works properly", "works well",
+            "done", "complete", "completed", "finished", "implemented",
+            "fully implemented", "properly implemented", "feature complete",
+        ]
+
+      STEP 2 — Validation logic:
+        For each item in definition_of_done (list) or the full DoD string:
+          Normalize to lowercase and strip punctuation.
+          If the full item matches or is contained in DOD_VAGUE_PHRASES:
+            record as a validation error.
+
+        A valid DoD item must contain at least one measurable outcome:
+          - An HTTP status code (e.g. "200", "404", "201")
+          - A file path or command (e.g. "pytest passes", "binary exists at")
+          - A comparison operator (e.g. "<", ">", ">=", "<=", "==")
+          - A quoted value (e.g. '{"status": "ok"}')
+          This is a heuristic — flag only clear violations, not edge cases.
+
+      STEP 3 — In agentforce/cli/cli.py, call validate_quality() immediately
+        after parsing the spec, before any worker or engine is started:
+          issues = spec.validate_quality()
+          if issues.dod_errors:
+              for err in issues.dod_errors:
+                  print(f"[SPEC ERROR] definition_of_done is too vague: '{err}'", file=sys.stderr)
+                  print(f"  Expected: observable, measurable criterion", file=sys.stderr)
+                  print(f"  Example:  'HTTP 200 returned for GET /health with {{\"status\": \"ok\"}}'", file=sys.stderr)
+              sys.exit(1)
+    acceptance_criteria:
+      - "mission start exits code 1 when any DoD item matches a vague phrase ('it works', 'done', etc.)"
+      - "Error message includes the offending text and a concrete example of valid DoD"
+      - "Validation runs before any worker starts — no API calls made on bad specs"
+      - "Concrete DoD items (containing HTTP codes, file paths, comparisons) pass validation"
+      - "pytest tests/ -k 'dod_validation' passes"
+    tdd:
+      test_file: "tests/test_spec.py"
+      test_command: "pytest tests/test_spec.py -v -k 'dod_validation'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/spec.py"
+      - "agentforce/cli/cli.py"
+
+  - id: "04"
+    title: "Acceptance criteria vagueness validation at mission start"
+    description: |
+      Extend validate_quality() in agentforce/core/spec.py (introduced in Task 03)
+      to also validate each task's acceptance_criteria list.
+
+      STEP 1 — Define vagueness blocklist for criteria (case-insensitive):
+        CRITERIA_VAGUE_WORDS = [
+            "good", "well", "nice", "clean", "fast", "better", "improve",
+            "properly", "correctly", "works", "appropriate", "reasonable",
+            "efficient", "clear", "simple", "robust", "stable",
+        ]
+
+        A criterion is vague if:
+          a) Its entire text (stripped) matches a vague word or short phrase, OR
+          b) It contains no testable signal: no HTTP code, no file path, no
+             comparison operator, no quoted value, no test command reference.
+
+      STEP 2 — Additional check: empty criteria list:
+        If a task has zero acceptance_criteria items → record as error.
+
+      STEP 3 — Collect ALL errors before returning (do not short-circuit):
+        Return a flat list of ValidationError objects:
+          ValidationError(task_id, criterion_text, reason)
+
+      STEP 4 — In cli.py, print all criteria errors after DoD errors (same exit):
+          for err in issues.criteria_errors:
+              print(f"[SPEC ERROR] Task '{err.task_id}' criterion is too vague: '{err.criterion}'", file=sys.stderr)
+              print(f"  Expected: testable assertion", file=sys.stderr)
+              print(f"  Example:  'Returns HTTP 400 with {{\"error\": ...}} for invalid input'", file=sys.stderr)
+          if issues.criteria_errors:
+              sys.exit(1)
+
+        Report DoD errors and criteria errors in the same run — operator sees
+        all issues at once, not just the first.
+    acceptance_criteria:
+      - "mission start exits code 1 when any task criterion contains only vague words ('good error handling', 'works well')"
+      - "mission start exits code 1 when any task has an empty acceptance_criteria list"
+      - "All failing criteria are reported in one pass — not just the first failure"
+      - "Testable criteria (HTTP codes, file paths, comparisons) pass validation"
+      - "pytest tests/ -k 'criteria_validation' passes"
+    tdd:
+      test_file: "tests/test_spec.py"
+      test_command: "pytest tests/test_spec.py -v -k 'criteria_validation'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/spec.py"
+      - "agentforce/cli/cli.py"

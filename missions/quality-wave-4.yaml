@@ -1,0 +1,258 @@
+mission:
+  name: "AgentForce Quality Wave 4 — Optimization"
+  goal: |
+    Implement four targeted optimizations: extend reviewer outcome memory from
+    500 to 2000 chars so rich failure context survives into next-task context;
+    add exponential retry backoff so failed tasks don't thrash immediately;
+    add a suggest_caps() advisory printed at mission start so operators know
+    when their caps are mis-sized; and add an optional per-task model field
+    so mission authors can route cheap tasks to cheaper models.
+    No behavior changes beyond what is listed. No new dependencies.
+  definition_of_done:
+    - "engine.py stores reviewer feedback up to 2000 chars (not 500) in project memory"
+    - "Failed tasks wait at least 5 seconds before first retry; 10s before second retry"
+    - "mission start prints suggested caps when task count >= 4 or any cap looks mis-sized"
+    - "TaskSpec accepts optional 'model' field; engine passes it to worker when set"
+    - "pytest tests/ passes with no regressions"
+  caps:
+    max_concurrent_workers: 4
+    max_retries_per_task: 2
+    max_retries_global: 12
+    max_wall_time_minutes: 60
+    max_cost_usd: 0
+    max_human_interventions: 3
+    review: enabled
+  working_dir: /Users/eduardo/Projects/agentforce
+
+tasks:
+  - id: "01"
+    title: "Extend outcome memory truncation from 500 to 2000 chars"
+    description: |
+      In agentforce/core/engine.py, find the line that stores reviewer feedback
+      into project memory. It currently reads:
+
+        self.memory.project_set(
+            self.state.mission_id,
+            f"task_{task_id}_outcome",
+            feedback[:500],
+            category="fact"
+        )
+
+      Change the truncation limit from 500 to 2000 characters:
+
+        self.memory.project_set(
+            self.state.mission_id,
+            f"task_{task_id}_outcome",
+            feedback[:2000],
+            category="fact"
+        )
+
+      That is the complete change. Do not modify any other truncation or
+      memory-related logic. The 500-char limit silently drops reviewer
+      reasoning (why a task failed, what specifically is wrong) before
+      subsequent tasks can read it from context.
+    acceptance_criteria:
+      - "engine.py stores feedback[:2000] not feedback[:500] in project memory"
+      - "pytest tests/ -k 'engine or memory or outcome' passes with no regressions"
+      - "agentforce/core/engine.py line containing 'feedback[' uses limit 2000, not 500"
+    tdd:
+      test_file: "tests/test_engine.py"
+      test_command: "pytest tests/test_engine.py -v -k 'outcome_memory or feedback_truncation'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/engine.py"
+
+  - id: "02"
+    title: "Exponential retry backoff between task failures"
+    description: |
+      Currently, a failed task is re-dispatched on the very next tick (2 seconds).
+      This causes thrashing when a task fails for a transient reason (rate limit,
+      partial output). Add exponential backoff.
+
+      STEP 1 — Add retry_not_before field to TaskState in agentforce/core/state.py:
+        retry_not_before: float = 0.0  # unix timestamp; 0 = immediately eligible
+
+      STEP 2 — In agentforce/core/engine.py, find where tasks with status RETRY
+        are selected for dispatch (the worker eligibility check). Add a guard:
+          import time
+          if task_state.retry_not_before and time.time() < task_state.retry_not_before:
+              continue  # still in backoff window — skip this tick
+
+      STEP 3 — In the task failure handling path (where status is set to RETRY),
+        compute and store the backoff deadline:
+          BACKOFF_BASE_SECONDS = 5
+          backoff = min(60, BACKOFF_BASE_SECONDS * (2 ** task_state.retries))
+          task_state.retry_not_before = time.time() + backoff
+
+        Backoff schedule (with BACKOFF_BASE_SECONDS=5):
+          retry 1: wait 5s   (5 * 2^0)
+          retry 2: wait 10s  (5 * 2^1)
+          retry 3: wait 20s  (5 * 2^2, capped at 60s for higher retries)
+
+      STEP 4 — Add a DEBUG log when a task is skipped due to backoff:
+          logger.debug("task %s in backoff — eligible at %.1fs", task_id,
+                       task_state.retry_not_before - time.time())
+
+      STEP 5 — Hard blocks (NEEDS_HUMAN) and human retries must NOT apply backoff.
+        Only automatic RETRY status (worker/reviewer failure path) applies backoff.
+        When a human triggers manual_retry(), reset retry_not_before to 0.
+
+      Do not change retry counter logic or caps enforcement. This is purely a
+      scheduling delay — the retry slot is still consumed as before.
+    acceptance_criteria:
+      - "TaskState().retry_not_before == 0.0 by default (field exists with default 0.0)"
+      - "A task set to RETRY is not re-dispatched until time.time() >= retry_not_before"
+      - "First retry waits >= 5s; second retry waits >= 10s (exponential schedule)"
+      - "After manual_retry(), task_state.retry_not_before == 0 (immediate eligibility)"
+      - "pytest tests/ -k 'retry_backoff or retry_not_before' passes"
+    tdd:
+      test_file: "tests/test_engine.py"
+      test_command: "pytest tests/test_engine.py -v -k 'retry_backoff or retry_not_before'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/state.py"
+      - "agentforce/core/engine.py"
+
+  - id: "03"
+    title: "suggest_caps() advisory at mission start"
+    description: |
+      Add a suggest_caps() function to agentforce/core/spec.py that analyzes
+      a MissionSpec and returns a dict of recommended caps with reasons.
+
+      STEP 1 — Add suggest_caps(spec: MissionSpec) -> list[CapsSuggestion] to spec.py:
+
+        @dataclass
+        class CapsSuggestion:
+            field: str          # e.g. "max_concurrent_workers"
+            current: int | float
+            suggested: int | float
+            reason: str
+
+        def suggest_caps(spec: MissionSpec) -> list[CapsSuggestion]:
+            suggestions = []
+            n = len(spec.tasks)
+
+            # Concurrent workers
+            if n >= 4 and spec.caps.max_concurrent_workers < 2:
+                suggestions.append(CapsSuggestion(
+                    "max_concurrent_workers", spec.caps.max_concurrent_workers, 2,
+                    f"{n} tasks: increase to 2 workers for parallel execution"
+                ))
+            if n <= 2 and spec.caps.max_concurrent_workers > 2:
+                suggestions.append(CapsSuggestion(
+                    "max_concurrent_workers", spec.caps.max_concurrent_workers, 1,
+                    f"Only {n} tasks: 1 worker is sufficient"
+                ))
+
+            # Wall time (rough estimate: 8 min per task per retry)
+            min_wall = n * 8 * (spec.caps.max_retries_per_task + 1)
+            if spec.caps.max_wall_time_minutes < min_wall:
+                suggestions.append(CapsSuggestion(
+                    "max_wall_time_minutes", spec.caps.max_wall_time_minutes, min_wall,
+                    f"{n} tasks × {spec.caps.max_retries_per_task + 1} passes × 8 min = {min_wall} min minimum"
+                ))
+
+            # Retries
+            if spec.caps.max_retries_per_task == 0:
+                suggestions.append(CapsSuggestion(
+                    "max_retries_per_task", 0, 2,
+                    "0 retries means any single failure halts the task permanently"
+                ))
+
+            return suggestions
+
+      STEP 2 — In agentforce/cli/cli.py, call suggest_caps() immediately after
+        validate_quality() succeeds (after spec is loaded, before any worker starts):
+
+          from agentforce.core.spec import suggest_caps
+          suggestions = suggest_caps(spec)
+          if suggestions:
+              print("[CAPS ADVISORY]", file=sys.stderr)
+              for s in suggestions:
+                  print(
+                      f"  {s.field}: current={s.current} → suggested={s.suggested}",
+                      file=sys.stderr
+                  )
+                  print(f"    Reason: {s.reason}", file=sys.stderr)
+
+        Print to stderr so it's visible without polluting stdout JSON output.
+        Always continue after printing — this is advisory only, never exits.
+
+      Do not add suggest_caps output to any JSON status or telemetry.
+      Do not modify cap enforcement logic.
+    acceptance_criteria:
+      - "pytest tests/ -k 'suggest_caps' passes (suggest_caps importable and functional)"
+      - "suggest_caps(spec) == [] when caps.max_concurrent_workers >= 2 and wall_time >= n*8*retries"
+      - "stderr output contains string '[CAPS ADVISORY]' when max_concurrent_workers < 2 with >= 4 tasks"
+      - "mission start process exits with code == 0 after printing [CAPS ADVISORY] (advisory only)"
+      - "suggest_caps(spec) returns >= 1 CapsSuggestion when max_concurrent_workers == 1 with 4+ tasks"
+    tdd:
+      test_file: "tests/test_spec.py"
+      test_command: "pytest tests/test_spec.py -v -k 'suggest_caps'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/spec.py"
+      - "agentforce/cli/cli.py"
+
+  - id: "04"
+    title: "Per-task model field in TaskSpec"
+    description: |
+      Allow mission authors to route individual tasks to specific models by adding
+      an optional model field to TaskSpec.
+
+      STEP 1 — Add model field to TaskSpec in agentforce/core/spec.py:
+
+        @dataclass
+        class TaskSpec:
+            id: str
+            title: str
+            description: str
+            acceptance_criteria: list[str] = field(default_factory=list)
+            tdd: Optional[TDDSpec] = None
+            dependencies: list[str] = field(default_factory=list)
+            working_dir: Optional[str] = None
+            max_retries: int = 3
+            output_artifacts: list[str] = field(default_factory=list)
+            model: Optional[str] = None   # ← ADD THIS
+
+      STEP 2 — In TaskSpec.from_dict(), parse the model field:
+          model=d.get("model"),  # Optional[str]; None means use mission default
+
+      STEP 3 — In agentforce/core/engine.py, find where the worker model is passed
+        to the connector run() call. Pass the task-level model when set:
+
+          effective_model = task.model or self.worker_model
+          # ... pass effective_model to connector
+
+        Do the same for the reviewer: reviewer always uses self.reviewer_model
+        (task.model is a worker-only override — reviewers use mission default).
+
+      STEP 4 — Log the effective model at DEBUG level:
+          logger.debug("task %s worker model: %s", task.id, effective_model)
+
+      YAML usage after this change:
+        tasks:
+          - id: "01"
+            title: "Quick validation task"
+            model: "claude-haiku-4-5"    # cheaper model for simple task
+            ...
+          - id: "02"
+            title: "Complex reasoning task"
+                                          # no model field → uses mission default
+            ...
+
+      Do not change reviewer model selection. Do not add model validation
+      (accept any string — the connector will fail with a clear error if invalid).
+    acceptance_criteria:
+      - "TaskSpec.from_dict({'id':'1','title':'t','description':'d','model':'haiku'}).model == 'haiku'"
+      - "TaskSpec.from_dict({'id':'1','title':'t','description':'d'}).model is None (defaults to None)"
+      - "connector called with model == task.model (e.g. 'claude-haiku-4-5') when task.model is set"
+      - "connector called with model == self.worker_model when task.model is None (mission default)"
+      - "pytest tests/ -k 'task_model or per_task_model' passes"
+    tdd:
+      test_file: "tests/test_engine.py"
+      test_command: "pytest tests/test_engine.py -v -k 'task_model or per_task_model'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/spec.py"
+      - "agentforce/core/engine.py"

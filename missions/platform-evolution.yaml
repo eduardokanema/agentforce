@@ -24,7 +24,7 @@ mission:
     max_wall_time_minutes: 180
     max_human_interventions: 3
     review: enabled
-  working_dir: /Users/rent/Projects/agentforce
+  working_dir: /Users/eduardo/Projects/agentforce
 
 tasks:
   - id: "01"

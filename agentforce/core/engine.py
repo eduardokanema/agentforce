@@ -19,6 +19,9 @@ from .spec import MissionSpec, TaskSpec, TaskStatus
 
 logger = logging.getLogger("agentforce.engine")
 
+BACKOFF_BASE_SECONDS = 5
+BACKOFF_MAX_SECONDS = 60
+
 
 # ── Delegation descriptors ──
 
@@ -240,6 +243,14 @@ class MissionEngine:
             for tid in dispatchable:
                 if self.state.worker_count() >= self.state.caps.max_concurrent_workers:
                     break
+                task_state = self.state.get_task(tid)
+                if task_state and task_state.retry_not_before and time.time() < task_state.retry_not_before:
+                    logger.debug(
+                        "task %s in backoff — eligible at %.1fs",
+                        tid,
+                        task_state.retry_not_before - time.time(),
+                    )
+                    continue
                 action = self._dispatch_worker(tid)
                 if action:
                     actions.append(action)
@@ -268,7 +279,9 @@ class MissionEngine:
         ts.bump()
 
         # Build context with memory
-        mem_context = self.memory.agent_context(self.state.mission_id, task_id)
+        query_text = "\n".join(task_spec.acceptance_criteria) if task_spec.acceptance_criteria else task_spec.description
+        logger.debug("agent_context query [%s]: %s", task_id, query_text)
+        mem_context = self.memory.agent_context(self.state.mission_id, task_id, query=query_text)
         
         prompt = task_spec.generate_worker_prompt()
         if mem_context:
@@ -285,12 +298,14 @@ class MissionEngine:
 
         self.state.log_event("task_dispatched", task_id, f"Worker dispatched for {task_spec.title}")
         logger.info("Dispatching worker: %s - %s", task_id, task_spec.title)
+        effective_model = task_spec.model or self.worker_model
+        logger.debug("task %s worker model: %s", task_id, effective_model)
 
         return WorkerDelegation(
             task_id=task_id,
             goal=f"Complete task {task_id}: {task_spec.title}",
             context=prompt,
-            model=self.worker_model,
+            model=effective_model,
             timeout=min(600, self.state.caps.max_wall_time_minutes * 60) if self.state.caps.max_wall_time_minutes else 600,
         )
 
@@ -305,7 +320,9 @@ class MissionEngine:
         ts.bump()
 
         # Build review context with memory
-        mem_context = self.memory.agent_context(self.state.mission_id, task_id)
+        query_text = "\n".join(task_spec.acceptance_criteria) if task_spec.acceptance_criteria else task_spec.description
+        logger.debug("agent_context query [%s]: %s", task_id, query_text)
+        mem_context = self.memory.agent_context(self.state.mission_id, task_id, query=query_text)
         
         prompt = task_spec.generate_reviewer_prompt(
             worker_output=ts.worker_output,
@@ -339,6 +356,7 @@ class MissionEngine:
         if success:
             ts.worker_output = output
             ts.status = TaskStatus.COMPLETED
+            ts.retry_not_before = 0.0
             self.state.log_event("task_completed", task_id, f"Worker completed {task_spec.title}")
             logger.info("Worker completed: %s", task_id)
         else:
@@ -349,10 +367,13 @@ class MissionEngine:
             # Check if we can retry
             if ts.retries >= task_spec.max_retries or self.state.total_retries >= self.state.caps.max_retries_global:
                 ts.status = TaskStatus.FAILED
+                ts.retry_not_before = 0.0
                 self.state.log_event("task_failed", task_id, ts.error_message)
                 logger.warning("Task failed permanently: %s", task_id)
             else:
+                backoff = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2 ** (ts.retries - 1)))
                 ts.status = TaskStatus.RETRY
+                ts.retry_not_before = time.time() + backoff
                 self.state.log_event("task_retry", task_id, f"Retry {ts.retries}/{task_spec.max_retries}")
                 logger.info("Retrying task: %s (attempt %d)", task_id, ts.retries + 1)
 
@@ -378,6 +399,7 @@ class MissionEngine:
 
         if approved:
             ts.status = TaskStatus.REVIEW_APPROVED
+            ts.retry_not_before = 0.0
             ts.completed_at = datetime.now(timezone.utc).isoformat()
             self.memory.task_clear(task_id)  # Clean ephemeral memory
             self.state.log_event("review_approved", task_id, feedback)
@@ -388,7 +410,7 @@ class MissionEngine:
                 self.memory.project_set(
                     self.state.mission_id,
                     f"task_{task_id}_outcome",
-                    feedback[:500],
+                    feedback[:2000],
                     category="fact"
                 )
         else:
@@ -405,15 +427,19 @@ class MissionEngine:
                         f"Feedback: {feedback}"
                     )
                     ts.status = TaskStatus.NEEDS_HUMAN
+                    ts.retry_not_before = 0.0
                     self.state.total_human_interventions += 1
                     self.state.log_event("human_intervention", task_id, ts.human_intervention_message)
                     logger.warning("Human intervention needed: %s", task_id)
                 else:
                     ts.status = TaskStatus.FAILED
+                    ts.retry_not_before = 0.0
                     self.state.log_event("task_failed", task_id, f"Max retries exceeded: {feedback}")
                     logger.warning("Task failed after retries: %s", task_id)
             else:
+                backoff = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2 ** (ts.retries - 1)))
                 ts.status = TaskStatus.RETRY
+                ts.retry_not_before = time.time() + backoff
                 self.state.log_event("review_rejected", task_id, f"Retry {ts.retries}/{task_spec.max_retries}: {feedback}")
                 logger.info("Task rejected, will retry: %s (score: %d)", task_id, score)
 
@@ -431,6 +457,7 @@ class MissionEngine:
         ts.human_intervention_needed = False
         ts.human_intervention_message = ""
         ts.status = TaskStatus.RETRY
+        ts.retry_not_before = 0.0
         # Preserve the reviewer's feedback and blocking_issues so the worker
         # sees the structured issues on retry. Append human guidance only if
         # it adds information beyond the reviewer verdict.
@@ -450,6 +477,7 @@ class MissionEngine:
         
         ts.status = TaskStatus.FAILED
         ts.human_intervention_needed = False
+        ts.retry_not_before = 0.0
         ts.bump()
         
         self.state.log_event("task_failed", task_id, "Marked as failed by human")
@@ -468,6 +496,7 @@ class MissionEngine:
         ts.human_intervention_needed = False
         ts.human_intervention_message = ""
         ts.status = TaskStatus.RETRY
+        ts.retry_not_before = 0.0
         ts.bump()
         self.state.log_event("task_retry", task_id, "Manually retried task")
         self._save()

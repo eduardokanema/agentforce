@@ -54,7 +54,7 @@ def cmd_start(args):
         print(f"Error: Spec file not found: {spec_path}", file=sys.stderr)
         sys.exit(1)
 
-    from agentforce.core.spec import MissionSpec
+    from agentforce.core.spec import MissionSpec, suggest_caps
 
     if spec_path.suffix in (".yaml", ".yml"):
         try:
@@ -76,6 +76,29 @@ def cmd_start(args):
         for i in issues:
             print(f"  - {i}", file=sys.stderr)
         sys.exit(1)
+
+    quality = spec.validate_quality()
+    for err in quality.dod_errors:
+        print(f"[SPEC ERROR] definition_of_done is too vague: '{err}'", file=sys.stderr)
+        print(f"  Expected: observable, measurable criterion", file=sys.stderr)
+        print(f"  Example:  'HTTP 200 returned for GET /health with {{\"status\": \"ok\"}}'", file=sys.stderr)
+    for err in quality.criteria_errors:
+        print(f"[SPEC ERROR] Task '{err.task_id}' criterion is too vague: '{err.criterion}'", file=sys.stderr)
+        print(f"  Expected: testable assertion", file=sys.stderr)
+        print(f'  Example:  \'Returns HTTP 400 with {{"error": ...}} for invalid input\'', file=sys.stderr)
+    if quality.dod_errors or quality.criteria_errors:
+        sys.exit(1)
+
+    suggestions = suggest_caps(spec)
+    if suggestions:
+        print("[CAPS ADVISORY]", file=sys.stderr)
+        for suggestion in suggestions:
+            print(
+                f"  {suggestion.field}: current={suggestion.current} → suggested={suggestion.suggested}",
+                file=sys.stderr,
+            )
+            print(f"    Reason: {suggestion.reason}", file=sys.stderr)
+
     print("Spec validated OK")
 
     from agentforce.core.engine import MissionEngine

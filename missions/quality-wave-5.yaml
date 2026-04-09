@@ -1,0 +1,246 @@
+mission:
+  name: "AgentForce Quality Wave 5 — SQLite Storage"
+  goal: |
+    Replace JSON-file-per-mission storage with a SQLite database so that the
+    CLI and server share a single source of truth. mission start writes to
+    SQLite immediately; the dashboard reads from SQLite on every GET /api/missions
+    request and sees the new mission without any broadcast required. Also fix
+    the WebSocket connection to push the full mission list to new clients on
+    connect so the dashboard populates instantly on page load. No new
+    dependencies beyond sqlite3 (stdlib). No behavior changes beyond what is listed.
+  definition_of_done:
+    - "~/.agentforce/agentforce.db exists after first mission start or server launch"
+    - "GET /api/missions returns all missions from SQLite, not from JSON file scan"
+    - "mission start inserts the new mission into SQLite before printing the ID"
+    - "autonomous runner updates the SQLite row on every engine._save() call"
+    - "WebSocket clients receive mission_list event immediately on connect"
+    - "pytest tests/ passes with no regressions"
+  caps:
+    max_concurrent_workers: 3
+    max_retries_per_task: 2
+    max_retries_global: 10
+    max_wall_time_minutes: 90
+    max_cost_usd: 0
+    max_human_interventions: 3
+    review: enabled
+  working_dir: /Users/eduardo/Projects/agentforce
+
+tasks:
+  - id: "01"
+    title: "Create agentforce/core/db.py — SQLite schema and CRUD"
+    description: |
+      Create agentforce/core/db.py as the single database access module.
+      Use stdlib sqlite3 only — no new dependencies.
+
+      SCHEMA — one table:
+
+        CREATE TABLE IF NOT EXISTS missions (
+            mission_id   TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            state_json   TEXT NOT NULL,
+            working_dir  TEXT,
+            created_at   REAL NOT NULL,
+            updated_at   REAL NOT NULL,
+            archived     INTEGER NOT NULL DEFAULT 0
+        )
+
+      DB PATH — always: Path.home() / ".agentforce" / "agentforce.db"
+        Expose: DB_PATH: Path = Path.home() / ".agentforce" / "agentforce.db"
+
+      PUBLIC API (module-level functions, thread-safe with a module Lock):
+
+        def get_connection() -> sqlite3.Connection:
+            """Return a thread-local connection; create schema on first use."""
+
+        def upsert_mission(mission_id: str, name: str, status: str,
+                           state_json: str, working_dir: str | None = None) -> None:
+            """Insert or update a mission row. Sets created_at on INSERT,
+            always updates updated_at and state_json/status."""
+
+        def get_mission(mission_id: str) -> dict | None:
+            """Return row as dict or None if not found."""
+
+        def list_missions(include_archived: bool = False) -> list[dict]:
+            """Return all mission rows ordered by updated_at DESC."""
+
+        def archive_mission(mission_id: str) -> None:
+            """Set archived=1 for a mission."""
+
+        def delete_mission(mission_id: str) -> None:
+            """Hard-delete a mission row."""
+
+      Use sqlite3.Row so callers get dict-like rows.
+      Use WAL mode for concurrent read/write: PRAGMA journal_mode=WAL.
+      Use a threading.Lock around all write operations.
+
+      Do not import from any other agentforce module (no circular imports).
+    acceptance_criteria:
+      - "pytest tests/test_db.py -v passes (db module importable and functional)"
+      - "upsert_mission followed by get_mission returns dict with mission_id == inserted value"
+      - "list_missions() returns [] on empty DB and >= 1 row after one upsert"
+      - "DB_PATH == Path.home() / '.agentforce' / 'agentforce.db'"
+      - "pytest tests/ -k 'db or sqlite' passes"
+    tdd:
+      test_file: "tests/test_db.py"
+      test_command: "pytest tests/test_db.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/db.py"
+      - "tests/test_db.py"
+
+  - id: "02"
+    title: "Wire MissionState._save() and engine.load() to SQLite"
+    description: |
+      Update MissionState and MissionEngine to persist state to SQLite via
+      agentforce.core.db, in addition to (or instead of) JSON files.
+
+      STEP 1 — In agentforce/core/state.py, update MissionState._save():
+        After writing the JSON file (keep it for backward compat), call:
+          from agentforce.core import db as _db
+          _db.upsert_mission(
+              mission_id=self.mission_id,
+              name=self.spec.name,
+              status=self._overall_status(),    # "running", "complete", "failed", etc.
+              state_json=json.dumps(self.to_dict()),
+              working_dir=self.working_dir,
+          )
+
+        Add _overall_status() -> str helper:
+          Returns "complete" if all tasks are DONE,
+          "failed" if any task is NEEDS_HUMAN and no task is running,
+          "running" otherwise (default).
+
+      STEP 2 — In agentforce/core/engine.py, update MissionEngine.create():
+        After creating the engine and saving state, also upsert to SQLite:
+          _db.upsert_mission(mid, spec.name, "pending",
+                             json.dumps(engine.state.to_dict()),
+                             workdir)
+
+        This ensures mission start writes to SQLite before any autonomous run.
+
+      STEP 3 — Keep JSON file writes in place. SQLite is additive — do not
+        remove the existing JSON persistence. Both must stay in sync.
+
+      Do not change the MissionState.to_dict() or from_dict() signatures.
+    acceptance_criteria:
+      - "engine._save() upserts row with mission_id == engine.state.mission_id into SQLite"
+      - "json.loads(get_mission(mission_id)['state_json']) succeeds after engine._save()"
+      - "JSON file at ~/.agentforce/state/{mission_id}.json still exists after _save()"
+      - "pytest tests/ -k 'mission_state or db' passes"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_state.py"
+      test_command: "pytest tests/test_state.py -v -k 'db or sqlite or upsert'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/state.py"
+      - "agentforce/core/engine.py"
+
+  - id: "03"
+    title: "Update server to read missions from SQLite"
+    description: |
+      Update agentforce/server/state_io.py so the server reads from SQLite
+      instead of scanning the ~/.agentforce/state/ directory for JSON files.
+
+      STEP 1 — Replace _load_all_missions() body:
+        Before:
+          for sf in sorted(state_root.glob("*.json"), ...):
+              with open(sf) as f: ...
+
+        After:
+          from agentforce.core import db as _db
+          rows = _db.list_missions(include_archived=include_archived)
+          missions = []
+          for row in rows:
+              try:
+                  d = json.loads(row["state_json"])
+                  missions.append(MissionState.from_dict(d))
+              except Exception:
+                  continue
+          return missions
+
+      STEP 2 — Replace _load_state() body:
+        Before:
+          for sf in state_root.glob("*.json"):
+              if sf.stem == mission_id or sf.stem.startswith(mission_id): ...
+
+        After:
+          from agentforce.core import db as _db
+          # Exact match first
+          row = _db.get_mission(mission_id)
+          if row is None:
+              # Prefix match: find missions whose ID starts with mission_id
+              all_rows = _db.list_missions()
+              matches = [r for r in all_rows if r["mission_id"].startswith(mission_id)]
+              if len(matches) == 1:
+                  row = matches[0]
+              elif len(matches) > 1:
+                  return None  # ambiguous
+          if row is None:
+              return None
+          return MissionState.from_dict(json.loads(row["state_json"]))
+
+      STEP 3 — Keep the JSON fallback: if SQLite raises an exception, fall
+        back to the existing file-based path and log a warning.
+
+      STEP 4 — Update _broadcast_mission_list_refresh() to use the new
+        _load_all_missions() (no change needed if it already calls it).
+
+      Do not change route signatures or HTTP response formats.
+    acceptance_criteria:
+      - "GET /api/missions returns missions from SQLite (verified by inserting directly into DB)"
+      - "GET /api/missions returns the new mission immediately after mission start writes to SQLite"
+      - "_load_state('76da') returns the mission whose mission_id == '76da14ff' (prefix match)"
+      - "pytest tests/test_api_routes.py -v passes"
+    dependencies:
+      - "01"
+      - "02"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "pytest tests/test_api_routes.py -v"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/state_io.py"
+
+  - id: "04"
+    title: "Push mission list to WebSocket clients on connect"
+    description: |
+      When a new WebSocket client connects to /ws, immediately send them the
+      current mission list so the dashboard populates without waiting for a
+      state change event.
+
+      STEP 1 — In agentforce/server/routes/static.py, in _handle_websocket(),
+        immediately after ws.register(conn, current_bucket), send the mission list:
+
+          from agentforce.server import state_io
+          import json as _json
+          try:
+              missions = state_io._load_all_missions()
+              summaries = [m.to_summary_dict() for m in missions]
+              conn.send_text(_json.dumps({"type": "mission_list", "missions": summaries}))
+          except Exception:
+              pass  # non-fatal — client will receive updates via normal broadcast
+
+      STEP 2 — Also send the list when a client sends "subscribe_all":
+        In the existing elif msg_type == "subscribe_all" branch, after re-registering,
+        send the same mission_list event.
+
+      This ensures:
+        - Fresh page load → WebSocket connects → mission list arrives immediately
+        - Dashboard subscribe_all → receives current list without polling
+
+      Do not change the existing broadcast_mission_list() call sites.
+      Do not modify the WebSocket protocol or message format.
+    acceptance_criteria:
+      - "WebSocket client receives {'type': 'mission_list', 'missions': [...]} within 1s of connecting"
+      - "subscribe_all message triggers conn.send_text with type == 'mission_list'"
+      - "pytest tests/ -k 'websocket or ws' passes with send_text called on connect"
+      - "pytest tests/ -k 'websocket or ws' passes"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "pytest tests/test_api_routes.py -v -k 'websocket or ws'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/routes/static.py"

@@ -7,6 +7,14 @@ import subprocess
 import threading
 from pathlib import Path
 
+from agentforce.core.token_event import TokenEvent
+
+_USAGE_TYPES = ("usage", "tokens", "stats")
+_IN_KEYS = ("inputTokens", "promptTokens", "tokensIn")
+_OUT_KEYS = ("outputTokens", "completionTokens", "tokensOut")
+# opencode emits token data in step_finish under part.tokens with "input"/"output" keys
+_STEP_FINISH_TYPE = "step_finish"
+
 
 def available() -> bool:
     try:
@@ -14,6 +22,45 @@ def available() -> bool:
         return r.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _extract_tokens(event: dict) -> tuple[int, int]:
+    """Return (tokens_in, tokens_out) from a usage event, or (0, 0) if none."""
+    t = event.get("type", "")
+
+    # opencode step_finish: tokens are in event["part"]["tokens"] with "input"/"output" keys
+    if t == _STEP_FINISH_TYPE:
+        part_tokens = event.get("part", {}).get("tokens", {})
+        if part_tokens:
+            return int(part_tokens.get("input", 0)), int(part_tokens.get("output", 0))
+
+    # fallback: top-level usage-type events or events with token keys
+    is_usage_type = t in _USAGE_TYPES
+    has_token_keys = any(k in event for k in _IN_KEYS + _OUT_KEYS)
+    if not (is_usage_type or has_token_keys):
+        return 0, 0
+
+    tokens_in = 0
+    for k in _IN_KEYS:
+        v = event.get(k)
+        if v is not None:
+            try:
+                tokens_in = int(v)
+            except (TypeError, ValueError):
+                pass
+            break
+
+    tokens_out = 0
+    for k in _OUT_KEYS:
+        v = event.get(k)
+        if v is not None:
+            try:
+                tokens_out = int(v)
+            except (TypeError, ValueError):
+                pass
+            break
+
+    return tokens_in, tokens_out
 
 
 def run(
@@ -24,14 +71,14 @@ def run(
     stream_path: Path = None,
     variant: str = None,
     session_id: str = None,
-) -> tuple[bool, str, str, str | None]:
+) -> tuple[bool, str, str, str | None, TokenEvent]:
     """Run opencode CLI with a prompt.
 
     Uses JSON format to stream output and capture the session ID for reuse
-    across retries (caching).
+    across retries (caching). Also captures token usage events.
 
     Returns:
-        (success, output, error, session_id)
+        (success, output, error, session_id, token_event)
     """
     cmd = ["opencode", "run", "--format", "json", prompt]
     if model:
@@ -44,6 +91,8 @@ def run(
     text_parts: list[str] = []
     returned_session_id: str | None = None
     timed_out = False
+    total_in = 0
+    total_out = 0
 
     try:
         proc = subprocess.Popen(
@@ -65,9 +114,6 @@ def run(
         sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
         try:
             for line in proc.stdout:
-                if sf:
-                    sf.write(line)
-                    sf.flush()
                 line = line.strip()
                 if not line:
                     continue
@@ -75,22 +121,38 @@ def run(
                     event = json.loads(line)
                     if returned_session_id is None:
                         returned_session_id = event.get("sessionID")
+                    text_chunk = ""
                     if event.get("type") == "text":
-                        text_parts.append(event.get("part", {}).get("text", ""))
+                        text_chunk = event.get("part", {}).get("text", "")
+                        if text_chunk:
+                            text_parts.append(text_chunk)
+                    # Write only extracted text to stream — never raw JSON
+                    if sf and text_chunk:
+                        sf.write(text_chunk + "\n")
+                        sf.flush()
+                    t_in, t_out = _extract_tokens(event)
+                    total_in += t_in
+                    total_out += t_out
                 except (json.JSONDecodeError, AttributeError):
                     text_parts.append(line)
+                    if sf:
+                        sf.write(line + "\n")
+                        sf.flush()
             proc.wait()
         finally:
             timer.cancel()
             if sf:
                 sf.close()
 
+        token_event = TokenEvent(tokens_in=total_in, tokens_out=total_out, cost_usd=0.0)
+
         if timed_out:
-            return False, "".join(text_parts).strip(), "opencode timed out", returned_session_id
+            return False, "".join(text_parts).strip(), "opencode timed out", returned_session_id, token_event
 
         error = proc.stderr.read().strip()
         output = "".join(text_parts).strip()
         success = proc.returncode == 0 and "error" not in (error or "").lower()
-        return success, output, error, returned_session_id
+        return success, output, error, returned_session_id, token_event
     except Exception as e:
-        return False, "".join(text_parts).strip(), str(e), returned_session_id
+        token_event = TokenEvent(tokens_in=total_in, tokens_out=total_out, cost_usd=0.0)
+        return False, "".join(text_parts).strip(), str(e), returned_session_id, token_event

@@ -2,12 +2,12 @@ mission:
   name: "Build CLI HTTP Server"
   goal: "Build a production-ready HTTP API server in Python with FastAPI, including health check, metrics, and proper error handling"
   definition_of_done:
-    - "POST /health returns 200 with {status: ok}"
-    - "GET /metrics returns 200 with request count"
-    - "Global exception handler returns 500 with {error: message}"
-    - "All tests pass with pytest"
-    - "Test coverage >= 80%"
-    - "requirements.txt with pinned versions"
+    - "GET /health returns 200 with {status: ok}"
+    - "GET /metrics returns 200 with total_requests count"
+    - "Unhandled exceptions return 500 with {error: message}"
+    - "pytest tests/ passes with all tests green"
+    - "pytest-cov reports coverage >= 80%"
+    - "requirements.txt with pinned versions exists"
     - "No TODO/FIXME/HACK comments in source"
   caps:
     max_concurrent_workers: 2
@@ -15,6 +15,7 @@ mission:
     max_retries_global: 6
     max_wall_time_minutes: 45
     max_human_interventions: 2
+    review: enabled
   working_dir: "/tmp/missions/http-server"
 
 tasks:
@@ -22,9 +23,9 @@ tasks:
     title: "Project scaffolding with FastAPI"
     description: "Create the project structure: main.py, tests/test_health.py, requirements.txt (fastapi>=0.100, uvicorn, pytest, httpx, pytest-cov). The main.py should initialize FastAPI app with a GET /health endpoint returning {status: ok, version: 0.1.0}."
     acceptance_criteria:
-      - "main.py exists with FastAPI app and /health endpoint"
-      - "requirements.txt has fastapi, uvicorn, pytest, httpx"
-      - "uvicorn main:app --port 8000 starts without errors"
+      - "GET /health returns 200 with JSON body containing 'status': 'ok'"
+      - "requirements.txt contains 'fastapi' and 'uvicorn' entries with pinned versions"
+      - "pytest tests/test_health.py -v passes all tests"
     tdd:
       test_file: "tests/test_health.py"
       test_command: "pytest tests/test_health.py -v"
@@ -39,9 +40,9 @@ tasks:
     title: "Request metrics middleware"
     description: "Add middleware that counts total requests and tracks response times. Add GET /metrics endpoint returning {total_requests: N, average_response_time_ms: X}. Use a simple in-memory counter (no Redis needed)."
     acceptance_criteria:
-      - "Middleware counts all incoming requests"
-      - "GET /metrics returns total_requests and average_response_time_ms"
-      - "Metrics are accurate after multiple requests"
+      - "GET /metrics returns 200 with JSON containing 'total_requests' >= 1 after one request"
+      - "GET /metrics returns 200 with JSON containing 'average_response_time_ms' > 0"
+      - "pytest tests/test_metrics.py -v passes all tests"
     dependencies:
       - "01"
     tdd:
@@ -56,9 +57,9 @@ tasks:
     title: "Global error handling"
     description: "Add a global exception handler that catches all unhandled exceptions and returns HTTP 500 with JSON {error: error_message, status: failed}. Include a test endpoint POST /error that deliberately raises an exception for testing."
     acceptance_criteria:
-      - "Unhandled exceptions return 500 with JSON error response"
-      - "POST /error endpoint triggers the handler for testing"
-      - "No stack traces exposed in responses"
+      - "POST /error returns 500 with JSON body containing 'error' key"
+      - "500 response body does not contain 'Traceback' string (no stack traces exposed)"
+      - "pytest tests/test_errors.py -v passes all tests"
     dependencies:
       - "01"
     tdd:
@@ -73,10 +74,9 @@ tasks:
     title: "Full integration tests and coverage"
     description: "Write comprehensive integration tests using pytest+httpx TestClient covering all endpoints. Run full test suite and ensure coverage >= 80%. Create a conftest.py with shared fixtures."
     acceptance_criteria:
-      - "All endpoints have integration tests"
-      - "pytest tests/ -v passes all tests"
-      - "pytest-cov reports >= 80% coverage"
-      - "conftest.py with reusable test client fixture"
+      - "pytest tests/ -v passes all tests with exit code == 0"
+      - "pytest-cov reports coverage >= 80% for main.py"
+      - "conftest.py exists and 'client' fixture is used in tests/test_integration.py"
     dependencies:
       - "02"
       - "03"
@@ -93,10 +93,9 @@ tasks:
     title: "Docker support and README"
     description: "Create Dockerfile (Python 3.12-slim, multi-stage if possible), .dockerignore, and a comprehensive README.md with installation, running, and API documentation (all endpoints with curl examples)."
     acceptance_criteria:
-      - "Dockerfile builds successfully"
-      - "README.md has API docs for all 4 endpoints"
-      - "README.md has curl examples for each endpoint"
-      - "No hardcoded ports in Dockerfile (uses env var PORT)"
+      - "Dockerfile contains 'ENV PORT' or 'ARG PORT' (no hardcoded port value)"
+      - "README.md contains 'curl' command examples for /health and /metrics paths"
+      - "docker build -t http-server-test . exits with code == 0"
     dependencies:
       - "04"
     output_artifacts:

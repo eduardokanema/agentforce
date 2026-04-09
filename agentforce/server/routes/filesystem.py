@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import caps_config
 from .providers import _get_allowed_base_paths, _load_config, _parse_query
 
 
@@ -12,7 +13,10 @@ def get(handler, parts: list[str], query: dict):
         fs = config.get("filesystem", {})
         raw_paths = fs.get("allowed_base_paths", [])
         expanded = [str(Path(p).expanduser().resolve()) for p in raw_paths if p]
-        return 200, {"filesystem": {"allowed_base_paths": expanded}}
+        return 200, {
+            "filesystem": {"allowed_base_paths": expanded},
+            "default_caps": caps_config.load_caps(),
+        }
 
     if len(parts) != 2 or parts[1] != "filesystem":
         return 404, {"error": "Not found"}

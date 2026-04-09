@@ -19,7 +19,7 @@ mission:
     max_retries_global: 10
     max_wall_time_minutes: 180
     max_human_interventions: 3
-  working_dir: "/Users/rent/Projects/agentforce"
+  working_dir: "/Users/eduardo/Projects/agentforce"
 
 tasks:
   - id: "01"

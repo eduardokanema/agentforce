@@ -1,0 +1,295 @@
+mission:
+  name: "AgentForce Quality Wave 1+2"
+  goal: |
+    Implement 8 highest-priority improvements to AgentForce covering Wave 1
+    (zero-risk prompt and memory fixes) and Wave 2 (Token Economy foundation).
+    Close the critical 4.0–5.0/10 Token Economy gap, activate semantic memory
+    retrieval, and calibrate reviewer and worker prompts against Code Principles.
+    No behavior changes beyond what is explicitly listed. No new dependencies
+    beyond a TokenEvent dataclass in core/.
+  definition_of_done:
+    - "mission status <id> --json reports non-zero cost_usd for at least one completed task"
+    - "generate_worker_prompt() output contains all 6 Code Principles in priority order"
+    - "generate_reviewer_prompt() contains BARS anchors (8=Good, 9=Excellent, 10=Perfect) and artifact verification checklist"
+    - "engine.py agent_context() calls include query=task.acceptance_criteria at lines 271 and 308"
+    - "check_caps() halts mission with BUDGET_EXCEEDED when cost_usd >= max_cost_usd (skipped when max_cost_usd=0)"
+    - "Reviewer session_id is a non-None string for all review calls within a mission"
+    - "TokenEvent dataclass importable from agentforce.core.token_event"
+    - "pytest tests/ passes with no regressions"
+  caps:
+    max_concurrent_workers: 4
+    max_retries_per_task: 3
+    max_retries_global: 12
+    max_wall_time_minutes: 120
+    max_cost_usd: 0
+    max_human_interventions: 3
+    review: enabled
+  working_dir: /Users/eduardo/Projects/agentforce
+
+tasks:
+  - id: "01"
+    title: "Inject Code Principles reminder into worker prompt"
+    description: |
+      In agentforce/core/spec.py, update generate_worker_prompt() to include
+      a Code Principles section listing all 6 principles in priority order:
+        1. Safety First — no hardcoded credentials; explicit error handling
+        2. YAGNI — implement only what the task requires; nothing speculative
+        3. Occam's Razor — simplest solution that satisfies acceptance criteria
+        4. SOLID/SRP — one reason to change; one concern per function/module
+        5. DRY — no duplicated logic; reuse existing utilities
+        6. Miller's Law — max 7 items per grouping; max 5 params per function
+
+      Place the principles section BEFORE the task context block so it anchors
+      the worker's approach before they read the task details. Do not duplicate
+      any principles text already present in the reviewer prompt. Do not modify
+      any other section of generate_worker_prompt().
+    acceptance_criteria:
+      - "generate_worker_prompt() output contains 'Safety First', 'YAGNI', 'Occam', 'SOLID', 'DRY', 'Miller' in that order"
+      - "Principles section appears before the task context block in the prompt string"
+      - "No principles text is duplicated between worker and reviewer prompt outputs"
+      - "pytest tests/ -k 'worker_prompt' passes"
+      - "Existing worker prompt sections (task, criteria, TDD, memory) are present and unchanged"
+    tdd:
+      test_file: "tests/test_spec.py"
+      test_command: "pytest tests/test_spec.py -v -k 'worker_prompt'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/spec.py"
+
+  - id: "02"
+    title: "Add BARS calibration rubric and artifact verification to reviewer prompt"
+    description: |
+      In agentforce/core/spec.py, update generate_reviewer_prompt() with two additions:
+
+      ADDITION 1 — BARS score anchors (append to the scoring rubric section):
+        Score anchors for all dimensions:
+          8 = Good: meets all acceptance criteria; minor improvements possible
+          9 = Excellent: exceeds criteria; well-structured; edge cases handled
+          10 = Perfect: no improvement possible; exemplary code
+
+      ADDITION 2 — Artifact verification checklist (append after the 8 dimensions):
+        Artifact verification:
+          For each output_artifact listed in the task spec:
+          □ File exists at the specified path
+          □ File is non-empty (not a stub or placeholder)
+          □ File is importable / parseable (no syntax errors)
+          If any artifact is missing or empty: score Quality dimension < 7.
+
+      Do not modify the existing 8 reviewer checklist dimensions. Additions
+      must be clearly separated (headers/dividers) from existing content.
+    acceptance_criteria:
+      - "generate_reviewer_prompt() output contains '8 = Good', '9 = Excellent', '10 = Perfect' anchor text"
+      - "Reviewer prompt contains artifact verification checklist referencing output_artifacts"
+      - "All 8 existing reviewer dimensions are present and unmodified"
+      - "pytest tests/ -k 'reviewer_prompt' passes"
+      - "Prompt additions total <= 20 lines (Occam's Razor — no bloat)"
+    tdd:
+      test_file: "tests/test_spec.py"
+      test_command: "pytest tests/test_spec.py -v -k 'reviewer_prompt'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/spec.py"
+
+  - id: "03"
+    title: "Activate VectorMemory semantic query in engine.py"
+    description: |
+      In agentforce/core/engine.py, find the two agent_context() calls (near
+      lines 271 and 308) and add query= parameter to both:
+
+        Before:
+          ctx = memory.agent_context(mission_id, task_id)
+
+        After:
+          ctx = memory.agent_context(
+              mission_id,
+              task_id,
+              query=task.acceptance_criteria,
+          )
+
+      Where task.acceptance_criteria is the joined string of the task's
+      acceptance_criteria list. If acceptance_criteria is empty or None,
+      fall back to task.description as the query string.
+
+      Add a DEBUG-level log line immediately before each call:
+        logger.debug("agent_context query [%s]: %s", task_id, query_text)
+
+      Do not modify the VectorMemory class or the agent_context() signature.
+      Do not change any other call sites.
+    acceptance_criteria:
+      - "Both agent_context() calls in engine.py include query= parameter"
+      - "Debug log 'agent_context query [<task_id>]: <text>' appears for each task execution"
+      - "When VectorMemory is active, context returned contains semantically relevant entries (top_k=8)"
+      - "When query= is None or empty, agent_context() falls back to full dump (backward compatible)"
+      - "pytest tests/ -k 'vector_memory or agent_context' passes"
+    tdd:
+      test_file: "tests/test_engine.py"
+      test_command: "pytest tests/test_engine.py -v -k 'vector_memory or agent_context'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/engine.py"
+
+  - id: "04"
+    title: "Wire TokenLedger into mission startup"
+    description: |
+      In agentforce/autonomous.py, wire the existing TokenLedger class
+      (agentforce/core/token_ledger.py) into the mission execution loop.
+
+      STEP 1 — Instantiate at mission start:
+        ledger = TokenLedger(mission_id=state.mission_id)
+        Instantiate once before the main task loop begins. Do NOT instantiate
+        per-task. Pass ledger by reference to any helper functions that need it.
+
+      STEP 2 — Call update() after each API response:
+        After each worker API call: ledger.update(task_id, role="worker", response=resp)
+        After each reviewer API call: ledger.update(task_id, role="reviewer", response=resp)
+        Use the existing TokenLedger.update() signature — do not modify token_ledger.py.
+
+      STEP 3 — Persist to TaskState:
+        After ledger.update(), copy the totals into the corresponding TaskState:
+          task_state.tokens_in = ledger.tokens_in(task_id)
+          task_state.tokens_out = ledger.tokens_out(task_id)
+          task_state.cost_usd = ledger.cost_usd(task_id)
+        Then save state as normal.
+
+      Do not modify token_ledger.py. Do not add cost_usd to caps enforcement
+      (that is Task 06).
+    acceptance_criteria:
+      - "TokenLedger is instantiated once at mission startup, not per-task"
+      - "ledger.update() is called after each worker and reviewer API response"
+      - "After mission run: mission status --json shows non-zero tokens_in and cost_usd for completed tasks"
+      - "TokenLedger is not re-instantiated mid-mission (single instance for full mission lifetime)"
+      - "pytest tests/ -k 'token_ledger' passes"
+    tdd:
+      test_file: "tests/test_autonomous.py"
+      test_command: "pytest tests/test_autonomous.py -v -k 'token_ledger'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/autonomous.py"
+
+  - id: "05"
+    title: "Define TokenEvent interface and update Codex connector"
+    description: |
+      STEP 1 — Create agentforce/core/token_event.py:
+        Define a TokenEvent dataclass as the canonical structured token data contract:
+
+          from dataclasses import dataclass
+
+          @dataclass
+          class TokenEvent:
+              tokens_in: int
+              tokens_out: int
+              cost_usd: float = 0.0
+
+        This is the interface all connectors must emit. No other fields.
+        No methods. Keep it minimal (Occam's Razor).
+
+      STEP 2 — Update agentforce/connectors/codex.py:
+        Find where token counts are currently formatted as human-readable strings
+        (e.g. "12.5K tokens", f"{tokens} tokens used"). Replace with TokenEvent
+        emission. The connector should return or yield a TokenEvent instead of
+        a formatted string for token reporting.
+
+        Map existing Codex token fields to TokenEvent:
+          tokens_in  = prompt_tokens (or input_tokens)
+          tokens_out = completion_tokens (or output_tokens)
+          cost_usd   = calculated from token counts and model pricing if available,
+                       else 0.0
+
+      Do not modify other connectors (OpenCode, Claude Code, OpenRouter) —
+      those are Mission B tasks. Do not change the TokenLedger interface.
+    acceptance_criteria:
+      - "from agentforce.core.token_event import TokenEvent imports cleanly"
+      - "TokenEvent has exactly 3 fields: tokens_in (int), tokens_out (int), cost_usd (float)"
+      - "Codex connector emits TokenEvent struct — no token count string formatting remains"
+      - "Orchestrator receives TokenEvent object (not string) for each Codex API response"
+      - "pytest tests/ -k 'token_event or codex_connector' passes"
+    tdd:
+      test_file: "tests/test_token_event.py"
+      test_command: "pytest tests/test_token_event.py tests/test_connectors.py -v -k 'token_event or codex'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/token_event.py"
+      - "agentforce/connectors/codex.py"
+
+  - id: "06"
+    title: "Enforce max_cost_usd budget gate in check_caps()"
+    description: |
+      In agentforce/core/state.py, update check_caps() to evaluate the mission's
+      cost budget after each task completes.
+
+      STEP 1 — Add CapsViolation.BUDGET_EXCEEDED to the CapsViolation enum
+      (or equivalent return signal used by check_caps()).
+
+      STEP 2 — In check_caps(), add budget evaluation:
+        total_cost = sum(ts.cost_usd for ts in self.task_states.values())
+
+        if self.caps.max_cost_usd > 0 and total_cost >= self.caps.max_cost_usd:
+            return CapsViolation.BUDGET_EXCEEDED
+
+        Key rules:
+          - Use >= (inclusive boundary: cost AT the cap triggers halt)
+          - Skip evaluation entirely when max_cost_usd == 0 (0 = unlimited)
+          - Place budget check AFTER existing wall_time and retry checks
+
+      STEP 3 — In autonomous.py, handle BUDGET_EXCEEDED:
+        When check_caps() returns BUDGET_EXCEEDED, halt the mission with message:
+          f"Budget cap exceeded: ${total_cost:.4f} >= max_cost_usd=${cap:.2f}. Halting."
+        Preserve partial state — all completed tasks must be saved before halt.
+
+      Depends on Task 04 (TokenLedger must be wired for cost_usd to be non-zero)
+      and Task 05 (TokenEvent must exist for Codex to report structured cost data).
+    acceptance_criteria:
+      - "check_caps() returns BUDGET_EXCEEDED when total cost_usd >= max_cost_usd"
+      - "When max_cost_usd=0, check_caps() skips budget evaluation entirely (0 = unlimited)"
+      - "Halt triggers on cost_usd >= max_cost_usd (inclusive — exactly at cap also halts)"
+      - "Halt message format: 'Budget cap exceeded: $X.XXXX >= max_cost_usd=$Y.YY. Halting.'"
+      - "pytest tests/ -k 'budget_gate or check_caps' passes"
+    dependencies:
+      - "04"
+      - "05"
+    tdd:
+      test_file: "tests/test_state.py"
+      test_command: "pytest tests/test_state.py -v -k 'budget_gate or check_caps'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/core/state.py"
+      - "agentforce/autonomous.py"
+
+  - id: "07"
+    title: "Enable reviewer session caching"
+    description: |
+      In agentforce/autonomous.py, find the session_id assignment for reviewer agents.
+      Current code forces reviewer session_id to None:
+
+        session_id = session_ids.get(tid) if role == "worker" else None
+
+      Change to allow reviewers to receive and reuse a session_id:
+
+        session_id = session_ids.get(tid)
+
+      STEP 1 — Remove the `else None` branch so both workers and reviewers
+      receive their session_id from the session_ids dict.
+
+      STEP 2 — Ensure session_ids dict is populated for reviewer task IDs before
+      the reviewer call. If reviewer uses a different key than worker (e.g.
+      f"{tid}_reviewer"), register it consistently so session reuse works across
+      all review calls for the same task.
+
+      STEP 3 — If session_id lookup returns None (task not yet in dict),
+      generate and register a new session_id for that task rather than passing
+      None. Use the same generation method as workers.
+
+      Do not change worker session_id behavior. Do not modify the connector
+      session handling logic.
+    acceptance_criteria:
+      - "Reviewer session_id is a non-None string for all review calls within a mission"
+      - "Same reviewer session_id is reused across all review calls for the same task within a mission"
+      - "Worker session_id behavior is unchanged"
+      - "If session_id lookup returns None, a new session_id is generated and registered (not passed as None)"
+      - "pytest tests/ -k 'reviewer_session' passes"
+    tdd:
+      test_file: "tests/test_autonomous.py"
+      test_command: "pytest tests/test_autonomous.py -v -k 'reviewer_session'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/autonomous.py"

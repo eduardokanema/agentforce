@@ -1,9 +1,7 @@
 """Autonomous mission driver — runs entirely inside one delegated session.
 
-Instead of the old pattern (an external orchestrator spawns workers, feeds
-results back, spawns reviewers, feeds those back...), this module runs the
-entire mission autonomously inside a single delegate_task call. It spawns
-subprocesses (opencode run) for each worker and reviewer task and manages the
+This module runs the entire mission autonomously inside a single delegate_task call.
+It spawns subprocesses for each worker and reviewer task and manages the
 state machine internally.
 
 Usage:
@@ -19,6 +17,7 @@ import importlib.util
 import json
 import os
 import sys
+import uuid
 
 from agentforce.connectors import CONNECTORS
 import time
@@ -108,14 +107,17 @@ def _run_agent(
     stream_path: Path = None,
     variant: str = None,
     session_id: str = None,
-) -> tuple[bool, str, str, str | None]:
-    """Dispatch to the selected connector. Returns (success, output, error, session_id)."""
+) -> tuple[bool, str, str, str | None, object]:
+    """Dispatch to the selected connector. Returns (success, output, error, session_id, token_event)."""
     if agent == "auto":
         agent = _detect_agent()
     connector = CONNECTORS.get(agent)
     if connector is None:
         raise ValueError(f"Unknown agent: {agent!r}. Available: {list(CONNECTORS)}")
-    return connector(prompt, workdir, timeout, model, stream_path, variant, session_id)
+    result = connector(prompt, workdir, timeout, model, stream_path, variant, session_id)
+    if len(result) == 4:
+        return (*result, None)
+    return result
 
 
 def _parse_reviewer_output(output: str) -> dict:
@@ -195,8 +197,71 @@ def _enforce_review_thresholds(review: dict) -> dict:
     return review
 
 
+HARD_BLOCK_THRESHOLD = 7  # scores strictly below this trigger immediate NEEDS_HUMAN
+
+
+def _apply_hard_blocks(review: dict, task_state) -> bool:
+    """Check per-criterion hard-block thresholds for Security and TDD.
+
+    Mutates *task_state* in-place and returns True if a hard block was applied.
+    Hard-blocked tasks go directly to NEEDS_HUMAN without consuming a retry slot.
+    Missing score keys default to 10 to avoid false-positive blocks.
+    """
+    from agentforce.core.spec import TaskStatus
+
+    scores = review.get("scores", {}) if isinstance(review.get("scores"), dict) else {}
+    _raw_sec = scores.get("security", 10)
+    _raw_tdd = scores.get("tdd", 10)
+    security_score = _raw_sec if isinstance(_raw_sec, (int, float)) else 10
+    tdd_score = _raw_tdd if isinstance(_raw_tdd, (int, float)) else 10
+
+    if security_score < HARD_BLOCK_THRESHOLD:
+        task_state.status = TaskStatus.NEEDS_HUMAN
+        task_state.hard_block_reason = (
+            f"HARD BLOCK: Security score {security_score}/10 below threshold "
+            f"({HARD_BLOCK_THRESHOLD}). Fix security issues before retrying."
+        )
+        return True
+
+    if tdd_score < HARD_BLOCK_THRESHOLD:
+        task_state.status = TaskStatus.NEEDS_HUMAN
+        task_state.hard_block_reason = (
+            f"HARD BLOCK: TDD score {tdd_score}/10 below threshold "
+            f"({HARD_BLOCK_THRESHOLD}). Tests must be defined before approval."
+        )
+        return True
+
+    return False
+
+
 _DEFAULT_MODEL = "opencode/nemotron-3-super-free"
 _DEFAULT_VARIANT = "high"
+
+
+def _get_or_create_session_id(session_ids: dict, tid: str, role: str) -> str | None:
+    """Return (and if necessary create) a session_id for the given task and role.
+
+    Workers: return None on first call so the agent creates a fresh session;
+             return the stored session_id on subsequent calls.
+    Reviewers: generate and store a UUID on first call so the session is reused
+               across all review passes for the same task.
+    """
+    if role == "worker":
+        return session_ids.get(tid)
+
+    key = f"{tid}_reviewer"
+    if key not in session_ids:
+        session_ids[key] = str(uuid.uuid4())
+    return session_ids[key]
+
+
+def _record_usage(ledger, task_id: str, output: str) -> None:
+    """Scan every line of agent output for usage JSON and accumulate in ledger."""
+    from agentforce.core.token_ledger import TokenLedger
+    for line in output.splitlines():
+        usage = TokenLedger.parse_usage_line(line)
+        if usage:
+            ledger.add(task_id, usage["input_tokens"], usage["output_tokens"], usage["cost_usd"])
 
 
 def run_autonomous(
@@ -231,6 +296,7 @@ def run_autonomous(
     """
     _ensure_pkg()
     from agentforce.core.engine import MissionEngine
+    from agentforce.core.token_ledger import TokenLedger
     from agentforce.memory import Memory
     from agentforce.telemetry import TelemetryStore, TaskMetrics, MissionMetrics
 
@@ -302,6 +368,12 @@ def run_autonomous(
     print(f"Workdir : {workdir or engine.state.working_dir}")
     print()
 
+    ledger = TokenLedger()
+    # Pre-seed from persisted task costs so cross-session totals accumulate correctly
+    for _ts in engine.state.task_states.values():
+        if _ts.tokens_in or _ts.tokens_out or _ts.cost_usd:
+            ledger.add(_ts.task_id, _ts.tokens_in, _ts.tokens_out, _ts.cost_usd)
+
     task_metrics: dict[str, TaskMetrics] = {}
     # in_flight maps "task_id.role" → (Future, action)
     in_flight: dict[str, tuple[Future, object]] = {}
@@ -320,8 +392,8 @@ def run_autonomous(
         timeout = getattr(action, "timeout", 300 if role == "worker" else 120)
         effective_model = eff_model or getattr(action, "model", None)
 
-        # Reuse session for the same task across worker retries (enables caching)
-        session_id = session_ids.get(tid) if role == "worker" else None
+        # Reuse session for the same task across retries (enables caching)
+        session_id = _get_or_create_session_id(session_ids, tid, role)
 
         sp = _stream_path(engine.state.mission_id, tid)
         if role == "worker":
@@ -369,9 +441,10 @@ def run_autonomous(
             tid = action.task_id
 
             try:
-                success, output, error, returned_sid = fut.result()
+                success, output, error, returned_sid, token_event = fut.result()
             except Exception as exc:
-                success, output, error, returned_sid = False, "", str(exc), None
+                from agentforce.core.token_event import TokenEvent
+                success, output, error, returned_sid, token_event = False, "", str(exc), None, TokenEvent(0, 0, 0.0)
 
             # Store session ID for reuse across worker retries
             if role == "worker" and returned_sid and tid not in session_ids:
@@ -395,6 +468,31 @@ def run_autonomous(
                     continue
                 if error:
                     print(f"    error: {error[:200]}")
+                _record_usage(ledger, tid, output)
+                if token_event is not None:
+                    ledger.add(tid, token_event.tokens_in, token_event.tokens_out, token_event.cost_usd)
+                ts = engine.state.get_task(tid)
+                if ts:
+                    t = ledger.task_totals(tid)
+                    # Compute per-attempt delta before overwriting cumulative totals
+                    attempt_tokens_in = t["tokens_in"] - (ts.tokens_in or 0)
+                    attempt_tokens_out = t["tokens_out"] - (ts.tokens_out or 0)
+                    attempt_cost_usd = t["cost_usd"] - (ts.cost_usd or 0.0)
+                    ts.tokens_in = t["tokens_in"]
+                    ts.tokens_out = t["tokens_out"]
+                    ts.cost_usd = t["cost_usd"]
+                    if success:
+                        ts.attempt_history.append({
+                            "attempt_number": len(ts.attempt_history) + 1,
+                            "output": output,
+                            "tokens_in": attempt_tokens_in,
+                            "tokens_out": attempt_tokens_out,
+                            "cost_usd": round(attempt_cost_usd, 6),
+                        })
+                mt = ledger.mission_totals()
+                engine.state.tokens_in = mt["tokens_in"]
+                engine.state.tokens_out = mt["tokens_out"]
+                engine.state.cost_usd = mt["cost_usd"]
                 engine.apply_worker_result(tid, success, output, error)
                 engine._save()
 
@@ -409,6 +507,15 @@ def run_autonomous(
 
                 if not success and error and "timed out" in error:
                     print(f"  ↓ [reviewer] task {tid}  timed out — re-dispatching reviewer")
+                    ts = engine.state.get_task(tid)
+                    if ts:
+                        ts.status = TaskStatus.COMPLETED  # triggers reviewer re-dispatch
+                    engine._save()
+                    continue
+
+                if not success and error and ("no rollout found" in error or "thread/resume" in error):
+                    print(f"  ↓ [reviewer] task {tid}  session expired — clearing session and re-dispatching reviewer")
+                    session_ids.pop(f"{tid}_reviewer", None)  # force a fresh session next dispatch
                     ts = engine.state.get_task(tid)
                     if ts:
                         ts.status = TaskStatus.COMPLETED  # triggers reviewer re-dispatch
@@ -443,9 +550,58 @@ def run_autonomous(
                     tm.review_approved = approved
                     tm.review_issues_count = len(blocking)
 
+                # Hard-block check: Security/TDD below threshold → NEEDS_HUMAN immediately
+                ts = engine.state.get_task(tid)
+                if ts and _apply_hard_blocks(review, ts):
+                    print(f"  ↓ [reviewer] task {tid}  HARD BLOCK: {ts.hard_block_reason}")
+                    engine.state.log_event("hard_block", tid, ts.hard_block_reason)
+                    _record_usage(ledger, tid, output if success else "")
+                    if ts:
+                        t = ledger.task_totals(tid)
+                        reviewer_cost_delta = t["cost_usd"] - (ts.cost_usd or 0.0)
+                        reviewer_tokens_in_delta = t["tokens_in"] - (ts.tokens_in or 0)
+                        reviewer_tokens_out_delta = t["tokens_out"] - (ts.tokens_out or 0)
+                        ts.tokens_in = t["tokens_in"]
+                        ts.tokens_out = t["tokens_out"]
+                        ts.cost_usd = t["cost_usd"]
+                        if ts.attempt_history:
+                            last = ts.attempt_history[-1]
+                            last["review"] = ts.hard_block_reason
+                            last["score"] = 0
+                            last["tokens_in"] = last.get("tokens_in", 0) + reviewer_tokens_in_delta
+                            last["tokens_out"] = last.get("tokens_out", 0) + reviewer_tokens_out_delta
+                            last["cost_usd"] = round(last.get("cost_usd", 0.0) + reviewer_cost_delta, 6)
+                    mt = ledger.mission_totals()
+                    engine.state.tokens_in = mt["tokens_in"]
+                    engine.state.tokens_out = mt["tokens_out"]
+                    engine.state.cost_usd = mt["cost_usd"]
+                    engine._save()
+                    continue
+
                 print(f"  ↓ [reviewer] task {tid}  approved={approved}  score={score}")
                 if not approved and feedback:
                     print(f"    feedback: {feedback[:200]}")
+                _record_usage(ledger, tid, output if success else "")
+                if ts:
+                    t = ledger.task_totals(tid)
+                    # Add reviewer cost delta to the last attempt entry
+                    reviewer_cost_delta = t["cost_usd"] - (ts.cost_usd or 0.0)
+                    reviewer_tokens_in_delta = t["tokens_in"] - (ts.tokens_in or 0)
+                    reviewer_tokens_out_delta = t["tokens_out"] - (ts.tokens_out or 0)
+                    ts.tokens_in = t["tokens_in"]
+                    ts.tokens_out = t["tokens_out"]
+                    ts.cost_usd = t["cost_usd"]
+                    if ts.attempt_history:
+                        last = ts.attempt_history[-1]
+                        last["review"] = feedback
+                        last["score"] = score
+                        last["tokens_in"] = last.get("tokens_in", 0) + reviewer_tokens_in_delta
+                        last["tokens_out"] = last.get("tokens_out", 0) + reviewer_tokens_out_delta
+                        last["cost_usd"] = round(last.get("cost_usd", 0.0) + reviewer_cost_delta, 6)
+                mt = ledger.mission_totals()
+                engine.state.tokens_in = mt["tokens_in"]
+                engine.state.tokens_out = mt["tokens_out"]
+                engine.state.cost_usd = mt["cost_usd"]
                 engine.apply_reviewer_result(tid, approved, feedback, score, blocking)
                 engine._save()
 
@@ -464,7 +620,12 @@ def run_autonomous(
                 print(f"\n✓ Mission complete! ({tick} ticks)")
                 break
             if engine.is_failed() and not in_flight:
-                print(f"\n✗ Mission failed. ({tick} ticks)")
+                if "budget" in engine.state.caps_hit:
+                    total_cost = sum(ts.cost_usd for ts in engine.state.task_states.values())
+                    cap = engine.state.caps.max_cost_usd
+                    print(f"\nBudget cap exceeded: ${total_cost:.4f} >= max_cost_usd=${cap:.2f}. Halting.")
+                else:
+                    print(f"\n✗ Mission failed. ({tick} ticks)")
                 break
 
             # Get new actions from the engine
