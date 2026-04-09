@@ -16,6 +16,14 @@ from agentforce.core.state import MissionState, TaskState
 from agentforce.server.handler import DashboardHandler
 
 
+def _set_handler_config(state_dir: Path, port: int = 8080) -> None:
+    DashboardHandler.config = DashboardHandler.config.__class__(
+        state_dir=Path(state_dir),
+        host="localhost",
+        port=port,
+    )
+
+
 def _mission_state() -> MissionState:
     spec = MissionSpec(
         name="Integration Mission",
@@ -109,7 +117,7 @@ def test_dashboard_integration_http_and_websocket(tmp_path: Path, monkeypatch):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     _mission_state().save(state_dir / "mission-123.json")
-    monkeypatch.setattr("agentforce.server.handler.STATE_DIR", state_dir)
+    _set_handler_config(state_dir)
 
     server, thread, port = _start_server(state_dir)
     try:
