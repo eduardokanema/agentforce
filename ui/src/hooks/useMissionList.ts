@@ -27,13 +27,16 @@ export function useMissionList(): {
   missions: MissionSummary[];
   loading: boolean;
   error: string | null;
+  refresh: () => void;
 } {
   const [missions, setMissions] = useState<MissionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshIndex, setRefreshIndex] = useState(0);
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
 
     void getMissions()
       .then((initialMissions) => {
@@ -73,7 +76,7 @@ export function useMissionList(): {
       wsClient.off('mission_list', handler);
       wsClient.off('mission_list_update', handler);
     };
-  }, []);
+  }, [refreshIndex]);
 
-  return { missions, loading, error };
+  return { missions, loading, error, refresh: () => setRefreshIndex((current) => current + 1) };
 }

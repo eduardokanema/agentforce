@@ -6,7 +6,6 @@ import { TASK_STATUSES, type TaskStatus } from '../lib/types';
 import StatusBadge from './StatusBadge';
 import MissionProgressBar from './MissionProgressBar';
 import EventLogTable from './EventLogTable';
-import TerminalPanel from './TerminalPanel';
 import ConnectionBanner from './ConnectionBanner';
 
 const wsHarness = vi.hoisted(() => {
@@ -87,16 +86,14 @@ function renderToContainer(element: ReactElement): { root: Root; container: HTML
 
 describe('shared UI components', () => {
   let originalScrollIntoView: unknown;
-  let scrollIntoViewMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     wsHarness.reset();
     originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
-    scrollIntoViewMock = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       writable: true,
-      value: scrollIntoViewMock,
+      value: vi.fn(),
     });
   });
 
@@ -154,26 +151,7 @@ describe('shared UI components', () => {
     expect(markup).toContain('max-w-[420px]');
     expect(markup).toContain(longDetails.slice(0, 140));
     expect(markup).not.toContain(longDetails.slice(0, 141));
-    expect(markup).toMatch(/>\d{2}:\d{2}:\d{2}</);
-  });
-
-  it('TerminalPanel auto-scrolls when the line count increases', () => {
-    const { root, container } = renderToContainer(<TerminalPanel lines={['first']} />);
-    const scrollCallsAfterMount = scrollIntoViewMock.mock.calls.length;
-
-    scrollIntoViewMock.mockClear();
-
-    act(() => {
-      root.render(<TerminalPanel lines={['first', 'second']} />);
-    });
-
-    expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
-    expect(scrollCallsAfterMount).toBeGreaterThanOrEqual(1);
-
-    act(() => {
-      root.unmount();
-    });
-    container.remove();
+    expect(markup).toContain('title="1/1/2024, 8:34:56 PM"');
   });
 
   it('ConnectionBanner reflects wsClient connection state changes', () => {

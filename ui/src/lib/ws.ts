@@ -16,6 +16,23 @@ export interface MissionStateEvent {
   state: MissionState;
 }
 
+export interface MissionCostUpdateEvent {
+  type: 'mission_cost_update';
+  mission_id: string;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+}
+
+export interface TaskCostUpdateEvent {
+  type: 'task_cost_update';
+  mission_id: string;
+  task_id: string;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+}
+
 export interface StreamLineEvent {
   type: 'stream_line';
   mission_id: string;
@@ -44,6 +61,8 @@ type WsInboundEvent =
   | MissionListEvent
   | MissionListUpdateEvent
   | MissionStateEvent
+  | MissionCostUpdateEvent
+  | TaskCostUpdateEvent
   | StreamLineEvent
   | TaskStreamLineEvent
   | TaskStreamDoneEvent;
@@ -82,7 +101,8 @@ function isMissionSummary(value: unknown): value is MissionSummary {
     && isString(value.duration)
     && isString(value.worker_agent)
     && isString(value.worker_model)
-    && isString(value.started_at);
+    && isString(value.started_at)
+    && isNumber(value.cost_usd);
 }
 
 function isMissionState(value: unknown): value is MissionState {
@@ -113,6 +133,17 @@ function isInboundEvent(value: unknown): value is WsInboundEvent {
       return Array.isArray(value.missions) && value.missions.every(isMissionSummary);
     case 'mission_state':
       return isString(value.mission_id) && isMissionState(value.state);
+    case 'mission_cost_update':
+      return isString(value.mission_id)
+        && isNumber(value.tokens_in)
+        && isNumber(value.tokens_out)
+        && isNumber(value.cost_usd);
+    case 'task_cost_update':
+      return isString(value.mission_id)
+        && isString(value.task_id)
+        && isNumber(value.tokens_in)
+        && isNumber(value.tokens_out)
+        && isNumber(value.cost_usd);
     case 'stream_line':
     case 'task_stream_line':
       return isString(value.mission_id)

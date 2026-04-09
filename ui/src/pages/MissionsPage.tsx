@@ -1,28 +1,36 @@
 import { Link } from 'react-router-dom';
-import AgentChip from '../components/AgentChip';
-import ConnectionBanner from '../components/ConnectionBanner';
-import MissionProgressBar from '../components/MissionProgressBar';
-import StatusBadge from '../components/StatusBadge';
+import MissionCard from '../components/MissionCard';
+import { restartMission, stopMission } from '../lib/api';
 import { useMissionList } from '../hooks/useMissionList';
+import { useToast } from '../hooks/useToast';
+import type { MissionSummary } from '../lib/types';
 
 function LoadingSkeleton() {
   return (
     <div aria-label="Loading missions" className="grid gap-4">
       {Array.from({ length: 3 }).map((_, index) => (
-        <div
-          key={index}
-          className="animate-pulse rounded-xl border border-border bg-card p-5"
-        >
-          <div className="space-y-4">
-            <div className="flex items-start justify-between gap-4">
-              <div className="h-5 w-48 rounded bg-surface" />
-              <div className="h-6 w-24 rounded-full bg-surface" />
+        <div key={index} className="animate-pulse overflow-hidden rounded-lg border border-border bg-card">
+          <div className="pl-5 pr-4 py-3 flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <div className="h-4 w-48 rounded bg-surface" />
+              <div className="h-5 w-20 rounded-full bg-surface" />
+              <div className="ml-auto h-3 w-14 rounded bg-surface" />
             </div>
             <div className="h-1.5 w-full rounded bg-surface" />
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="h-4 w-20 rounded bg-surface" />
-              <div className="h-4 w-28 rounded bg-surface" />
-              <div className="h-5 w-36 rounded-full bg-surface" />
+            <div className="flex gap-4">
+              <div className="h-3 w-16 rounded bg-surface" />
+              <div className="h-3 w-16 rounded bg-surface" />
+              <div className="h-3 w-16 rounded bg-surface" />
+              <div className="h-3 w-32 rounded bg-surface" />
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="h-4 w-48 rounded-full bg-surface" />
+              <div className="h-4 w-20 rounded-full bg-surface" />
+              <div className="h-3 w-16 rounded bg-surface" />
+            </div>
+            <div className="flex gap-2">
+              <div className="h-5 w-16 rounded-full bg-surface" />
+              <div className="h-5 w-20 rounded-full bg-surface" />
             </div>
           </div>
         </div>
@@ -31,63 +39,109 @@ function LoadingSkeleton() {
   );
 }
 
-export default function MissionsPage() {
-  const { missions, loading } = useMissionList();
+function getRunningCount(missions: MissionSummary[]): number {
+  return missions.filter((mission) => mission.status === 'active' || mission.status === 'in_progress').length;
+}
+
+function getDoneCount(missions: MissionSummary[]): number {
+  return missions.filter((mission) => (
+    mission.status === 'complete' || mission.status === 'completed' || mission.status === 'review_approved'
+  )).length;
+}
+
+function getCostTotal(missions: MissionSummary[]): number {
+  return missions.reduce((total, mission) => total + (mission.cost_usd ?? 0), 0);
+}
+
+function getTokenTotal(missions: MissionSummary[]): number {
+  return missions.reduce((total, mission) => total + (mission.tokens_in ?? 0) + (mission.tokens_out ?? 0), 0);
+}
+
+function MetricsStrip({ missions }: { missions: MissionSummary[] }) {
+  const total = missions.length;
+  const running = getRunningCount(missions);
+  const done = getDoneCount(missions);
+  const cost = getCostTotal(missions);
+  const tokens = getTokenTotal(missions);
 
   return (
-    <div className="min-h-screen bg-bg text-text">
-      <ConnectionBanner />
+    <div className="flex flex-wrap gap-6 border-b border-border bg-surface px-4 py-2 text-[11px] text-dim">
+      <span>Total: {total}</span>
+      <span>Running: {running}</span>
+      <span>Done: {done}</span>
+      <span>Cost: ${cost.toFixed(2)}</span>
+      <span>Tokens: {tokens}</span>
+    </div>
+  );
+}
 
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-8">
-        <header>
+export default function MissionsPage() {
+  const { missions, loading, refresh } = useMissionList();
+  const { addToast } = useToast();
+
+  const handleStop = async (missionId: string): Promise<void> => {
+    try {
+      await stopMission(missionId);
+      addToast('Mission stopped', 'success');
+      refresh();
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : 'Failed to stop mission', 'error');
+    }
+  };
+
+  const handleRestart = async (missionId: string): Promise<void> => {
+    try {
+      await restartMission(missionId);
+      addToast('Mission restarted', 'success');
+      refresh();
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : 'Failed to restart mission', 'error');
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div>
           <h1 className="text-3xl font-semibold tracking-tight">AgentForce Missions</h1>
-        </header>
+          <p className="mt-1 text-sm text-dim">Track mission progress, cost, and controls from one list.</p>
+        </div>
+        <Link
+          className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
+          to="/plan"
+        >
+          + New Mission
+        </Link>
+      </header>
 
-        {loading ? (
-          <LoadingSkeleton />
-        ) : missions.length === 0 ? (
-          <section className="rounded-xl border border-border bg-card p-8 text-sm text-dim">
-            <h2 className="text-base font-semibold text-text">No missions yet</h2>
-            <p className="mt-2">Missions will appear here once they start.</p>
-          </section>
-        ) : (
-          <ul className="grid gap-4">
-            {missions.map((mission) => (
-              <li
-                key={mission.mission_id}
-                className="rounded-lg border border-border bg-card p-5 transition-colors duration-200 hover:bg-card-hover"
-              >
-                <article className="space-y-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-2">
-                      <Link
-                        className="text-lg font-semibold text-text transition-colors hover:text-blue hover:no-underline"
-                        to={`/mission/${mission.mission_id}`}
-                      >
-                        {mission.name}
-                      </Link>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <StatusBadge status={mission.status} />
-                        <span className="text-xs uppercase tracking-[0.08em] text-dim">
-                          {mission.done_tasks} / {mission.total_tasks} tasks
-                        </span>
-                      </div>
-                    </div>
+      {!loading ? <MetricsStrip missions={missions} /> : null}
 
-                    <span className="text-sm text-dim">{mission.duration}</span>
-                  </div>
-
-                  <MissionProgressBar pct={mission.pct} />
-
-                  <div className="flex flex-wrap items-center gap-3">
-                    <AgentChip agent={mission.worker_agent} model={mission.worker_model} />
-                  </div>
-                </article>
-              </li>
-            ))}
-          </ul>
-        )}
-      </main>
+      {loading ? (
+        <LoadingSkeleton />
+      ) : missions.length === 0 ? (
+        <section className="rounded-lg border border-border bg-card px-4 py-5 text-sm text-dim">
+          <span>No missions yet. </span>
+          <Link className="text-cyan hover:no-underline" to="/plan">
+            Launch one with Plan Mode →
+          </Link>
+        </section>
+      ) : (
+        <ul className="grid gap-4">
+          {missions.map((mission) => (
+            <li key={mission.mission_id}>
+              <MissionCard
+                mission={mission}
+                onRestart={() => {
+                  void handleRestart(mission.mission_id);
+                }}
+                onStop={() => {
+                  void handleStop(mission.mission_id);
+                }}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

@@ -5,11 +5,36 @@ export interface EventLogTableProps {
   className?: string;
 }
 
-function formatTimestamp(timestamp: string): string {
+function formatAbsoluteTimestamp(timestamp: string): string {
   const date = new Date(timestamp);
-  return Number.isNaN(date.getTime())
-    ? timestamp
-    : date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
+}
+
+function formatRelativeTimestamp(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return timestamp;
+  }
+
+  const diffSeconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  const absSeconds = Math.abs(diffSeconds);
+
+  if (absSeconds < 60) {
+    return diffSeconds >= 0 ? `${absSeconds}s ago` : `in ${absSeconds}s`;
+  }
+
+  const absMinutes = Math.floor(absSeconds / 60);
+  if (absMinutes < 60) {
+    return diffSeconds >= 0 ? `${absMinutes}m ago` : `in ${absMinutes}m`;
+  }
+
+  const absHours = Math.floor(absMinutes / 60);
+  if (absHours < 24) {
+    return diffSeconds >= 0 ? `${absHours}h ago` : `in ${absHours}h`;
+  }
+
+  const absDays = Math.floor(absHours / 24);
+  return diffSeconds >= 0 ? `${absDays}d ago` : `in ${absDays}d`;
 }
 
 function formatDetails(details: string): string {
@@ -39,7 +64,7 @@ export default function EventLogTable({ entries, className = '' }: EventLogTable
             entries.map((entry) => (
               <tr key={`${entry.timestamp}-${entry.event_type}-${entry.task_id ?? ''}`} className="border-b border-border last:border-b-0">
                 <td className="px-4 py-2 align-middle text-[11px] whitespace-nowrap text-muted">
-                  {formatTimestamp(entry.timestamp)}
+                  <span title={formatAbsoluteTimestamp(entry.timestamp)}>{formatRelativeTimestamp(entry.timestamp)}</span>
                 </td>
                 <td className="px-4 py-2 align-middle">
                   <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] uppercase tracking-[0.05em] text-dim">
