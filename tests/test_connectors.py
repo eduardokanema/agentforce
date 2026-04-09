@@ -13,6 +13,7 @@ from agentforce.connectors import opencode as oc_mod
 from agentforce.connectors import claude as cl_mod
 from agentforce.connectors import openrouter as or_mod
 from agentforce.connectors import codex as cx_mod
+from agentforce.core.token_event import TokenEvent
 
 
 # ── Connector registry ────────────────────────────────────────────────────────
@@ -50,7 +51,8 @@ class TestOpencodeConnector:
             assert oc_mod.available() is False
 
     def test_run_returns_four_tuple(self, tmp_path):
-        """run() must return (bool, str, str, str|None)."""
+        """run() must return (bool, str, str, str|None, TokenEvent)."""
+        from agentforce.core.token_event import TokenEvent
         fake_events = [
             b'{"type":"step_start","sessionID":"ses_abc123","part":{}}\n',
             b'{"type":"text","sessionID":"ses_abc123","part":{"text":"hello"}}\n',
@@ -64,11 +66,12 @@ class TestOpencodeConnector:
         with patch("subprocess.Popen", return_value=mock_proc):
             result = oc_mod.run("do something", str(tmp_path))
 
-        assert len(result) == 4
-        success, output, error, session_id = result
+        assert len(result) == 5
+        success, output, error, session_id, token_event = result
         assert success is True
         assert "hello" in output
         assert session_id == "ses_abc123"
+        assert isinstance(token_event, TokenEvent)
 
     def test_run_captures_session_id_from_first_event(self, tmp_path):
         fake_events = [
@@ -81,7 +84,7 @@ class TestOpencodeConnector:
         mock_proc.stderr.read.return_value = ""
 
         with patch("subprocess.Popen", return_value=mock_proc):
-            _, _, _, session_id = oc_mod.run("x", str(tmp_path))
+            _, _, _, session_id, _ = oc_mod.run("x", str(tmp_path))
 
         assert session_id == "ses_FIRST"
 
@@ -145,7 +148,7 @@ class TestOpencodeConnector:
         mock_proc.stderr.read.return_value = "something failed"
 
         with patch("subprocess.Popen", return_value=mock_proc):
-            success, _, error, _ = oc_mod.run("x", str(tmp_path))
+            success, _, error, _, _ = oc_mod.run("x", str(tmp_path))
 
         assert success is False
 
@@ -164,7 +167,7 @@ class TestOpencodeConnector:
             oc_mod.run("x", str(tmp_path), stream_path=log_file)
 
         assert log_file.exists()
-        assert "text" in log_file.read_text()
+        assert "line" in log_file.read_text()
 
 
 # ── claude connector ──────────────────────────────────────────────────────────
@@ -179,17 +182,62 @@ class TestClaudeConnector:
         with patch("subprocess.run", side_effect=FileNotFoundError):
             assert cl_mod.available() is False
 
-    def test_run_returns_four_tuple_with_none_session(self, tmp_path):
+    def test_run_returns_five_tuple_with_none_session(self, tmp_path):
         mock_proc = MagicMock()
-        mock_proc.stdout = ["output line\n"]  # text=True yields str lines
+        mock_proc.stdout = ['{"type":"text","text":"output line"}\n']
         mock_proc.returncode = 0
         mock_proc.stderr.read.return_value = ""
 
         with patch("subprocess.Popen", return_value=mock_proc):
             result = cl_mod.run("prompt", str(tmp_path))
 
-        assert len(result) == 4
-        assert result[3] is None  # claude never returns a session ID
+        assert len(result) == 5
+        assert result[3] is None  # session_id always None — claude handles state internally
+
+    def test_run_returns_token_event_as_fifth_element(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = [
+            '{"type":"message_delta","usage":{"input_tokens":10,"output_tokens":20}}\n',
+        ]
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            result = cl_mod.run("prompt", str(tmp_path))
+
+        assert len(result) == 5
+        token_event = result[4]
+        assert isinstance(token_event, TokenEvent)
+        assert token_event.tokens_in == 10
+        assert token_event.tokens_out == 20
+
+    def test_run_uses_stream_json_format(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            cl_mod.run("x", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--output-format" in cmd
+        assert "stream-json" in cmd
+
+    def test_run_parses_text_from_stream_json(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = [
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"hello world"}],"usage":{}}}\n',
+            '{"type":"content_block_delta","delta":{"type":"text_delta","text":" more"}}\n',
+        ]
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            _, output, _, _, _ = cl_mod.run("prompt", str(tmp_path))
+
+        assert "hello world" in output
+        assert "more" in output
 
     def test_run_passes_model_flag(self, tmp_path):
         mock_proc = MagicMock()
@@ -247,6 +295,35 @@ class TestOpenrouterConnector:
         with patch.object(oc_mod, "available", return_value=False):
             assert or_mod.available() is False
 
+    def test_run_returns_five_tuple_with_token_event(self, tmp_path):
+        """openrouter.run() must forward the full 5-tuple from opencode unchanged."""
+        tok = TokenEvent(tokens_in=50, tokens_out=20, cost_usd=0.001)
+        with patch.object(oc_mod, "run", return_value=(True, "ok", "", "ses_1", tok)):
+            result = or_mod.run("x", str(tmp_path), model="nvidia/llama-3")
+
+        assert len(result) == 5
+        success, output, error, session_id, token_event = result
+        assert success is True
+        assert session_id == "ses_1"
+        assert token_event is tok
+
+    def test_token_event_propagates_unchanged(self, tmp_path):
+        """TokenEvent fields must be identical after delegation — not a copy."""
+        tok = TokenEvent(tokens_in=100, tokens_out=40, cost_usd=0.005)
+        with patch.object(oc_mod, "run", return_value=(True, "resp", "", None, tok)):
+            _, _, _, _, token_event = or_mod.run("x", str(tmp_path))
+
+        assert token_event.tokens_in == 100
+        assert token_event.tokens_out == 40
+        assert token_event.cost_usd == 0.005
+
+    def test_return_annotation_includes_token_event(self):
+        """Return type annotation must declare TokenEvent as the 5th element."""
+        import typing
+        hints = typing.get_type_hints(or_mod.run)
+        args = typing.get_args(hints["return"])
+        assert TokenEvent in args, f"TokenEvent not found in return annotation args: {args}"
+
 
 # ── autonomous.py defaults ────────────────────────────────────────────────────
 
@@ -267,12 +344,14 @@ class TestAutonomousDefaults:
                 autonomous._detect_agent()
 
     def test_run_agent_dispatches_to_opencode_connector(self, tmp_path):
-        mock_connector = MagicMock(return_value=(True, "out", "", "ses_x"))
+        from agentforce.core.token_event import TokenEvent
+        te = TokenEvent(10, 5, 0.0)
+        mock_connector = MagicMock(return_value=(True, "out", "", "ses_x", te))
         with patch.dict("agentforce.connectors.CONNECTORS", {"opencode": mock_connector}):
             result = autonomous._run_agent("prompt", str(tmp_path), agent="opencode")
 
         mock_connector.assert_called_once()
-        assert result == (True, "out", "", "ses_x")
+        assert result == (True, "out", "", "ses_x", te)
 
     def test_run_agent_raises_for_unknown_agent(self, tmp_path):
         with pytest.raises(ValueError, match="Unknown agent"):
@@ -365,6 +444,103 @@ class TestSessionCaching:
         assert session_id is None
 
 
+# ── opencode TokenEvent emission ─────────────────────────────────────────────
+
+class TestOpencodeTokenEvent:
+    """opencode.run() must return a 5-tuple with TokenEvent as the 5th element."""
+
+    def _mock_proc(self, events, returncode=0, stderr=""):
+        mock_proc = MagicMock()
+        mock_proc.stdout = events
+        mock_proc.returncode = returncode
+        mock_proc.stderr.read.return_value = stderr
+        return mock_proc
+
+    def test_run_returns_five_tuple(self, tmp_path):
+        mock_proc = self._mock_proc([])
+        with patch("subprocess.Popen", return_value=mock_proc):
+            result = oc_mod.run("x", str(tmp_path))
+        assert len(result) == 5
+
+    def test_run_fifth_element_is_token_event(self, tmp_path):
+        from agentforce.core.token_event import TokenEvent
+        mock_proc = self._mock_proc([])
+        with patch("subprocess.Popen", return_value=mock_proc):
+            result = oc_mod.run("x", str(tmp_path))
+        assert isinstance(result[4], TokenEvent)
+
+    def test_run_default_token_event_when_no_usage_events(self, tmp_path):
+        from agentforce.core.token_event import TokenEvent
+        events = [
+            '{"type":"step_start","sessionID":"s1","part":{}}\n',
+            '{"type":"text","sessionID":"s1","part":{"text":"done"}}\n',
+        ]
+        mock_proc = self._mock_proc(events)
+        with patch("subprocess.Popen", return_value=mock_proc):
+            *_, token_event = oc_mod.run("x", str(tmp_path))
+        assert token_event == TokenEvent(0, 0, 0.0)
+
+    def test_run_captures_usage_type_event(self, tmp_path):
+        events = [
+            '{"type":"usage","inputTokens":100,"outputTokens":50}\n',
+        ]
+        mock_proc = self._mock_proc(events)
+        with patch("subprocess.Popen", return_value=mock_proc):
+            *_, token_event = oc_mod.run("x", str(tmp_path))
+        assert token_event.tokens_in == 100
+        assert token_event.tokens_out == 50
+
+    def test_run_captures_tokens_type_event(self, tmp_path):
+        events = [
+            '{"type":"tokens","promptTokens":200,"completionTokens":80}\n',
+        ]
+        mock_proc = self._mock_proc(events)
+        with patch("subprocess.Popen", return_value=mock_proc):
+            *_, token_event = oc_mod.run("x", str(tmp_path))
+        assert token_event.tokens_in == 200
+        assert token_event.tokens_out == 80
+
+    def test_run_captures_stats_type_event(self, tmp_path):
+        events = [
+            '{"type":"stats","tokensIn":30,"tokensOut":15}\n',
+        ]
+        mock_proc = self._mock_proc(events)
+        with patch("subprocess.Popen", return_value=mock_proc):
+            *_, token_event = oc_mod.run("x", str(tmp_path))
+        assert token_event.tokens_in == 30
+        assert token_event.tokens_out == 15
+
+    def test_run_captures_event_with_inline_token_keys(self, tmp_path):
+        events = [
+            '{"type":"step_finish","sessionID":"s","inputTokens":42,"outputTokens":17}\n',
+        ]
+        mock_proc = self._mock_proc(events)
+        with patch("subprocess.Popen", return_value=mock_proc):
+            *_, token_event = oc_mod.run("x", str(tmp_path))
+        assert token_event.tokens_in == 42
+        assert token_event.tokens_out == 17
+
+    def test_run_sums_multiple_usage_events(self, tmp_path):
+        events = [
+            '{"type":"usage","inputTokens":100,"outputTokens":50}\n',
+            '{"type":"usage","inputTokens":200,"outputTokens":75}\n',
+        ]
+        mock_proc = self._mock_proc(events)
+        with patch("subprocess.Popen", return_value=mock_proc):
+            *_, token_event = oc_mod.run("x", str(tmp_path))
+        assert token_event.tokens_in == 300
+        assert token_event.tokens_out == 125
+
+    def test_run_cost_usd_is_zero(self, tmp_path):
+        events = [
+            '{"type":"usage","inputTokens":10,"outputTokens":5}\n',
+        ]
+        mock_proc = self._mock_proc(events)
+        with patch("subprocess.Popen", return_value=mock_proc):
+            *_, token_event = oc_mod.run("x", str(tmp_path))
+        assert token_event.cost_usd == 0.0
+
+
 # ── codex connector ───────────────────────────────────────────────────────────
 
 class TestCodexConnector:
@@ -394,8 +570,8 @@ class TestCodexConnector:
         with patch("subprocess.Popen", return_value=mock_proc):
             result = cx_mod.run("do something", str(tmp_path))
 
-        assert len(result) == 4
-        success, output, error, session_id = result
+        assert len(result) == 5
+        success, output, error, session_id, token_event = result
         assert success is True
         assert "done" in output
         assert session_id == "thread_abc"
@@ -514,7 +690,7 @@ class TestCodexConnector:
         mock_proc.stderr.read.return_value = "error occurred"
 
         with patch("subprocess.Popen", return_value=mock_proc):
-            success, _, error, _ = cx_mod.run("x", str(tmp_path))
+            success, _, error, _, _te = cx_mod.run("x", str(tmp_path))
 
         assert success is False
 

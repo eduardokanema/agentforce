@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { label: 'Plan Mode', icon: '◈', to: '/plan' },
   { label: 'Models', icon: '⬡', to: '/models' },
   { label: 'Telemetry', icon: '◎', to: '/telemetry' },
+  { label: 'Settings', icon: '⚙', to: '/settings' },
 ] as const;
 
 const APP_VERSION = 'v0.0.0';

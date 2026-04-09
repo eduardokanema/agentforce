@@ -253,6 +253,9 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
                 "output": task_state.worker_output,
                 "review": task_state.review_feedback or None,
                 "score": task_state.review_score,
+                "tokens_in": task_state.tokens_in,
+                "tokens_out": task_state.tokens_out,
+                "cost_usd": task_state.cost_usd,
             }]
         records = []
         for idx, attempt in enumerate(history, start=1):
@@ -262,6 +265,9 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
                     "output": attempt.get("output", ""),
                     "review": attempt.get("review"),
                     "score": attempt.get("score"),
+                    "tokens_in": attempt.get("tokens_in"),
+                    "tokens_out": attempt.get("tokens_out"),
+                    "cost_usd": attempt.get("cost_usd"),
                 })
             else:
                 records.append({
@@ -269,6 +275,9 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
                     "output": str(attempt),
                     "review": None,
                     "score": None,
+                    "tokens_in": None,
+                    "tokens_out": None,
+                    "cost_usd": None,
                 })
         return 200, records
 

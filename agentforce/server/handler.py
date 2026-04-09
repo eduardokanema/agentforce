@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from . import state_io, ws
-from .routes import filesystem, missions, models, plan, providers, static, tasks
+from .routes import caps_config, filesystem, missions, models, plan, providers, static, tasks
 
 _STREAMS_DIR = Path.home() / ".agentforce" / "streams"
 AGENTFORCE_HOME = state_io.AGENTFORCE_HOME
@@ -31,6 +31,7 @@ _ROUTES: list[tuple[str, re.Pattern[str], object]] = [
     ("POST", re.compile(r"^/api/agents(?:/.*)?$"), providers.post),
     ("GET", re.compile(r"^/api/telemetry$"), providers.get),
     ("GET", re.compile(r"^/api/config$"), filesystem.get),
+    ("POST", re.compile(r"^/api/config$"), caps_config.post),
     ("GET", re.compile(r"^/api/filesystem$"), filesystem.get),
     ("GET", re.compile(r"^/api/mission/[^/]+/task/[^/]+(?:/.*)?$"), tasks.get),
     ("POST", re.compile(r"^/api/mission/[^/]+/task/[^/]+(?:/.*)?$"), tasks.post),
@@ -170,6 +171,43 @@ def _watch_state_dir(
             pass
 
 
+def _watch_stream_files(
+    streams_dir: Path | None = None,
+    stop_event: threading.Event | None = None,
+    poll_seconds: float = 0.5,
+) -> None:
+    stream_root = streams_dir if streams_dir is not None else _STREAMS_DIR
+    # stem -> (byte_position, seq)
+    positions: dict[str, tuple[int, int]] = {}
+    while stop_event is None or not stop_event.is_set():
+        _time.sleep(poll_seconds)
+        if not stream_root.exists():
+            continue
+        try:
+            log_files = list(stream_root.glob("*.log"))
+        except OSError:
+            continue
+        for log_file in log_files:
+            stem = log_file.stem  # e.g. "76dab286_01"
+            idx = stem.find("_")
+            if idx < 0:
+                continue
+            mission_id, task_id = stem[:idx], stem[idx + 1:]
+            pos, seq = positions.get(stem, (0, 0))
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(pos)
+                    chunk = f.read()
+                    new_pos = f.tell()
+            except OSError:
+                continue
+            if chunk:
+                for line in chunk.splitlines():
+                    seq += 1
+                    ws.broadcast_stream_line(mission_id, task_id, line, seq)
+                positions[stem] = (new_pos, seq)
+
+
 def serve(port: int = 8080, state_dir: Path | None = None) -> None:
     previous_override = state_io._STATE_DIR_OVERRIDE
     try:
@@ -189,6 +227,13 @@ def serve(port: int = 8080, state_dir: Path | None = None) -> None:
             name="agentforce-state-watchdog",
         )
         watchdog.start()
+        stream_watcher = threading.Thread(
+            target=_watch_stream_files,
+            kwargs={"streams_dir": _STREAMS_DIR, "poll_seconds": 0.5},
+            daemon=True,
+            name="agentforce-stream-watcher",
+        )
+        stream_watcher.start()
         print(f"AgentForce Dashboard → http://{DashboardHandler.config.host}:{DashboardHandler.config.port}")
         print("Press Ctrl+C to stop.")
         try:

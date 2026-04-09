@@ -1,13 +1,68 @@
 """Spec-driven task model — formal specifications, acceptance criteria, and TDD enforcement."""
 from __future__ import annotations
 
+import re
 import yaml
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 import hashlib
+import os
 from datetime import datetime, timezone
+
+
+DOD_VAGUE_PHRASES = frozenset([
+    "it works", "works correctly", "works properly", "works well",
+    "done", "complete", "completed", "finished", "implemented",
+    "fully implemented", "properly implemented", "feature complete",
+])
+
+_MEASURABLE_PATTERNS = [
+    re.compile(r'\b[1-5]\d{2}\b'),                                              # HTTP status codes
+    re.compile(r'[<>]=?|=='),                                                   # comparison operators
+    re.compile(r'["\']'),                                                       # quoted values
+    re.compile(r'[\w./]+/[\w./]+'),                                             # file paths
+    re.compile(r'\bpytest\b|\bbin\b|\bexit\s+code\b', re.IGNORECASE),          # commands
+]
+
+
+CRITERIA_VAGUE_WORDS = [
+    "good", "well", "nice", "clean", "fast", "better", "improve",
+    "properly", "correctly", "works", "appropriate", "reasonable",
+    "efficient", "clear", "simple", "robust", "stable",
+]
+
+_CRITERIA_TESTABLE_PATTERNS = [
+    re.compile(r'\b[1-5]\d{2}\b'),                                              # HTTP status codes
+    re.compile(r'[<>]=?|==|!='),                                                # comparison operators
+    re.compile(r'["\'].+["\']'),                                                # quoted values
+    re.compile(r'[\w./]+/[\w./]+'),                                             # file paths
+    re.compile(r'\b(pytest|npm test|make test|go test|cargo test|assert)\b'),  # test commands
+]
+
+
+@dataclass
+class ValidationError:
+    """A single acceptance-criteria quality violation."""
+    task_id: str
+    criterion: str
+    reason: str
+
+
+@dataclass
+class QualityIssues:
+    dod_errors: list[str] = field(default_factory=list)
+    criteria_errors: list[ValidationError] = field(default_factory=list)
+
+
+@dataclass
+class CapsSuggestion:
+    """Recommended cap adjustment for a mission spec."""
+    field: str
+    current: int | float
+    suggested: int | float
+    reason: str
 
 
 class TaskStatus(str, Enum):
@@ -66,9 +121,19 @@ class TaskSpec:
     working_dir: Optional[str] = None        # Relative path within mission workdir
     max_retries: int = 3
     output_artifacts: list[str] = field(default_factory=list)  # Expected file paths
+    model: Optional[str] = None
 
     def generate_worker_prompt(self) -> str:
         """Generate a structured prompt for the worker agent."""
+        principles_section = """CODE PRINCIPLES (apply in this priority order):
+  1. Safety First — no hardcoded credentials; explicit error handling
+  2. YAGNI — implement only what the task requires; nothing speculative
+  3. Occam's Razor — simplest solution that satisfies acceptance criteria
+  4. SOLID/SRP — one reason to change; one concern per function/module
+  5. DRY — no duplicated logic; reuse existing utilities
+  6. Miller's Law — max 7 items per grouping; max 5 params per function
+
+"""
         tdd_section = ""
         if self.tdd:
             tdd_section = f"""
@@ -84,7 +149,7 @@ TDD REQUIREMENTS (MUST FOLLOW):
 
         deps = f"\nDEPENDENCIES: Complete tasks {', '.join(self.dependencies)} first and review their output." if self.dependencies else ""
 
-        return f"""TASK SPEC: {self.id} - {self.title}
+        return principles_section + f"""TASK SPEC: {self.id} - {self.title}
 
 DESCRIPTION:
 {self.description}
@@ -100,6 +165,10 @@ Report which files you created/modified and how each acceptance criterion was me
     def generate_reviewer_prompt(self, worker_output: str, mission_name: str, dod: str, project_memory: str = "") -> str:
         """Generate a structured prompt for the external reviewer."""
         proj_mem = f"\nPROJECT MEMORY:\n{project_memory}" if project_memory else ""
+        artifact_lines = (
+            "\n".join(f"  \u25a1 {a} \u2014 exists / non-empty / parseable" for a in self.output_artifacts)
+            if self.output_artifacts else "  (no output_artifacts specified)"
+        )
 
         return f"""EXTERNAL REVIEW — Task {self.id}: {self.title}
 
@@ -125,6 +194,28 @@ REVIEW CHECKLIST:
 6. [EDGE CASES] Unhandled edge cases or missing input validation?
 7. [SCOPE CREEP] Did the worker add things not in the spec?
 8. [CONTRADICTIONS] Anything that contradicts the mission goal or DoD?
+9. [CODE PRINCIPLES] Are the 6 code principles followed?
+   □ Safety First: No hardcoded credentials; secrets via env vars only
+       FAIL example: API key string literal in task output → score < 7
+   □ YAGNI: Implementation contains only what acceptance criteria require
+       FAIL example: Caching added with no criterion requiring it → score < 8
+   □ Occam's Razor: Simplest implementation that satisfies all criteria
+       FAIL example: 3 libraries used where stdlib suffices → score < 8
+   □ SOLID/SRP: Each function/class has one reason to change
+       FAIL example: Function handles both parsing AND writing → score < 8
+   □ DRY: No duplicated logic; reuses existing utilities
+       FAIL example: fmt_duration reimplemented instead of imported → score < 8
+   □ Miller's Law: Functions have ≤5 parameters; modules ≤7 public methods
+       FAIL example: Function with 8 parameters → score < 8
+
+SCORE ANCHORS:
+  8 = Good: all 6 principles followed
+  9 = Excellent: principles followed with notable care (e.g. extracted utility)
+  10 = Perfect: exemplary adherence; could be used as a reference
+
+ARTIFACT VERIFICATION:
+{artifact_lines}
+  If any artifact is missing or empty: score Quality dimension < 7.
 
 RESPOND WITH VALID JSON ONLY:
 {{
@@ -150,6 +241,7 @@ RESPOND WITH VALID JSON ONLY:
             "working_dir": self.working_dir,
             "max_retries": self.max_retries,
             "output_artifacts": self.output_artifacts,
+            "model": self.model,
         }
         if self.tdd:
             d["tdd"] = self.tdd.to_dict()
@@ -157,11 +249,13 @@ RESPOND WITH VALID JSON ONLY:
 
     @classmethod
     def from_dict(cls, d: dict) -> TaskSpec:
-        tdd = TDDSpec.from_dict(d.pop("tdd", {})) if d.get("tdd") else None
+        raw = dict(d)
+        tdd = TDDSpec.from_dict(raw.pop("tdd", {})) if raw.get("tdd") else None
         # Pop fields we're extracting explicitly
-        fields = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        fields = {k: v for k, v in raw.items() if k in cls.__dataclass_fields__}
         if tdd:
             fields["tdd"] = tdd
+        fields["model"] = raw.get("model")
         return cls(**fields)
 
 
@@ -243,6 +337,7 @@ class MissionSpec:
                 "working_dir": td.get("working_dir"),
                 "max_retries": td.get("max_retries", 3),
                 "output_artifacts": td.get("output_artifacts", []),
+                "model": td.get("model"),
             }
             tasks.append(TaskSpec(**td_with_defaults))
 
@@ -319,5 +414,87 @@ class MissionSpec:
         
         return issues
 
+    def validate_quality(self) -> QualityIssues:
+        """Check DoD items and task criteria for vague language. Returns QualityIssues."""
+        dod_errors: list[str] = []
+        dod_items = self.definition_of_done
+        if isinstance(dod_items, str):
+            dod_items = [dod_items]
+
+        for item in dod_items:
+            normalized = re.sub(r'[^\w\s]', ' ', item).strip().lower()
+            has_measurable_signal = any(pattern.search(item) for pattern in _MEASURABLE_PATTERNS)
+            has_vague_phrase = any(
+                re.search(rf"\b{re.escape(phrase)}\b", normalized)
+                for phrase in DOD_VAGUE_PHRASES
+            )
+            if has_vague_phrase and not has_measurable_signal:
+                dod_errors.append(item)
+                continue
+
+        criteria_errors: list[ValidationError] = []
+        for task in self.tasks:
+            if not task.acceptance_criteria:
+                criteria_errors.append(ValidationError(
+                    task_id=task.id,
+                    criterion="",
+                    reason="Empty acceptance_criteria list — must have at least one criterion",
+                ))
+                continue
+            for criterion in task.acceptance_criteria:
+                if not any(p.search(criterion) for p in _CRITERIA_TESTABLE_PATTERNS):
+                    criteria_errors.append(ValidationError(
+                        task_id=task.id,
+                        criterion=criterion,
+                        reason="Criterion is too vague — no testable signal (HTTP code, file path, comparison, quoted value, or test command)",
+                    ))
+
+        return QualityIssues(dod_errors=dod_errors, criteria_errors=criteria_errors)
+
     def short_id(self) -> str:
-        return hashlib.md5(f"{self.name}-{self.goal}".encode()).hexdigest()[:8]
+        base = hashlib.md5(f"{self.name}-{self.goal}".encode()).hexdigest()[:4]
+        rand = os.urandom(2).hex()
+        return base + rand
+
+
+def suggest_caps(spec: MissionSpec) -> list[CapsSuggestion]:
+    """Return advisory cap suggestions based on mission size and retry budget."""
+    suggestions: list[CapsSuggestion] = []
+    task_count = len(spec.tasks)
+
+    if task_count >= 4 and spec.caps.max_concurrent_workers < 2:
+        suggestions.append(CapsSuggestion(
+            field="max_concurrent_workers",
+            current=spec.caps.max_concurrent_workers,
+            suggested=2,
+            reason=f"{task_count} tasks: increase to 2 workers for parallel execution",
+        ))
+    if task_count <= 2 and spec.caps.max_concurrent_workers > 2:
+        suggestions.append(CapsSuggestion(
+            field="max_concurrent_workers",
+            current=spec.caps.max_concurrent_workers,
+            suggested=1,
+            reason=f"Only {task_count} tasks: 1 worker is sufficient",
+        ))
+
+    min_wall_time = task_count * 8 * (spec.caps.max_retries_per_task + 1)
+    if spec.caps.max_wall_time_minutes < min_wall_time:
+        suggestions.append(CapsSuggestion(
+            field="max_wall_time_minutes",
+            current=spec.caps.max_wall_time_minutes,
+            suggested=min_wall_time,
+            reason=(
+                f"{task_count} tasks × {spec.caps.max_retries_per_task + 1} passes × "
+                f"8 min = {min_wall_time} min minimum"
+            ),
+        ))
+
+    if spec.caps.max_retries_per_task == 0:
+        suggestions.append(CapsSuggestion(
+            field="max_retries_per_task",
+            current=0,
+            suggested=2,
+            reason="0 retries means any single failure halts the task permanently",
+        ))
+
+    return suggestions

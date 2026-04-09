@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from . import opencode as _opencode
+from agentforce.core.token_event import TokenEvent
 
 
 def available() -> bool:
@@ -24,14 +25,14 @@ def run(
     stream_path: Path = None,
     variant: str = None,
     session_id: str = None,
-) -> tuple[bool, str, str, str | None]:
+) -> tuple[bool, str, str, str | None, TokenEvent]:
     """Run a prompt through opencode using an OpenRouter model.
 
     If the model string doesn't already start with 'openrouter/', it is
     prefixed automatically.
 
     Returns:
-        (success, output, error, session_id)
+        (success, output, error, session_id, token_event)
     """
     if model and not model.startswith("openrouter/"):
         model = f"openrouter/{model}"

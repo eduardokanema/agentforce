@@ -1,7 +1,9 @@
 """Tests for the engine state machine."""
-import pytest
 import sys
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -109,6 +111,13 @@ class TestTick:
 
 
 class TestWorkerLifecycle:
+    def test_retry_not_before_defaults_to_zero(self, tmp_path):
+        engine = make_engine(tmp_path)
+
+        task_state = engine.state.get_task("01")
+
+        assert task_state.retry_not_before == 0.0
+
     def test_successful_worker(self, tmp_path):
         engine = make_engine(tmp_path)
         engine.tick()
@@ -124,10 +133,55 @@ class TestWorkerLifecycle:
         engine = make_engine(tmp_path)
         engine.tick()
         
-        engine.apply_worker_result("01", False, error="Network error")
+        with patch("agentforce.core.engine.time.time", return_value=100.0):
+            engine.apply_worker_result("01", False, error="Network error")
         ts = engine.state.get_task("01")
         assert ts.status == "retry"
         assert ts.retries == 1
+        assert ts.retry_not_before == pytest.approx(105.0)
+
+    def test_retry_backoff_skips_dispatch_until_deadline(self, tmp_path, caplog):
+        import logging
+
+        engine = make_engine(tmp_path)
+
+        with patch("agentforce.core.engine.time.time", return_value=100.0):
+            engine.tick()
+            engine.apply_worker_result("01", False, error="Network error")
+
+        with patch("agentforce.core.engine.time.time", return_value=104.0):
+            with caplog.at_level(logging.DEBUG, logger="agentforce.engine"):
+                actions = engine.tick()
+
+        worker_actions = [a for a in actions if isinstance(a, WorkerDelegation)]
+        assert all(action.task_id != "01" for action in worker_actions)
+        assert any("task 01 in backoff" in record.message for record in caplog.records)
+
+        with patch("agentforce.core.engine.time.time", return_value=105.0):
+            actions = engine.tick()
+
+        worker_actions = [a for a in actions if isinstance(a, WorkerDelegation)]
+        assert any(action.task_id == "01" for action in worker_actions)
+
+    def test_retry_backoff_grows_exponentially_across_failures(self, tmp_path):
+        engine = make_engine(
+            tmp_path,
+            tasks=[TaskSpec(id="01", title="Task A", description="Do A", max_retries=3)],
+        )
+
+        with patch("agentforce.core.engine.time.time", return_value=100.0):
+            engine.tick()
+            engine.apply_worker_result("01", False, error="Fail 1")
+
+        assert engine.state.get_task("01").retry_not_before == pytest.approx(105.0)
+
+        with patch("agentforce.core.engine.time.time", return_value=105.0):
+            engine.tick()
+
+        with patch("agentforce.core.engine.time.time", return_value=200.0):
+            engine.apply_worker_result("01", False, error="Fail 2")
+
+        assert engine.state.get_task("01").retry_not_before == pytest.approx(210.0)
 
     def test_max_retries_marks_failed(self, tmp_path):
         engine = make_engine(tmp_path)
@@ -149,6 +203,7 @@ class TestWorkerLifecycle:
         task_state = engine.state.get_task("01")
         task_state.status = "failed"
         task_state.retries = 2
+        task_state.retry_not_before = 999.0
         engine.state.total_retries = 4
         engine._save()
 
@@ -157,6 +212,7 @@ class TestWorkerLifecycle:
         task_state = engine.state.get_task("01")
         assert task_state.status == "retry"
         assert task_state.retries == 2
+        assert task_state.retry_not_before == 0.0
         assert engine.state.total_retries == 4
 
     def test_manual_retry_clears_human_intervention_flags(self, tmp_path):
@@ -188,6 +244,21 @@ class TestReviewerLifecycle:
         
         engine.apply_reviewer_result("01", True, "Looks good", 9)
         assert engine.state.get_task("01").status == "review_approved"
+
+    def test_outcome_memory_truncation_uses_2000_chars(self, tmp_path):
+        engine = make_engine(tmp_path)
+        engine.tick()
+        engine.apply_worker_result("01", True, "Implemented")
+
+        feedback = "x" * 2500
+
+        engine.apply_reviewer_result("01", True, feedback, 9)
+
+        stored_feedback = engine.memory.project_get(
+            engine.state.mission_id,
+            "task_01_outcome",
+        )
+        assert stored_feedback == feedback[:2000]
 
     def test_rejected_review_retries(self, tmp_path):
         engine = make_engine(tmp_path)
@@ -333,6 +404,131 @@ class TestEventLog:
         engine.tick()
         tail = engine.event_log_tail(3)
         assert len(tail) <= 3
+
+
+class TestAgentContext:
+    """Tests for query= parameter passing in agent_context() calls."""
+
+    def test_agent_context_worker_passes_query_from_acceptance_criteria(self, tmp_path):
+        """_dispatch_worker must call agent_context with query= from acceptance_criteria."""
+        from unittest.mock import MagicMock, patch
+
+        tasks = [
+            TaskSpec(
+                id="01",
+                title="Task A",
+                description="Do A",
+                acceptance_criteria=["criterion one", "criterion two"],
+                max_retries=2,
+            )
+        ]
+        engine = make_engine(tmp_path, tasks=tasks)
+
+        captured = {}
+
+        real_agent_context = engine.memory.agent_context
+
+        def spy_agent_context(project_id, task_id, query=None):
+            captured["query"] = query
+            return real_agent_context(project_id, task_id, query=query)
+
+        engine.memory.agent_context = spy_agent_context
+        engine.tick()
+
+        assert "query" in captured, "agent_context was not called"
+        assert captured["query"] == "criterion one\ncriterion two"
+
+    def test_agent_context_worker_falls_back_to_description_when_no_criteria(self, tmp_path):
+        """When acceptance_criteria is empty, query= falls back to task.description."""
+        tasks = [
+            TaskSpec(
+                id="01",
+                title="Task A",
+                description="Do A thoroughly",
+                acceptance_criteria=[],
+                max_retries=2,
+            )
+        ]
+        engine = make_engine(tmp_path, tasks=tasks)
+
+        captured = {}
+
+        real_agent_context = engine.memory.agent_context
+
+        def spy_agent_context(project_id, task_id, query=None):
+            captured["query"] = query
+            return real_agent_context(project_id, task_id, query=query)
+
+        engine.memory.agent_context = spy_agent_context
+        engine.tick()
+
+        assert captured.get("query") == "Do A thoroughly"
+
+    def test_agent_context_reviewer_passes_query(self, tmp_path):
+        """_dispatch_reviewer must also call agent_context with query=."""
+        tasks = [
+            TaskSpec(
+                id="01",
+                title="Task A",
+                description="Do A",
+                acceptance_criteria=["reviewed criterion"],
+                max_retries=2,
+            )
+        ]
+        engine = make_engine(tmp_path, tasks=tasks)
+
+        queries = []
+
+        real_agent_context = engine.memory.agent_context
+
+        def spy_agent_context(project_id, task_id, query=None):
+            queries.append(query)
+            return real_agent_context(project_id, task_id, query=query)
+
+        engine.memory.agent_context = spy_agent_context
+
+        engine.tick()
+        engine.apply_worker_result("01", True, "Done")
+        engine.tick()  # triggers reviewer dispatch
+
+        assert len(queries) >= 2, "agent_context should be called for worker and reviewer"
+        assert "reviewed criterion" in queries
+
+    def test_agent_context_debug_log_emitted_for_worker(self, tmp_path, caplog):
+        """A DEBUG log line 'agent_context query [<id>]: <text>' must be emitted."""
+        import logging
+
+        tasks = [
+            TaskSpec(
+                id="01",
+                title="Task A",
+                description="Do A",
+                acceptance_criteria=["log this criterion"],
+                max_retries=2,
+            )
+        ]
+        engine = make_engine(tmp_path, tasks=tasks)
+
+        with caplog.at_level(logging.DEBUG, logger="agentforce.engine"):
+            engine.tick()
+
+        debug_msgs = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
+        assert any("agent_context query" in m and "01" in m for m in debug_msgs), (
+            f"Expected debug log not found in: {debug_msgs}"
+        )
+
+    def test_vector_memory_agent_context_with_query(self, tmp_path):
+        """Memory.agent_context falls back gracefully when query= provided (no vector DB)."""
+        from agentforce.memory import Memory
+
+        mem = Memory(tmp_path / "mem")
+        mem.project_set("proj1", "key1", "value1")
+
+        result_with_query = mem.agent_context("proj1", "t1", query="some query")
+        result_without_query = mem.agent_context("proj1", "t1")
+
+        # Both should return the same full dump (Memory doesn't do semantic search)
+        assert result_with_query == result_without_query
 
 
 class TestReport:

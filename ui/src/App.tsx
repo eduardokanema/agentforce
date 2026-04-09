@@ -8,6 +8,7 @@ import PlanModePageScreen from './pages/PlanModePage';
 import ModelsPageScreen from './pages/ConnectorsPage';
 import TelemetryPageScreen from './pages/TelemetryPage';
 import TaskDetailPageScreen from './pages/TaskDetailPage';
+import SettingsPageScreen from './pages/SettingsPage';
 
 const routeConfig = [
   { path: '/', element: <MissionsPageScreen /> },
@@ -16,6 +17,7 @@ const routeConfig = [
   { path: '/plan', element: <PlanModePageScreen /> },
   { path: '/models', element: <ModelsPageScreen /> },
   { path: '/telemetry', element: <TelemetryPageScreen /> },
+  { path: '/settings', element: <SettingsPageScreen /> },
 ] as const;
 
 type Expect<T extends true> = T;
