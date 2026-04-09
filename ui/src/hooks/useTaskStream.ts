@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { getTask } from '../lib/api';
+import { getTask, getTaskOutput } from '../lib/api';
 import { wsClient, type StreamLineEvent, type TaskStreamDoneEvent, type TaskStreamLineEvent } from '../lib/ws';
 import type { TaskStatus } from '../lib/types';
 
@@ -16,18 +16,6 @@ function isTerminalStatus(status: TaskStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
-function splitWorkerOutput(output: string): string[] {
-  if (!output) {
-    return [];
-  }
-
-  const normalized = output.replace(/\r\n/g, '\n');
-  const lines = normalized.split('\n');
-  if (lines.length > 0 && lines[lines.length - 1] === '') {
-    lines.pop();
-  }
-  return lines;
-}
 
 export function useTaskStream(
   missionId: string,
@@ -63,31 +51,25 @@ export function useTaskStream(
     setLines([]);
     setDone(false);
 
-    void getTask(missionId, taskId)
-      .then((task) => {
-        if (!active) {
-          return;
-        }
+    // Load status from task state, and historical output from the stream log file.
+    // worker_output in the state is not updated during execution, so we read
+    // the raw stream log directly via the /output endpoint.
+    const taskStatusPromise = getTask(missionId, taskId)
+      .then((task) => { if (active) setDone(isTerminalStatus(task.status)); })
+      .catch(() => undefined);
 
-        const initialLines = splitWorkerOutput(task.worker_output ?? '');
+    const taskOutputPromise = getTaskOutput(missionId, taskId)
+      .then(({ lines: logLines }) => {
+        if (!active || logLines.length === 0) return;
         setLines((current) => {
-          if (current.length === 0) {
-            return initialLines;
-          }
-
-          if (initialLines.length === 0) {
-            return current;
-          }
-
-          return initialLines.concat(current);
+          // WS lines may have already arrived; append log lines before them
+          if (current.length === 0) return logLines;
+          return logLines.concat(current);
         });
-        setDone(isTerminalStatus(task.status));
       })
-      .catch(() => {
-        if (active) {
-          setDone(false);
-        }
-      });
+      .catch(() => undefined);
+
+    void Promise.all([taskStatusPromise, taskOutputPromise]);
 
     const scheduleFlush = (): void => {
       if (flushTimerRef.current !== null) {

@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import MissionCard from '../components/MissionCard';
-import { restartMission, stopMission } from '../lib/api';
+import { archiveMission, deleteMission, restartMission, stopMission, unarchiveMission } from '../lib/api';
 import { useMissionList } from '../hooks/useMissionList';
 import { useToast } from '../hooks/useToast';
 import type { MissionSummary } from '../lib/types';
@@ -99,6 +99,33 @@ export default function MissionsPage() {
     }
   };
 
+  const handleArchive = async (missionId: string): Promise<void> => {
+    try {
+      await archiveMission(missionId);
+      refresh();
+      addToast('Mission archived', 'info', {
+        label: 'Undo',
+        onClick: () => {
+          void unarchiveMission(missionId)
+            .then(() => { refresh(); })
+            .catch(() => undefined);
+        },
+      });
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : 'Failed to archive mission', 'error');
+    }
+  };
+
+  const handleDelete = async (missionId: string): Promise<void> => {
+    try {
+      await deleteMission(missionId);
+      addToast('Mission deleted', 'info');
+      refresh();
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : 'Failed to delete mission', 'error');
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -131,6 +158,12 @@ export default function MissionsPage() {
             <li key={mission.mission_id}>
               <MissionCard
                 mission={mission}
+                onArchive={() => {
+                  void handleArchive(mission.mission_id);
+                }}
+                onDelete={() => {
+                  void handleDelete(mission.mission_id);
+                }}
                 onRestart={() => {
                   void handleRestart(mission.mission_id);
                 }}

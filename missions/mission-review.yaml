@@ -886,7 +886,7 @@ tasks:
       - "GET /api/mission/{id}/review returns JSON when file exists"
       - "POST /api/mission/{id}/review returns 429 when reviewed < 5 min ago"
       - "POST /api/mission/{id}/review returns 404 for unknown mission"
-      - "POST /api/mission/{id}/review {"skip": true} writes sentinel file"
+      - 'POST /api/mission/{id}/review {"skip": true} writes sentinel file'
     dependencies:
       - "05"
     tdd:

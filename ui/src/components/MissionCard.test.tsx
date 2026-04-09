@@ -12,7 +12,7 @@ vi.mock('../hooks/useElapsedTime', () => ({
 
 import MissionCard from './MissionCard';
 
-function renderCard(mission: MissionSummary, onStop = vi.fn(), onRestart = vi.fn()): {
+function renderCard(mission: MissionSummary, onStop = vi.fn(), onRestart = vi.fn(), onArchive = vi.fn(), onDelete = vi.fn()): {
   container: HTMLDivElement;
   onStop: ReturnType<typeof vi.fn>;
   onRestart: ReturnType<typeof vi.fn>;
@@ -24,7 +24,7 @@ function renderCard(mission: MissionSummary, onStop = vi.fn(), onRestart = vi.fn
   act(() => {
     root.render(
       <MemoryRouter>
-        <MissionCard mission={mission} onStop={onStop} onRestart={onRestart} />
+        <MissionCard mission={mission} onStop={onStop} onRestart={onRestart} onArchive={onArchive} onDelete={onDelete} />
       </MemoryRouter>,
     );
   });

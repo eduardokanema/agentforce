@@ -59,6 +59,12 @@ export function getTask(missionId: string, taskId: string): Promise<TaskState & 
   );
 }
 
+export function getTaskOutput(missionId: string, taskId: string): Promise<{ lines: string[] }> {
+  return requestJson<{ lines: string[] }>(
+    `/api/mission/${encodeURIComponent(missionId)}/task/${encodeURIComponent(taskId)}/output`,
+  );
+}
+
 export function getTaskAttempts(missionId: string, taskId: string): Promise<TaskAttempt[]> {
   return requestJson<TaskAttempt[]>(
     `/api/mission/${encodeURIComponent(missionId)}/task/${encodeURIComponent(taskId)}/attempts`,
@@ -71,6 +77,18 @@ export function stopMission(id: string): Promise<void> {
 
 export function restartMission(id: string): Promise<void> {
   return requestVoid(`/api/mission/${encodeURIComponent(id)}/restart`);
+}
+
+export function archiveMission(id: string): Promise<void> {
+  return requestVoid(`/api/mission/${encodeURIComponent(id)}/archive`);
+}
+
+export function unarchiveMission(id: string): Promise<void> {
+  return requestVoid(`/api/mission/${encodeURIComponent(id)}/unarchive`);
+}
+
+export function deleteMission(id: string): Promise<void> {
+  return requestVoid(`/api/mission/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export function stopTask(missionId: string, taskId: string): Promise<void> {
