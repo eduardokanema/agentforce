@@ -1,9 +1,7 @@
 """Autonomous mission driver — runs entirely inside one delegated session.
 
-Instead of the old pattern (an external orchestrator spawns workers, feeds
-results back, spawns reviewers, feeds those back...), this module runs the
-entire mission autonomously inside a single delegate_task call. It spawns
-subprocesses (opencode run) for each worker and reviewer task and manages the
+This module runs the entire mission autonomously inside a single delegate_task call.
+It spawns subprocesses for each worker and reviewer task and manages the
 state machine internally.
 
 Usage:

@@ -22,13 +22,13 @@ mission:
     max_retries_global: 9
     max_wall_time_minutes: 60
     max_human_interventions: 3
-  working_dir: "/Users/rent/Projects/agentforce"
+  working_dir: "/Users/eduardo/Projects/agentforce"
 
 tasks:
   - id: "01"
     title: "Add dependencies and run baseline benchmark"
     description: |
-      In /Users/rent/Projects/agentforce:
+      In /Users/eduardo/Projects/agentforce:
 
       1. Add to pyproject.toml under [project.optional-dependencies]:
            vector = ["lancedb>=0.6", "fastembed>=0.2"]
@@ -64,7 +64,7 @@ tasks:
   - id: "02"
     title: "Implement VectorMemory core storage"
     description: |
-      In /Users/rent/Projects/agentforce, create agentforce/memory/vector_memory.py.
+      In /Users/eduardo/Projects/agentforce, create agentforce/memory/vector_memory.py.
 
       The VectorMemory class must:
       - Accept base_dir (Path) in __init__, same as Memory
@@ -115,7 +115,7 @@ tasks:
   - id: "03"
     title: "Semantic agent_context() with top-K retrieval"
     description: |
-      In /Users/rent/Projects/agentforce, upgrade VectorMemory.agent_context() to
+      In /Users/eduardo/Projects/agentforce, upgrade VectorMemory.agent_context() to
       perform semantic similarity search instead of dumping all entries.
 
       New signature:
@@ -158,7 +158,7 @@ tasks:
   - id: "04"
     title: "BDD scenarios and updated benchmark"
     description: |
-      In /Users/rent/Projects/agentforce:
+      In /Users/eduardo/Projects/agentforce:
 
       1. Create tests/features/vector_memory.feature with these scenarios:
 
