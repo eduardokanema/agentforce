@@ -40,6 +40,9 @@ class TaskState:
     human_intervention_needed: bool = False
     human_intervention_message: str = ""
     error_message: str = ""
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -73,6 +76,9 @@ class TaskState:
             "human_intervention_needed": self.human_intervention_needed,
             "human_intervention_message": self.human_intervention_message,
             "error_message": self.error_message,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
+            "cost_usd": self.cost_usd,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "last_updated": self.last_updated,
@@ -92,6 +98,9 @@ class TaskState:
             "human_intervention_needed": False,
             "human_intervention_message": "",
             "error_message": "",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "cost_usd": 0.0,
             "started_at": None,
             "completed_at": None,
             "last_updated": datetime.now(timezone.utc).isoformat(),
@@ -130,6 +139,9 @@ class MissionState:
     total_human_interventions: int = 0
     total_tokens_used: int = 0
     estimated_cost_usd: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
     caps_hit: dict[str, str] = field(default_factory=dict)  # cap_name -> description
     
     # Derived from spec but we store snapshot
@@ -268,6 +280,9 @@ class MissionState:
             "working_dir": self.working_dir,
             "worker_agent": self.worker_agent,
             "worker_model": self.worker_model,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
+            "cost_usd": self.cost_usd,
         }
 
     def to_summary_dict(self) -> dict:
@@ -294,6 +309,9 @@ class MissionState:
             "worker_agent": self.worker_agent,
             "worker_model": self.worker_model,
             "started_at": self.started_at,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
+            "cost_usd": self.cost_usd,
         }
 
     @classmethod
@@ -310,6 +328,9 @@ class MissionState:
             completed_at=d.get("completed_at"),
             total_retries=d.get("total_retries", 0),
             total_human_interventions=d.get("total_human_interventions", 0),
+            tokens_in=d.get("tokens_in", 0),
+            tokens_out=d.get("tokens_out", 0),
+            cost_usd=d.get("cost_usd", 0.0),
             caps_hit=d.get("caps_hit", {}),
             working_dir=d.get("working_dir", ""),
             worker_agent=d.get("worker_agent", ""),

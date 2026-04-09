@@ -49,6 +49,28 @@ def resume_mission(mission_id: str) -> None:
         pf.unlink()
 
 
+def check_inject_queue(mission_id: str, task_id: str) -> str | None:
+    path = Path(f"~/.agentforce/state/{mission_id}/{task_id}.inject").expanduser()
+    try:
+        if not path.exists():
+            return None
+
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        message = data.get("message")
+        timestamp = data.get("timestamp")
+        if not isinstance(message, str) or not isinstance(timestamp, str):
+            return None
+
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return message
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return None
+
+
 def _stream_path(mission_id: str, task_id: str) -> Path:
     _STREAMS_DIR.mkdir(parents=True, exist_ok=True)
     return _STREAMS_DIR / f"{mission_id}_{task_id}.log"
@@ -185,6 +207,7 @@ def run_autonomous(
     variant: str = None,
     pool_size: int = 8,
     extend_caps: bool = False,
+    max_ticks: int = 2000,
 ):
     """Run a mission autonomously with a parallel supervisor loop.
 
@@ -321,6 +344,15 @@ def run_autonomous(
             task_metrics[tid].reviewer_started = datetime.now(timezone.utc).isoformat()
             task_metrics[tid].review_attempts += 1
 
+        inject_message = check_inject_queue(engine.state.mission_id, tid)
+        if inject_message:
+            injected_line = f"[USER INSTRUCTION] {inject_message}"
+            print(injected_line)
+            with open(sp, "a", encoding="utf-8") as _sf:
+                _sf.write(injected_line + "\n")
+                _sf.flush()
+            action.context = f"{injected_line}\n\n{action.context}"
+
         fut = executor.submit(
             _run_agent, action.context, _wdir, timeout,
             resolved_agent, effective_model, sp, eff_variant, session_id,
@@ -418,7 +450,6 @@ def run_autonomous(
                 engine._save()
 
     tick = 0
-    max_ticks = 500   # short ticks now — many more needed
     idle_ticks = 0
 
     with ThreadPoolExecutor(max_workers=eff_pool) as executor:
@@ -459,6 +490,7 @@ def run_autonomous(
             else:
                 idle_ticks = 0
 
+            # Print after _submit so newly dispatched tasks are counted
             active = len(in_flight)
             if tick % 5 == 0 and active:
                 print(f"  [tick {tick}] {active} agent(s) running: {list(in_flight)}")
@@ -471,6 +503,19 @@ def run_autonomous(
                 print(f"  ▶  Mission resumed.")
 
             time.sleep(2)  # supervisor poll interval
+
+    # Warn if we exited only because the tick limit was reached
+    if tick >= max_ticks and not engine.is_done() and not engine.is_failed():
+        approved = sum(1 for ts in engine.state.task_states.values() if ts.status == "approved")
+        total = len(engine.spec.tasks)
+        print(
+            f"\n⚠  Tick limit ({max_ticks}) reached — mission is NOT complete.\n"
+            f"   Completed {approved}/{total} tasks.\n"
+            f"   Resume with:\n"
+            f"     python3 -m agentforce.autonomous {mission_id}\n"
+            f"   Or raise the limit:\n"
+            f"     python3 -m agentforce.autonomous --max-ticks {max_ticks * 2} {mission_id}\n"
+        )
 
     # Build final metrics
     end = datetime.now(timezone.utc)
@@ -559,11 +604,19 @@ if __name__ == "__main__":
              "retry/intervention limits above current counters. Use when resuming "
              "a mission blocked by wall_time, interventions, or retry limits.",
     )
+    p.add_argument(
+        "--max-ticks",
+        type=int,
+        default=2000,
+        metavar="N",
+        help="Maximum supervisor loop ticks before stopping (default: 2000). "
+             "Increase for long-running missions.",
+    )
     a = p.parse_args()
 
     success = run_autonomous(
         a.mission_id, a.workdir,
         agent=a.agent, model=a.model, variant=a.variant, pool_size=a.pool_size,
-        extend_caps=a.extend_caps,
+        extend_caps=a.extend_caps, max_ticks=a.max_ticks,
     )
     sys.exit(0 if success else 1)

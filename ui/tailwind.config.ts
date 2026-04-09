@@ -24,7 +24,12 @@ export default {
         'red-bg': '#2d0f0f',
         purple: '#9b7dff',
         'purple-bg': '#1f1045',
-        teal: '#2dd4bf'
+        teal: '#2dd4bf',
+        'teal-bg': '#082b2a',
+        cyan: '#22d3ee',
+        'cyan-bg': '#061a1f',
+        'glow-cyan': 'rgba(34,211,238,0.15)',
+        'glow-green': 'rgba(46,204,138,0.15)'
       }
     }
   },
