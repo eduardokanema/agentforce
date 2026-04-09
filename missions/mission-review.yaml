@@ -1,0 +1,1006 @@
+mission:
+  name: "Mission Review — DORA-Inspired Retrospectives"
+  goal: |
+    Build a post-mission retrospective system that computes DORA-inspired metrics from
+    MissionState data, runs four Claude persona agents (Quality Champion, Devil's Advocate,
+    Innovation Scout, Philosopher) to generate structured retrospective insights, synthesizes
+    action items, and persists lessons learned into the memory system.
+
+    Includes anti-gaming safeguards (Goodhart's Law): a composite quality score gates
+    efficiency metrics so that token or cost reductions never count unless quality >= 7.0.
+    A Goodhart detector warns when efficiency improves while quality drops.
+
+    Exposed via CLI (`mission review <id> [--model MODEL] [--approve] [--skip]`) and HTTP API
+    (`GET/POST /api/mission/{id}/review`). Three opt-out layers: global config, per-mission
+    YAML cap, and runtime --skip flag.
+
+    Grounded in:
+    - Accelerate (Forsgren, Humble, Kim) — DORA metrics, learning culture, fast feedback
+    - Goodhart's Law — "When a measure becomes a target, it ceases to be a good measure"
+    - Team Topologies — cognitive load reduction, flow efficiency
+
+  definition_of_done:
+    - "agentforce/review/ package exists with __init__.py, models.py, collector.py, personas.py, reviewer.py, memory_writer.py"
+    - "MetricsSnapshot dataclass has all 8 metrics, quality_score, efficiency_gated, data_quality_warnings"
+    - "MetricsCollector.collect() handles zero-division, missing timestamps, zero token fields"
+    - "4 persona configs defined in PERSONA_CONFIGS; build_persona_prompt() injects prior history from review 2 onward"
+    - "MissionReviewer.review() resolves model from connectors; applies 60s timeout per call with graceful degradation"
+    - "ReviewMemoryWriter uses versioned baseline keys review:metrics:{iso_date}, retains last 5"
+    - "CLI: mission review <id> --model MODEL --approve --skip works end-to-end"
+    - "API: GET /api/mission/{id}/review returns cached JSON or 404; POST triggers review or 429 if reviewed < 5min ago"
+    - "Caps dataclass in agentforce/core/spec.py has review: str = 'enabled' field"
+    - "Global opt-out via ~/.agentforce/config.json review_enabled: false"
+    - "All new tests pass: pytest tests/review/ -v with >= 80% coverage"
+    - "Full test suite passes: pytest tests/ -v with zero regressions"
+
+  caps:
+    max_concurrent_workers: 2
+    max_retries_per_task: 3
+    max_retries_global: 15
+    max_wall_time_minutes: 120
+    max_human_interventions: 3
+    review: enabled
+
+  working_dir: "/Users/rent/Projects/agentforce"
+
+tasks:
+  - id: "01"
+    title: "Data models, Caps.review field, and global config opt-out"
+    description: |
+      In /Users/rent/Projects/agentforce:
+
+      1. Create agentforce/review/__init__.py:
+           from .models import ReviewReport, RetroItem, ActionItem, MetricsSnapshot, GoodhartWarning
+           from .collector import MetricsCollector
+           __all__ = [
+               "ReviewReport", "RetroItem", "ActionItem", "MetricsSnapshot",
+               "GoodhartWarning", "MetricsCollector",
+           ]
+
+      2. Create agentforce/review/models.py with these dataclasses following the exact
+         patterns of agentforce/core/state.py (field defaults, Optional typing, to_dict/from_dict):
+
+         from __future__ import annotations
+         from dataclasses import dataclass, field
+         from datetime import datetime, timezone
+         from pathlib import Path
+         from typing import Optional
+         import json
+
+         @dataclass
+         class MetricsSnapshot:
+             mission_id: str
+             computed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+             # 8 DORA-inspired metrics
+             token_efficiency: float = 0.0       # tokens_out / tasks_completed
+             first_pass_rate: float = 0.0        # tasks approved without retry / total
+             rework_rate: float = 0.0            # total_retries / total_tasks
+             avg_review_score: float = 0.0       # mean of reviewed task scores (0-10)
+             human_escalation_rate: float = 0.0  # human_interventions / total_tasks
+             wall_time_per_task_s: float = 0.0   # wall_time / tasks_completed
+             cost_per_task_usd: float = 0.0      # total_cost / tasks_completed
+             review_rejection_rate: float = 0.0  # rejections / (approved + rejected) events
+             # Composite scores
+             quality_score: float = 0.0          # 0-10 composite
+             efficiency_gated: Optional[float] = None  # token_efficiency if quality >= 7.0
+             # Data quality
+             data_quality_warnings: list[str] = field(default_factory=list)
+             # Totals
+             tasks_completed: int = 0
+             tasks_total: int = 0
+             total_retries: int = 0
+             total_human_interventions: int = 0
+             total_cost_usd: float = 0.0
+             total_tokens_out: int = 0
+             total_wall_time_s: float = 0.0
+
+             def to_dict(self) -> dict: ...
+             @classmethod
+             def from_dict(cls, d: dict) -> MetricsSnapshot: ...
+
+         @dataclass
+         class GoodhartWarning:
+             metric_name: str
+             metric_direction: str       # "improved" or "degraded"
+             quality_direction: str      # always "degraded"
+             message: str
+             baseline_quality: float = 0.0
+             current_quality: float = 0.0
+             baseline_metric: float = 0.0
+             current_metric: float = 0.0
+
+             def to_dict(self) -> dict: ...
+
+         @dataclass
+         class RetroItem:
+             persona: str                    # "quality_champion", "devils_advocate", etc.
+             category: str                   # "went_well", "not_well", "should_try", "puzzles_us"
+             insight: str = ""
+             supporting_evidence: list[str] = field(default_factory=list)
+             confidence: float = 0.5
+
+             def to_dict(self) -> dict: ...
+             @classmethod
+             def from_dict(cls, d: dict) -> RetroItem: ...
+
+         @dataclass
+         class ActionItem:
+             id: str
+             action_type: str  # "roadmap_feature" (⚠ never auto-execute), "memory_entry", "process_improvement"
+             title: str = ""
+             description: str = ""
+             priority: str = "medium"  # "high", "medium", "low"
+             source_personas: list[str] = field(default_factory=list)
+             source_insights: list[str] = field(default_factory=list)
+             approved: bool = False
+             # For memory_entry type only:
+             memory_scope: str = ""        # "global" or "project"
+             memory_key: str = ""
+             memory_value: str = ""
+             memory_category: str = ""    # "lesson" or "convention"
+
+             def to_dict(self) -> dict: ...
+             @classmethod
+             def from_dict(cls, d: dict) -> ActionItem: ...
+
+         @dataclass
+         class ReviewReport:
+             mission_id: str
+             mission_name: str = ""
+             generated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+             metrics: Optional[MetricsSnapshot] = None
+             goodhart_warnings: list[GoodhartWarning] = field(default_factory=list)
+             retro_items: list[RetroItem] = field(default_factory=list)
+             action_items: list[ActionItem] = field(default_factory=list)
+             raw_persona_outputs: dict[str, str] = field(default_factory=dict)
+             review_cost_usd: float = 0.0
+             skipped: bool = False
+
+             def to_dict(self) -> dict: ...
+             @classmethod
+             def from_dict(cls, d: dict) -> ReviewReport: ...
+             def save(self, path: Path | str) -> None:
+                 # create parent dirs, write JSON
+             @classmethod
+             def load(cls, path: Path | str) -> ReviewReport: ...
+
+      3. Update agentforce/core/spec.py — add to Caps dataclass:
+           review: str = "enabled"  # "enabled" or "disabled"
+         Add to Caps.to_dict() and from_dict() with default "enabled".
+
+      4. Update agentforce/core/engine.py — in mission completion logic (is_done/is_failed),
+         after logging "mission_completed" or "mission_failed", log a "review_skipped" event
+         if self.state.spec.caps.review == "disabled".
+
+      5. Add global config helpers in agentforce/review/models.py or a new
+         agentforce/review/config.py:
+           AGENTFORCE_HOME = Path("~/.agentforce").expanduser()
+           def is_review_enabled() -> bool:
+               config_file = AGENTFORCE_HOME / "config.json"
+               if not config_file.exists():
+                   return True
+               return json.loads(config_file.read_text()).get("review_enabled", True)
+
+      All to_dict/from_dict implementations must survive a round-trip:
+        assert ReviewReport.from_dict(report.to_dict()) == report  (using __eq__)
+      Implement __eq__ on all dataclasses.
+    acceptance_criteria:
+      - "agentforce/review/__init__.py exports MetricsSnapshot, GoodhartWarning, RetroItem, ActionItem, ReviewReport, MetricsCollector"
+      - "agentforce/review/models.py defines all 5 dataclasses with to_dict/from_dict/save/load"
+      - "ReviewReport.save() creates parent directory if needed and writes valid JSON"
+      - "ReviewReport round-trips through to_dict/from_dict without data loss"
+      - "MetricsSnapshot.quality_score formula: ((avg_review_score/10)*0.4 + first_pass_rate*0.3 + (1-human_escalation_rate)*0.3) * 10"
+      - "Caps dataclass has review: str = 'enabled' field serialized in to_dict/from_dict"
+      - "is_review_enabled() returns False when config.json has review_enabled=false"
+    tdd:
+      test_file: "tests/review/test_models.py"
+      test_command: "pytest tests/review/test_models.py -v --tb=short"
+      tests_must_pass: true
+      coverage_threshold: 90
+    output_artifacts:
+      - "agentforce/review/__init__.py"
+      - "agentforce/review/models.py"
+      - "agentforce/core/spec.py (updated — Caps.review field)"
+      - "agentforce/core/engine.py (updated — review_skipped event)"
+      - "tests/review/__init__.py"
+      - "tests/review/test_models.py"
+
+  - id: "02"
+    title: "Metrics collector with Goodhart detection"
+    description: |
+      In /Users/rent/Projects/agentforce, create agentforce/review/collector.py.
+
+      from agentforce.core.state import MissionState, TaskStatus
+      from agentforce.review.models import MetricsSnapshot, GoodhartWarning
+
+      class MetricsCollector:
+
+          @staticmethod
+          def collect(state: MissionState) -> MetricsSnapshot:
+              """Extract all 8 metrics from a MissionState.
+
+              EDGE CASES — all must be handled:
+              - 0 total tasks → all rates = 0.0, no division
+              - 0 completed tasks → per-task metrics = 0.0
+              - All task.tokens_out == 0 → use state.tokens_out/tasks_completed fallback,
+                add "per-task token fields are zero; using mission-level fallback" warning
+              - Fewer than 2 tasks have review_score > 0 → add data_quality_warning
+              - No review events in event_log → review_rejection_rate = 0.0
+              - Task missing started_at or completed_at → skip that task in wall time
+
+              METRIC COMPUTATIONS:
+              - tasks_completed = count(status == REVIEW_APPROVED)
+              - first_pass = count(status == REVIEW_APPROVED AND retries == 0)
+              - first_pass_rate = first_pass / total_tasks  (not / tasks_completed)
+              - rework_rate = state.total_retries / total_tasks
+              - avg_review_score: mean of review_score for tasks where
+                  review_score > 0 AND status in {REVIEW_APPROVED, FAILED}
+                  (FAILED tasks that received a review before failing count)
+              - human_escalation_rate = state.total_human_interventions / total_tasks
+              - wall_time: for each task with both started_at and completed_at,
+                  parse with datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                  sum durations; divide by tasks_completed
+              - cost_per_task_usd:
+                  task_costs = sum(ts.cost_usd for ts in state.task_states.values())
+                  if task_costs > 0: use task_costs / tasks_completed
+                  else: use state.cost_usd / tasks_completed (mission-level fallback)
+              - token_efficiency:
+                  task_tokens = sum(ts.tokens_out for ts in state.task_states.values())
+                  if task_tokens > 0: use task_tokens / tasks_completed
+                  else: use state.tokens_out / tasks_completed (fallback + warning)
+              - review_rejection_rate:
+                  approved = count(e for e in state.event_log if e.event_type == "review_approved")
+                  rejected = count(e for e in state.event_log if e.event_type == "review_rejected")
+                  total = approved + rejected
+                  rate = rejected / total if total > 0 else 0.0
+              - quality_score = ((avg_review_score/10)*0.4 + first_pass_rate*0.3 +
+                                  (1 - human_escalation_rate)*0.3) * 10
+              - efficiency_gated = token_efficiency if quality_score >= 7.0 else None
+              """
+
+          @staticmethod
+          def compute_quality_score(avg_review_score: float, first_pass_rate: float,
+                                     human_escalation_rate: float) -> float:
+              """Composite quality score on 0-10 scale."""
+
+          @staticmethod
+          def gate_efficiency(token_efficiency: float, quality_score: float) -> float | None:
+              """Return token_efficiency only if quality_score >= 7.0, else None."""
+
+          @staticmethod
+          def detect_goodhart(current: MetricsSnapshot,
+                               baseline: MetricsSnapshot) -> list[GoodhartWarning]:
+              """Compare current metrics against a baseline. Emit GoodhartWarning when:
+              1. token_efficiency improved (decreased) AND quality_score decreased
+              2. cost_per_task_usd improved (decreased) AND avg_review_score decreased
+              3. first_pass_rate improved (increased) AND human_escalation_rate also increased
+              4. wall_time_per_task_s improved (decreased) AND review_rejection_rate increased
+              Use a 2% threshold to filter noise: only flag if delta > 2% in each direction.
+              """
+
+      Write tests in tests/review/test_collector.py covering:
+      - Happy path: realistic 4-task MissionState → verify all 8 metrics correct values
+      - Zero tasks: MetricsCollector.collect() on empty mission returns all zeros
+      - Zero completed tasks: returns zeros without crashing
+      - Missing timestamps: tasks with None started_at/completed_at excluded from wall time
+      - Zero token fields on tasks: fallback to mission-level, data_quality_warning present
+      - review_rejection_rate: event_log with 3 approved + 1 rejected → 0.25
+      - quality_score formula correctness
+      - efficiency_gated: None when quality < 7.0, float when quality >= 7.0
+      - detect_goodhart: fires warning when efficiency up + quality down (>2% delta)
+      - detect_goodhart: no warning when both improve together
+    acceptance_criteria:
+      - "MetricsCollector.collect() returns MetricsSnapshot for normal mission"
+      - "Zero-division: 0 tasks, 0 completed, no reviews all return 0.0"
+      - "Token fallback: all task.tokens_out==0 uses state.tokens_out, adds warning"
+      - "avg_review_score excludes tasks with review_score==0 or status PENDING/IN_PROGRESS"
+      - "quality_score = ((avg_review_score/10)*0.4 + first_pass_rate*0.3 + (1-escalation)*0.3) * 10"
+      - "efficiency_gated is None when quality_score < 7.0"
+      - "detect_goodhart fires when efficiency improves but quality drops by > 2%"
+      - "detect_goodhart does NOT fire when both efficiency and quality improve"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/review/test_collector.py"
+      test_command: "pytest tests/review/test_collector.py -v --tb=short"
+      tests_must_pass: true
+      coverage_threshold: 90
+    output_artifacts:
+      - "agentforce/review/collector.py"
+      - "tests/review/test_collector.py"
+
+  - id: "03"
+    title: "Persona prompt templates and JSON response parser"
+    description: |
+      In /Users/rent/Projects/agentforce, create agentforce/review/personas.py.
+
+      from agentforce.core.state import MissionState
+      from agentforce.review.models import MetricsSnapshot, RetroItem
+
+      PERSONA_CONFIGS: dict[str, dict] = {
+          "quality_champion": {
+              "category": "went_well",
+              "display_name": "Quality Champion",
+              "system_prompt": """You are the Quality Champion in an AgentForce mission retrospective.
+      Your role is to identify what went WELL. Focus on:
+      - Tasks that passed review on the first attempt (0 retries, high score)
+      - Patterns in acceptance criteria that were well-specified
+      - Memory context or agent instructions that helped workers succeed
+      - High review scores (>= 8/10) — what made the reviewer approve?
+      - TDD patterns that caught issues early
+
+      Analyze the mission data below. Produce 3-5 specific insights grounded in the data.
+      For each, cite the specific task ID, metric value, or event log entry as evidence.
+      Do NOT produce generic advice. Every insight must reference actual numbers or events.
+
+      RESPOND WITH VALID JSON ONLY — no prose before or after:
+      {"insights": [{"insight": "...", "supporting_evidence": ["task_id:01 score=9 retries=0", "..."], "confidence": 0.9}]}""",
+          },
+          "devils_advocate": {
+              "category": "not_well",
+              "display_name": "Devil's Advocate",
+              "system_prompt": """You are the Devil's Advocate in an AgentForce mission retrospective.
+      Your role is to identify what did NOT go well. Focus on:
+      - Tasks that required retries: what caused the worker to fail?
+      - Low review scores (< 7): what patterns in review feedback indicate?
+      - Human escalations: what did the agent fail to handle autonomously?
+      - Caps that were hit: what resource constraints caused problems?
+      - Blocking issues in review_feedback: recurring patterns?
+
+      Analyze the mission data below. Produce 3-5 specific insights grounded in the data.
+      For each, cite the specific task ID, metric value, or event log entry as evidence.
+      Do NOT produce generic advice. Every insight must reference actual numbers or events.
+
+      RESPOND WITH VALID JSON ONLY — no prose before or after:
+      {"insights": [{"insight": "...", "supporting_evidence": ["task_id:02 retries=3", "..."], "confidence": 0.85}]}""",
+          },
+          "innovation_scout": {
+              "category": "should_try",
+              "display_name": "Innovation Scout",
+              "system_prompt": """You are the Innovation Scout in an AgentForce mission retrospective.
+      Your role is to propose actionable experiments. Focus on:
+      - Cap adjustments: would higher/lower retry limits, wall time, or concurrency help?
+      - Task granularity: should large tasks be split to reduce rework?
+      - Acceptance criteria improvements: what made criteria hard to verify?
+      - Memory entries: what lessons should be stored to prevent repeated mistakes?
+      - Model selection: are expensive models used where cheaper ones would suffice?
+
+      Analyze the mission data below. Produce 3-5 specific, testable proposals.
+      Each must be actionable and reference data from this mission (not generic advice).
+
+      RESPOND WITH VALID JSON ONLY — no prose before or after:
+      {"insights": [{"insight": "proposal", "supporting_evidence": ["rework_rate=0.6", "..."], "confidence": 0.7}]}""",
+          },
+          "philosopher": {
+              "category": "puzzles_us",
+              "display_name": "Philosopher",
+              "system_prompt": """You are the Philosopher in an AgentForce mission retrospective.
+      Your role is to surface anomalies, paradoxes, and unexplained patterns. Focus on:
+      - Tasks with high review scores but many retries (or vice versa): why?
+      - Metrics that contradict each other (e.g., low cost but high wall time)
+      - Human escalations that seem avoidable in retrospect
+      - Event log sequences that suggest systemic issues (e.g., always failing on task N)
+      - Correlations between token usage and quality that defy expectations
+
+      Analyze the mission data below. Produce 2-4 thought-provoking puzzles.
+      Frame each as a question or anomaly worth investigating further.
+
+      RESPOND WITH VALID JSON ONLY — no prose before or after:
+      {"insights": [{"insight": "puzzle or anomaly", "supporting_evidence": ["..."], "confidence": 0.6}]}""",
+          },
+      }
+
+      def build_persona_prompt(
+          persona_key: str,
+          metrics: MetricsSnapshot,
+          state: MissionState,
+          prior_history: list[str] | None = None,
+      ) -> tuple[str, str]:
+          """Build (system_prompt, user_message) for a persona.
+
+          user_message must include:
+          1. Mission context: name, goal (first 200 chars), completed_at
+          2. Metrics table: all 8 metrics, quality_score, efficiency_gated status
+             If metrics has a baseline (non-zero baseline fields), show delta: "0.4 (↓0.1 vs baseline)"
+          3. Per-task breakdown table:
+             task_id | title (truncated 40 chars) | status | retries | score | cost_usd | tokens_out
+          4. Last 50 event_log entries: "timestamp | event_type | task_id | details"
+          5. Caps hit (if any): "caps_hit: {cap}: {description}"
+          6. Prior history (only if prior_history is not None and not empty):
+             "Prior 3 action items from last review: [item1, item2, item3]"
+          """
+
+      def parse_persona_response(raw: str, persona_key: str) -> list[RetroItem]:
+          """Parse Claude's JSON response into list[RetroItem].
+
+          Use backward-scanning JSON parser (same approach as autonomous._parse_reviewer_output()):
+          - Scan from end of raw string to find last '}', then find matching '{'
+          - Try json.loads() on that substring
+          - Validate it has "insights" key with list value
+          - Map each insight to RetroItem(persona=persona_key, category=PERSONA_CONFIGS[...]["category"], ...)
+
+          On any failure: return [RetroItem(
+              persona=persona_key,
+              category=PERSONA_CONFIGS[persona_key]["category"],
+              insight=raw[:500],
+              confidence=0.3
+          )]
+          """
+
+      Tests in tests/review/test_personas.py:
+      - All 4 persona keys exist in PERSONA_CONFIGS
+      - Each has "category", "display_name", "system_prompt" keys
+      - system_prompt for each explicitly contains "RESPOND WITH VALID JSON"
+      - build_persona_prompt returns non-empty (system, user) tuple
+      - user_message contains metrics values, task breakdown, event entries
+      - user_message includes prior_history when provided, omits it when None
+      - parse_persona_response: valid JSON → list of RetroItem with correct persona/category
+      - parse_persona_response: JSON embedded in prose → extracts correctly
+      - parse_persona_response: malformed JSON → returns single fallback RetroItem confidence=0.3
+      - parse_persona_response: empty string → returns single fallback RetroItem
+    acceptance_criteria:
+      - "PERSONA_CONFIGS has exactly 4 keys: quality_champion, devils_advocate, innovation_scout, philosopher"
+      - "Each persona has category, display_name, system_prompt fields"
+      - "build_persona_prompt() returns non-empty (system, user) tuple for all 4 personas"
+      - "user_message includes metrics table, per-task breakdown, and last 50 events"
+      - "prior_history injected when provided; absent when prior_history=None"
+      - "parse_persona_response() returns list[RetroItem] from valid JSON"
+      - "parse_persona_response() returns fallback RetroItem(confidence=0.3) on parse failure"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/review/test_personas.py"
+      test_command: "pytest tests/review/test_personas.py -v --tb=short"
+      tests_must_pass: true
+      coverage_threshold: 80
+    output_artifacts:
+      - "agentforce/review/personas.py"
+      - "tests/review/test_personas.py"
+
+  - id: "04"
+    title: "Review orchestrator with model resolution and resilience"
+    description: |
+      In /Users/rent/Projects/agentforce, create agentforce/review/reviewer.py.
+
+      from anthropic import Anthropic
+      from agentforce.core.state import MissionState
+      from agentforce.memory.memory import Memory
+      from agentforce.review.collector import MetricsCollector
+      from agentforce.review.models import (
+          ReviewReport, RetroItem, ActionItem, MetricsSnapshot, GoodhartWarning
+      )
+      from agentforce.review.personas import PERSONA_CONFIGS, build_persona_prompt, parse_persona_response
+
+      AGENTFORCE_HOME = Path(os.path.expanduser("~/.agentforce"))
+
+      def _resolve_model(requested_model: str | None) -> str:
+          """Resolve the model to use for review.
+          Order: requested_model > connectors config > fallback 'claude-sonnet-4-5'
+
+          Check connectors by reading ~/.agentforce/connectors.json for active LLM connectors.
+          Currently only "anthropic" connector provides a model. Read its configured model if set,
+          otherwise return "claude-sonnet-4-5".
+          """
+
+      def _get_anthropic_client() -> Anthropic:
+          """Get Anthropic client. Uses ANTHROPIC_API_KEY env var (set by connector config)."""
+          return Anthropic()
+
+      class MissionReviewer:
+
+          def __init__(
+              self,
+              memory: Memory,
+              state_dir: Path | None = None,
+              review_dir: Path | None = None,
+          ):
+              self.memory = memory
+              self.state_dir = state_dir or (AGENTFORCE_HOME / "state")
+              self.review_dir = review_dir or (AGENTFORCE_HOME / "reviews")
+
+          def review(self, mission_id: str, model: str | None = None) -> ReviewReport:
+              """Run a full review for a mission.
+
+              Steps:
+              1. Load MissionState from state_dir/{mission_id}.json
+              2. MetricsCollector.collect(state) → MetricsSnapshot
+              3. Load baseline: _load_baseline(mission_id) → MetricsSnapshot | None
+              4. detect_goodhart(current, baseline) if baseline exists
+              5. Load prior history: last 3 action item summaries from memory
+                 memory.project_get(mission_id, "review:actions:last3") → parse JSON list
+              6. resolved_model = _resolve_model(model)
+              7. client = _get_anthropic_client()
+              8. total_cost = 0.0
+              For each persona in ["quality_champion", "devils_advocate",
+                                    "innovation_scout", "philosopher"]:
+                  a. system, user = build_persona_prompt(key, metrics, state, prior_history)
+                  b. try:
+                       response = client.messages.create(
+                           model=resolved_model,
+                           max_tokens=2000,
+                           system=system,
+                           messages=[{"role": "user", "content": user}],
+                           timeout=60.0
+                       )
+                       raw = response.content[0].text
+                       if hasattr(response, "usage"):
+                           # Approximate cost: input*0.000003 + output*0.000015 for Sonnet
+                           total_cost += (response.usage.input_tokens * 3 +
+                                          response.usage.output_tokens * 15) / 1_000_000
+                     except Exception as e:
+                       raw = ""  # graceful degradation — empty retro items for this persona
+                  c. raw_outputs[persona_key] = raw
+                  d. items = parse_persona_response(raw, persona_key)
+                  e. all_retro_items.extend(items)
+              9. action_items = _synthesize_actions(all_retro_items, metrics, client, resolved_model)
+              10. total_cost += synthesis_cost
+              11. Assemble ReviewReport
+              12. review_dir.mkdir(parents=True, exist_ok=True)
+                  report.save(review_dir / f"{mission_id}_review.json")
+              13. _save_baseline(mission_id, metrics)
+              14. _update_action_history(mission_id, action_items[:3])
+              15. Return report
+              """
+
+          def _synthesize_actions(
+              self,
+              retro_items: list[RetroItem],
+              metrics: MetricsSnapshot,
+              client: Anthropic,
+              model: str,
+          ) -> tuple[list[ActionItem], float]:
+              """5th LLM call: synthesize action items from all persona insights.
+
+              Prompt asks Claude for JSON:
+              {"action_items": [{
+                "action_type": "roadmap_feature|memory_entry|process_improvement",
+                "title": "...",
+                "description": "...",
+                "priority": "high|medium|low",
+                "source_personas": ["quality_champion"],
+                "source_insights": ["insight text"],
+                "memory_scope": "global|project",  // for memory_entry only
+                "memory_key": "review:{mission_id}:{short_desc}",  // for memory_entry
+                "memory_value": "...",               // for memory_entry
+                "memory_category": "lesson|convention"  // for memory_entry
+              }]}
+
+              NOTE in prompt: "roadmap_feature items must NOT be auto-executed.
+              The YAML must be reviewed and approved by a human before running."
+
+              Returns (action_items, cost_usd). On failure returns ([], 0.0).
+              Use same 60s timeout and graceful degradation pattern.
+              """
+
+          def _load_baseline(self, mission_id: str) -> MetricsSnapshot | None:
+              """Load most recent metrics baseline from memory.
+              Keys follow pattern review:metrics:{iso_date}.
+              Find all project keys with this prefix, sort descending, return latest."""
+
+          def _save_baseline(self, mission_id: str, metrics: MetricsSnapshot) -> None:
+              """Store metrics as versioned baseline.
+              Key: review:metrics:{metrics.computed_at}
+              Also prune: keep only last 5 keys matching review:metrics:* prefix."""
+
+          def _update_action_history(self, mission_id: str, items: list[ActionItem]) -> None:
+              """Store last 3 action item titles+types for injection into next review.
+              Key: review:actions:last3
+              Value: JSON list of "{priority} [{type}] {title}" strings."""
+
+          def _load_state(self, mission_id: str) -> MissionState:
+              """Load MissionState from JSON. Raise FileNotFoundError if missing."""
+
+      Write tests/review/test_reviewer.py with a MockAnthropicClient that:
+      - Accepts model, max_tokens, system, messages, timeout params
+      - Returns a mock response with .content[0].text set to valid persona JSON
+      - Has .usage with input_tokens=1000, output_tokens=500
+      Verify:
+      - review() returns ReviewReport with all sections populated
+      - 4 persona prompts + 1 synthesis = 5 total client calls
+      - If one persona call raises Exception, review continues (graceful degradation)
+      - ReviewReport is saved to review_dir
+      - Baseline is stored in memory after review
+      - prior_history is None on first review, populated on second
+    acceptance_criteria:
+      - "MissionReviewer.review() returns complete ReviewReport"
+      - "Model resolved from connectors if not explicitly provided"
+      - "5 Anthropic API calls made: 4 personas + 1 synthesis"
+      - "Single persona failure does not abort review (graceful degradation)"
+      - "ReviewReport saved to review_dir/{mission_id}_review.json"
+      - "Metrics baseline stored in memory with versioned key"
+      - "review_cost_usd is non-zero and reflects API usage"
+      - "All tests use mock Anthropic client (no real API calls)"
+    dependencies:
+      - "02"
+      - "03"
+    tdd:
+      test_file: "tests/review/test_reviewer.py"
+      test_command: "pytest tests/review/test_reviewer.py -v --tb=short"
+      tests_must_pass: true
+      coverage_threshold: 80
+    output_artifacts:
+      - "agentforce/review/reviewer.py"
+      - "tests/review/test_reviewer.py"
+
+  - id: "05"
+    title: "Memory writer with versioned baselines and approval flow"
+    description: |
+      In /Users/rent/Projects/agentforce, create agentforce/review/memory_writer.py.
+
+      from agentforce.memory.memory import Memory
+      from agentforce.review.models import ReviewReport, ActionItem
+
+      class ReviewMemoryWriter:
+          """Persist approved action items into the Memory system."""
+
+          def __init__(self, memory: Memory):
+              self.memory = memory
+
+          def write_approved_items(self, report: ReviewReport) -> int:
+              """Write all ActionItems where approved==True to memory.
+              Returns count of items written.
+
+              For action_type == "memory_entry":
+                if memory_scope == "global":
+                  memory.global_set(item.memory_key, item.memory_value, item.memory_category)
+                elif memory_scope == "project":
+                  memory.project_set(report.mission_id, item.memory_key,
+                                      item.memory_value, item.memory_category)
+
+              For action_type == "process_improvement":
+                key = f"process:{report.mission_id}:{item.id}"
+                memory.global_set(key, item.description, category="convention")
+
+              For action_type == "roadmap_feature":
+                key = f"roadmap:{report.mission_id}:{item.id}"
+                memory.project_set(report.mission_id, key, item.description, category="lesson")
+
+              Skip items where approved==False.
+              """
+
+          def approve_item(self, report: ReviewReport, item_id: str) -> bool:
+              """Set approved=True on the matching ActionItem. Returns True if found."""
+
+          def approve_all(self, report: ReviewReport) -> int:
+              """Set approved=True on all ActionItems. Returns count approved."""
+
+          def prune_baselines(self, mission_id: str, keep: int = 5) -> None:
+              """Remove baseline keys older than the most recent `keep` entries.
+              Keys to prune: project memory keys matching "review:metrics:*" prefix.
+              Use memory.project_dump(mission_id) to find all keys, sort by timestamp
+              in key name (ISO format sorts lexicographically), keep last `keep`, delete rest.
+              Since Memory has no delete method, overwrite old keys with empty string or
+              re-implement by rewriting the JSON file directly using Memory._project_path().
+              """
+
+      Update agentforce/review/__init__.py to also export ReviewMemoryWriter.
+
+      Tests in tests/review/test_memory_writer.py:
+      - write_approved_items: unapproved items are skipped (0 written)
+      - write_approved_items: memory_entry with scope=global writes to global memory
+      - write_approved_items: memory_entry with scope=project writes to project memory
+      - write_approved_items: process_improvement writes to global with key "process:{id}:{item_id}"
+      - write_approved_items: roadmap_feature writes to project with key "roadmap:{id}:{item_id}"
+      - write_approved_items: returns correct count
+      - approve_item: returns True when found, False when not found
+      - approve_all: returns count of all items
+      - After approve_all + write_approved_items: all items are in memory
+    acceptance_criteria:
+      - "write_approved_items writes memory_entry items to correct global/project scope"
+      - "write_approved_items writes process_improvement to global memory"
+      - "write_approved_items writes roadmap_feature to project memory"
+      - "Unapproved items are never written"
+      - "approve_item returns True if found, False if not"
+      - "approve_all returns count of all action items"
+      - "agentforce/review/__init__.py exports ReviewMemoryWriter"
+    dependencies:
+      - "04"
+    tdd:
+      test_file: "tests/review/test_memory_writer.py"
+      test_command: "pytest tests/review/test_memory_writer.py -v --tb=short"
+      tests_must_pass: true
+      coverage_threshold: 90
+    output_artifacts:
+      - "agentforce/review/memory_writer.py"
+      - "agentforce/review/__init__.py (updated with ReviewMemoryWriter export)"
+      - "tests/review/test_memory_writer.py"
+
+  - id: "06"
+    title: "CLI subcommand and API endpoints with opt-out controls"
+    description: |
+      In /Users/rent/Projects/agentforce:
+
+      1. Update agentforce/cli/cli.py — add the `review` subcommand.
+
+         Read cli.py first to understand the existing subcommand registration pattern.
+         Add a new cmd_review function and register it. Follow the exact same pattern as
+         existing cmd_ functions (use argparse sub.add_parser, add to cmds dict).
+
+         def cmd_review(args):
+             """Run a mission retrospective."""
+             from agentforce.review.config import is_review_enabled
+             if not is_review_enabled():
+                 print("Mission Review is disabled globally. Enable it in ~/.agentforce/config.json")
+                 return
+
+             if args.skip:
+                 # Write sentinel file ~/.agentforce/reviews/{mission_id}_skipped
+                 skip_file = AGENTFORCE_HOME / "reviews" / f"{args.id}_skipped"
+                 skip_file.parent.mkdir(parents=True, exist_ok=True)
+                 skip_file.touch()
+                 print(f"Review skipped for mission {args.id}")
+                 return
+
+             sf = _find_state(args.id)  # existing helper in cli.py
+             if not sf:
+                 print(f"Mission not found: {args.id}", file=sys.stderr)
+                 sys.exit(1)
+
+             memory = _memory()  # existing helper
+             from agentforce.review.reviewer import MissionReviewer
+             from agentforce.review.memory_writer import ReviewMemoryWriter
+
+             reviewer = MissionReviewer(memory=memory)
+             report = reviewer.review(sf.stem, model=args.model or None)
+
+             # Print metrics summary
+             m = report.metrics
+             print(f"\n=== Mission Review: {report.mission_name} ===")
+             print(f"Quality Score:       {m.quality_score:.1f}/10")
+             print(f"First-Pass Rate:     {m.first_pass_rate:.0%}")
+             print(f"Rework Rate:         {m.rework_rate:.2f}")
+             print(f"Avg Review Score:    {m.avg_review_score:.1f}/10")
+             print(f"Human Escalation:    {m.human_escalation_rate:.0%}")
+             print(f"Wall Time/Task:      {m.wall_time_per_task_s:.0f}s")
+             print(f"Cost/Task:           ${m.cost_per_task_usd:.4f}")
+             print(f"Review Rejection:    {m.review_rejection_rate:.0%}")
+             if m.efficiency_gated is not None:
+                 print(f"Token Efficiency:    {m.efficiency_gated:.0f} tokens/task")
+             else:
+                 print(f"Token Efficiency:    GATED (quality < 7.0)")
+             if m.data_quality_warnings:
+                 print(f"\nData Quality Warnings:")
+                 for w in m.data_quality_warnings:
+                     print(f"  * {w}")
+             if report.goodhart_warnings:
+                 print(f"\n=== GOODHART WARNINGS ===")
+                 for w in report.goodhart_warnings:
+                     print(f"  WARNING: {w.message}")
+             for persona in ["quality_champion", "devils_advocate", "innovation_scout", "philosopher"]:
+                 items = [i for i in report.retro_items if i.persona == persona]
+                 cfg = __import__("agentforce.review.personas", fromlist=["PERSONA_CONFIGS"]).PERSONA_CONFIGS
+                 if items:
+                     print(f"\n--- {cfg[persona]['display_name']} ---")
+                     for item in items:
+                         print(f"  [{item.confidence:.0%}] {item.insight}")
+             if report.action_items:
+                 print(f"\n=== Action Items ({len(report.action_items)}) ===")
+                 for ai in report.action_items:
+                     print(f"  [{ai.priority.upper()}] [{ai.action_type}] {ai.title}")
+                     print(f"    {ai.description[:120]}")
+             print(f"\nReview cost: ${report.review_cost_usd:.4f}")
+             print(f"Report: ~/.agentforce/reviews/{sf.stem}_review.json")
+
+             if args.approve:
+                 writer = ReviewMemoryWriter(memory)
+                 writer.approve_all(report)
+                 count = writer.write_approved_items(report)
+                 print(f"\nApproved and wrote {count} action items to memory.")
+
+         Register:
+           p = sub.add_parser("review", help="run mission retrospective review")
+           p.add_argument("id", help="mission ID or partial name")
+           p.add_argument("--model", help="model to use (default: from connectors config)")
+           p.add_argument("--approve", action="store_true", help="approve and persist all action items")
+           p.add_argument("--skip", action="store_true", help="skip review for this mission")
+           cmds["review"] = cmd_review
+
+      2. Update agentforce/server/handler.py — add review API routes.
+
+         Read handler.py first to understand the existing route pattern. Add after the
+         existing mission detail routes, following the exact same if/elif pattern.
+
+         In _handle_api() (GET routes), add before the fallthrough:
+           # GET /api/mission/{id}/review
+           if len(parts) == 4 and parts[0] == "api" and parts[1] == "mission" and parts[3] == "review":
+               mission_id = parts[2]
+               review_file = AGENTFORCE_HOME / "reviews" / f"{mission_id}_review.json"
+               skip_file = AGENTFORCE_HOME / "reviews" / f"{mission_id}_skipped"
+               if skip_file.exists():
+                   self._json({"skipped": True, "mission_id": mission_id})
+                   return
+               if not review_file.exists():
+                   self._json({"error": "No review found. POST to /api/mission/{id}/review to generate."}, status=404)
+                   return
+               import json as _j
+               self._json(_j.loads(review_file.read_text()))
+               return
+
+         In do_POST(), add the route dispatch:
+           if len(parts) == 4 and parts[1] == "mission" and parts[3] == "review":
+               self._post_mission_review(parts[2], body)
+               return
+
+         Add method:
+           def _post_mission_review(self, mission_id: str, body: dict):
+               from agentforce.review.config import is_review_enabled
+               if not is_review_enabled():
+                   self._json({"error": "Review disabled globally"}, status=403)
+                   return
+
+               # Rate limit: 429 if reviewed < 5 minutes ago
+               review_file = AGENTFORCE_HOME / "reviews" / f"{mission_id}_review.json"
+               if review_file.exists():
+                   import time as _t
+                   age_s = _t.time() - review_file.stat().st_mtime
+                   if age_s < 300:
+                       self._json({"error": f"Review too recent ({age_s:.0f}s ago). Wait 5 minutes."}, status=429)
+                       return
+
+               if body.get("skip"):
+                   skip_file = AGENTFORCE_HOME / "reviews" / f"{mission_id}_skipped"
+                   skip_file.parent.mkdir(parents=True, exist_ok=True)
+                   skip_file.touch()
+                   self._json({"skipped": True})
+                   return
+
+               sf = STATE_DIR / f"{mission_id}.json"
+               if not sf.exists():
+                   self._json({"error": f"Mission {mission_id!r} not found"}, status=404)
+                   return
+
+               from agentforce.memory.memory import Memory
+               from agentforce.review.reviewer import MissionReviewer
+               memory = Memory(AGENTFORCE_HOME / "memory")
+               reviewer = MissionReviewer(memory=memory)
+               model = body.get("model") or None
+               try:
+                   report = reviewer.review(mission_id, model=model)
+                   self._json(report.to_dict())
+               except Exception as exc:
+                   self._json({"error": str(exc)}, status=500)
+
+         NOTE: Also create agentforce/review/config.py (if not already in models.py):
+           from pathlib import Path
+           import json
+           AGENTFORCE_HOME = Path("~/.agentforce").expanduser()
+           def is_review_enabled() -> bool:
+               f = AGENTFORCE_HOME / "config.json"
+               return json.loads(f.read_text()).get("review_enabled", True) if f.exists() else True
+
+      Write tests/review/test_integration.py covering:
+      - CLI: mission review --skip writes sentinel file and prints skip message
+      - CLI: mission review --approve calls write_approved_items
+      - API GET: 404 when no review exists
+      - API GET: 200 with JSON when review file exists
+      - API GET: {"skipped": true} when sentinel file exists
+      - API POST: 404 when mission state not found
+      - API POST: 429 when review file exists and is < 300s old
+      - API POST: 403 when is_review_enabled() returns False
+      Use a real temporary directory for all file operations. Mock MissionReviewer.review().
+    acceptance_criteria:
+      - "mission review <id> --skip writes sentinel file and exits cleanly"
+      - "mission review <id> prints all metric sections to stdout"
+      - "mission review <id> --approve calls write_approved_items and prints count"
+      - "GET /api/mission/{id}/review returns 404 when no review file"
+      - "GET /api/mission/{id}/review returns JSON when file exists"
+      - "POST /api/mission/{id}/review returns 429 when reviewed < 5 min ago"
+      - "POST /api/mission/{id}/review returns 404 for unknown mission"
+      - "POST /api/mission/{id}/review {"skip": true} writes sentinel file"
+    dependencies:
+      - "05"
+    tdd:
+      test_file: "tests/review/test_integration.py"
+      test_command: "pytest tests/review/test_integration.py -v --tb=short"
+      tests_must_pass: true
+      coverage_threshold: 70
+    output_artifacts:
+      - "agentforce/cli/cli.py (updated — review subcommand)"
+      - "agentforce/server/handler.py (updated — GET/POST /api/mission/{id}/review)"
+      - "agentforce/review/config.py (if not already in models.py)"
+      - "tests/review/test_integration.py"
+
+  - id: "07"
+    title: "End-to-end tests and full test suite verification"
+    description: |
+      In /Users/rent/Projects/agentforce:
+
+      1. Create tests/review/test_e2e.py with a comprehensive end-to-end test.
+
+         Build a realistic MissionState with 4 tasks and populated event_log:
+           Task 01: status=REVIEW_APPROVED, retries=0, review_score=9,
+                     tokens_out=5000, cost_usd=0.012,
+                     started_at="2026-04-08T10:00:00Z", completed_at="2026-04-08T10:05:00Z"
+           Task 02: status=REVIEW_APPROVED, retries=2, review_score=7,
+                     tokens_out=12000, cost_usd=0.031,
+                     started_at="2026-04-08T10:00:00Z", completed_at="2026-04-08T10:15:00Z"
+           Task 03: status=FAILED, retries=3, review_score=0,
+                     human_intervention_needed=True,
+                     started_at="2026-04-08T10:00:00Z", completed_at=None
+           Task 04: status=REVIEW_APPROVED, retries=0, review_score=10,
+                     tokens_out=3000, cost_usd=0.008,
+                     started_at="2026-04-08T10:00:00Z", completed_at="2026-04-08T10:08:00Z"
+
+         Set mission-level:
+           total_retries=5, total_human_interventions=1
+           tokens_out=20000, cost_usd=0.051
+
+         Event log entries:
+           mission_started, 4x task_dispatched, 4x task_completed,
+           2x review_rejected (for task 02 retries), 3x review_approved,
+           1x human_intervention
+
+         TEST: verify MetricsCollector.collect():
+           - tasks_completed == 3
+           - tasks_total == 4
+           - first_pass_rate == 0.5  (tasks 01 and 04 approved with 0 retries / 4 total)
+           - rework_rate == 5/4 == 1.25
+           - avg_review_score == (9+7+10)/3 == 8.67  (task 03 excluded, score=0)
+           - human_escalation_rate == 1/4 == 0.25
+           - token_efficiency == (5000+12000+3000) / 3 == 6666.7  (task-level tokens available)
+           - review_rejection_rate == 2/5 == 0.4  (2 rejections, 3 approvals)
+           - quality_score == ((8.67/10)*0.4 + 0.5*0.3 + (1-0.25)*0.3) * 10 == 6.97 approx
+           - efficiency_gated == None  (quality_score < 7.0)
+
+         TEST: Goodhart detection
+           baseline = MetricsSnapshot(mission_id="base", quality_score=8.0,
+                                       avg_review_score=8.5, token_efficiency=8000.0)
+           current = MetricsSnapshot(mission_id="curr", quality_score=6.5,
+                                      avg_review_score=6.5, token_efficiency=5000.0)
+           warnings = MetricsCollector.detect_goodhart(current, baseline)
+           assert len(warnings) >= 1
+           assert any(w.metric_name == "token_efficiency" for w in warnings)
+           # efficiency improved (8000→5000) but quality degraded (8.0→6.5)
+
+         TEST: Data quality warnings
+           Set all task.tokens_out = 0, set state.tokens_out = 20000
+           metrics = MetricsCollector.collect(state)
+           assert "per-task token fields are zero" in " ".join(metrics.data_quality_warnings)
+           assert metrics.token_efficiency == 20000/3  # mission-level fallback
+
+         TEST: Full ReviewReport round-trip
+           report = ReviewReport(mission_id="test-01", mission_name="Test")
+           report.save(tmp_path / "test_review.json")
+           loaded = ReviewReport.load(tmp_path / "test_review.json")
+           assert loaded == report
+
+         TEST: ReviewMemoryWriter
+           Create a ReviewReport with 2 approved action_items:
+             one memory_entry (scope=project, key="review:test:lesson1", value="Use TDD")
+             one process_improvement
+           writer.write_approved_items(report) returns 2
+           Verify memory.project_get(report.mission_id, "review:test:lesson1") == "Use TDD"
+
+      2. Update agentforce/review/__init__.py with final exports:
+           from .models import ReviewReport, RetroItem, ActionItem, MetricsSnapshot, GoodhartWarning
+           from .collector import MetricsCollector
+           from .reviewer import MissionReviewer
+           from .memory_writer import ReviewMemoryWriter
+           __all__ = [
+               "ReviewReport", "RetroItem", "ActionItem", "MetricsSnapshot",
+               "GoodhartWarning", "MetricsCollector", "MissionReviewer", "ReviewMemoryWriter",
+           ]
+
+      3. Run full test suite:
+           pytest tests/ -v --tb=short
+         Fix any failures before considering this task complete.
+         All existing tests (test_api_routes.py, test_ws.py, test_new_endpoints.py, etc.)
+         must continue to pass — no regressions allowed.
+    acceptance_criteria:
+      - "E2E test verifies all 8 metric values for the 4-task scenario"
+      - "Goodhart detection test confirms warning when efficiency improves but quality drops"
+      - "Data quality warning test confirms fallback to mission-level tokens"
+      - "ReviewReport round-trip test passes"
+      - "ReviewMemoryWriter test verifies correct memory writes"
+      - "Full test suite passes: pytest tests/ -v — zero failures"
+      - "agentforce/review/__init__.py exports all 4 public classes"
+    dependencies:
+      - "06"
+    tdd:
+      test_file: "tests/review/test_e2e.py"
+      test_command: "pytest tests/ -v --tb=short"
+      tests_must_pass: true
+      coverage_threshold: 80
+    output_artifacts:
+      - "tests/review/test_e2e.py"
+      - "agentforce/review/__init__.py (final exports)"

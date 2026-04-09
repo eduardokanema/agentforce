@@ -1,0 +1,983 @@
+mission:
+  name: "AgentForce UI — Space Mission Control Redesign"
+  goal: |
+    Transform the AgentForce UI from a minimal dashboard into a space mission control center.
+    The backend already exists (handler.py + ws.py using Python stdlib http.server) with 3 GET
+    API endpoints, WebSocket, SSE streaming, and SPA serving. The React UI is functional with
+    all base components and pages. This mission extends both with: rich design system (Space
+    Grotesk, JetBrains Mono, cyan HUD aesthetic), Plan Mode (prompt→YAML via Claude API),
+    per-task model selection, stop/restart/inject controls, real-time token/cost tracking,
+    retry visualization, Connectors secret management (keyring), and a Telemetry dashboard.
+  definition_of_done:
+    - "handler.py has do_POST and handles all new endpoints (stop/restart/inject/resolve/plan/missions/connectors/telemetry)"
+    - "GET /api/models returns list with at least claude-sonnet-4-5"
+    - "POST /api/mission/:id/stop and restart work correctly"
+    - "POST /api/mission/:id/task/:tid/inject writes inject file and returns 409 when not in_progress"
+    - "GET /api/connectors returns active status without exposing secret values"
+    - "GET /api/telemetry returns aggregate stats JSON"
+    - "UI renders Space Grotesk headings and JetBrains Mono terminal"
+    - "HUD background CSS grid is visible on body"
+    - "Sidebar with Mission Control, Plan Mode, Connectors, Telemetry navigation"
+    - "HudBar shows active missions, running tasks, total cost, WS status, live clock"
+    - "Mission cards show cost, workspace path, stop/restart actions on hover"
+    - "Plan Mode converts text prompt to editable mission YAML with per-task model assignment"
+    - "Task Detail has ANSI terminal with virtual scroll and retry history tabs"
+    - "Review Panel renders Markdown feedback with score badge"
+    - "Connectors page stores tokens via keyring, never exposes raw secrets"
+    - "Telemetry page shows cross-mission cost/token/retry aggregate metrics"
+    - "npm run build produces ui/dist/ with zero TypeScript errors"
+    - "scripts/smoke_test.sh exits 0 (all endpoints respond correctly)"
+  caps:
+    max_concurrent_workers: 2
+    max_retries_per_task: 2
+    max_retries_global: 10
+    max_wall_time_minutes: 180
+    max_human_interventions: 3
+  working_dir: "/Users/rent/Projects/agentforce"
+
+tasks:
+  - id: "00"
+    title: "Add backend and frontend dependencies"
+    description: |
+      BACKEND: Update pyproject.toml to add dependencies needed for new features.
+      Add to [project] dependencies: "anthropic>=0.40", "keyring>=25.0", "cryptography>=42.0"
+      Do NOT add fastapi or uvicorn — the server uses Python stdlib http.server (already working).
+      Run: pip install -e ".[dev]" to verify all deps install cleanly.
+
+      FRONTEND: Install new npm packages in ui/:
+        npm install marked@^15 dompurify@^3 @fontsource/space-grotesk @fontsource/jetbrains-mono @tanstack/virtual@^3
+        npm install --save-dev @types/dompurify
+
+      Verify: cat ui/package.json shows new deps; pip show anthropic exits 0.
+    acceptance_criteria:
+      - "pyproject.toml has anthropic>=0.40, keyring>=25.0, cryptography>=42.0 in dependencies"
+      - "pip install -e . completes without errors"
+      - "ui/node_modules/@tanstack/virtual directory exists"
+      - "ui/node_modules/@fontsource/space-grotesk directory exists"
+      - "ui/node_modules/marked directory exists"
+      - "ui/node_modules/dompurify directory exists"
+    output_artifacts:
+      - "pyproject.toml"
+
+  - id: "01"
+    title: "TokenLedger and token fields on state"
+    description: |
+      Create /Users/rent/Projects/agentforce/agentforce/core/token_ledger.py.
+      Class TokenLedger with:
+        - parse_usage_line(line: str) -> dict | None
+          Parses JSON lines like: {"type":"usage","input_tokens":N,"output_tokens":N,"cost_usd":F}
+          Returns None for non-usage lines or malformed JSON.
+        - add(task_id: str, tokens_in: int, tokens_out: int, cost_usd: float)
+          Accumulates per-task totals in a dict.
+        - task_totals(task_id: str) -> dict
+          Returns {"tokens_in": N, "tokens_out": N, "cost_usd": F} (zeros if unknown task).
+        - mission_totals() -> dict
+          Returns aggregate {"tokens_in": N, "tokens_out": N, "cost_usd": F} across all tasks.
+        - reset_task(task_id: str): clears task entry.
+
+      Update /Users/rent/Projects/agentforce/agentforce/core/state.py:
+        - Add to TaskState dataclass: tokens_in: int = 0, tokens_out: int = 0, cost_usd: float = 0.0
+        - Add to MissionState dataclass: tokens_in: int = 0, tokens_out: int = 0, cost_usd: float = 0.0
+        - Ensure to_dict() and to_summary_dict() include these new fields
+        - Ensure load() / from_dict() can deserialize these fields (with default 0 for backwards compat)
+
+      Write tests in tests/test_token_ledger.py.
+    acceptance_criteria:
+      - "TokenLedger.parse_usage_line correctly extracts tokens from usage JSON lines"
+      - "TokenLedger.parse_usage_line returns None for non-usage lines"
+      - "TokenLedger.mission_totals sums across all tasks correctly"
+      - "TaskState and MissionState serialize/deserialize tokens_in, tokens_out, cost_usd"
+      - "Existing MissionState.load() on old JSON files without token fields uses defaults of 0"
+      - "pytest tests/test_token_ledger.py -v passes"
+    tdd:
+      test_file: "tests/test_token_ledger.py"
+      test_command: "pytest tests/test_token_ledger.py -v"
+      tests_must_pass: true
+    dependencies:
+      - "00"
+    output_artifacts:
+      - "agentforce/core/token_ledger.py"
+      - "agentforce/core/state.py (updated)"
+      - "tests/test_token_ledger.py"
+
+  - id: "02"
+    title: "Inject prompt queue in autonomous.py"
+    description: |
+      Update /Users/rent/Projects/agentforce/agentforce/autonomous.py to support
+      mid-execution prompt injection via file queue.
+
+      Add helper function:
+        def check_inject_queue(mission_id: str, task_id: str) -> str | None:
+          path = Path(f"~/.agentforce/state/{mission_id}/{task_id}.inject").expanduser()
+          If file exists: read JSON {"message": str, "timestamp": str}, delete file, return message.
+          If file missing or malformed: return None (never raise).
+
+      Call check_inject_queue between tool calls / delegation steps in the worker loop.
+      When a message is returned, prepend it to the next agent turn as:
+        "[USER INSTRUCTION] {message}"
+      This must also be written to the agent's stdout stream so the SSE reader picks it up.
+
+      Write tests in tests/test_inject_queue.py using pytest tmp_path fixture to simulate the file.
+    acceptance_criteria:
+      - "check_inject_queue returns None when no inject file exists"
+      - "check_inject_queue returns message string and deletes the file when present"
+      - "Malformed JSON in inject file returns None without exception"
+      - "pytest tests/test_inject_queue.py -v passes"
+    tdd:
+      test_file: "tests/test_inject_queue.py"
+      test_command: "pytest tests/test_inject_queue.py -v"
+      tests_must_pass: true
+    dependencies:
+      - "00"
+    output_artifacts:
+      - "agentforce/autonomous.py (updated)"
+      - "tests/test_inject_queue.py"
+
+  - id: "03"
+    title: "Extend handler.py with POST endpoints, new GETs, and WS cost events"
+    description: |
+      IMPORTANT: The backend uses Python stdlib http.server.ThreadingHTTPServer in
+      agentforce/server/handler.py — NOT FastAPI. Extend the existing DashboardHandler class.
+      Do NOT replace the server or switch frameworks.
+
+      1. ADD do_POST method to DashboardHandler:
+         Route dispatch based on self.path (same pattern as _handle_api):
+
+         POST /api/missions
+           Read JSON body: {"yaml": str}
+           Parse YAML, create MissionState, save to STATE_DIR, start autonomous runner in background thread
+           Return {"id": mission_id, "status": "started"}
+
+         POST /api/plan
+           Read JSON body: {"prompt": str, "approved_models": list[str], "workspace": str}
+           Use anthropic client to generate mission YAML from prompt (streaming)
+           Return as SSE (text/event-stream): each chunk as "data: {chunk}\n\n", end with "data: [DONE]\n\n"
+           System prompt should instruct Claude to output valid YAML in the AgentForce mission format.
+
+         POST /api/mission/<id>/stop
+           Load mission state, set all in_progress tasks to status=blocked, save state
+           Return {"stopped": true}
+
+         POST /api/mission/<id>/restart
+           Load mission state, re-queue tasks with status in {failed, blocked, review_rejected} → set to pending
+           Clear their worker_output. Save state. Broadcast mission_list update.
+           Return {"requeued": N}
+
+         POST /api/mission/<id>/task/<tid>/stop
+           Set task status to blocked, save state, broadcast
+           Return {"stopped": true}
+
+         POST /api/mission/<id>/task/<tid>/retry
+           Set task status to pending, clear worker_output, increment retry_count, save state
+           Return {"retrying": true}
+
+         POST /api/mission/<id>/task/<tid>/inject
+           If task status != in_progress: return 409 {"error": "task not in_progress"}
+           Write {"message": body["message"], "timestamp": now_iso} to
+             ~/.agentforce/state/<id>/<tid>.inject
+           Return {"delivered": true}
+
+         POST /api/mission/<id>/task/<tid>/resolve
+           Read body: {"message": str}
+           Set task status from needs_human → pending, append message to worker_output, save state
+           Return {"resolved": true}
+
+         POST /api/connectors/<name>/configure
+           Read body: {"token": str}
+           Store via keyring.set_password("agentforce", name, token)
+           Update ~/.agentforce/connectors.json metadata: {name: {active: true, last_configured: now_iso}}
+           Return {"configured": true}
+
+         POST /api/connectors/<name>/test
+           Load token from keyring, make a minimal test request for the connector type
+           (For unknown connectors: just check token is non-empty)
+           Return {"ok": true} or {"ok": false, "error": str}
+
+      2. ADD new GET routes to _handle_api:
+
+         GET /api/models
+           Return hardcoded list:
+           [
+             {"id": "claude-opus-4-5", "name": "Claude Opus 4.5", "provider": "Anthropic",
+              "cost_per_1k_input": 0.015, "cost_per_1k_output": 0.075, "latency_label": "Powerful"},
+             {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "provider": "Anthropic",
+              "cost_per_1k_input": 0.003, "cost_per_1k_output": 0.015, "latency_label": "Standard"},
+             {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "provider": "Anthropic",
+              "cost_per_1k_input": 0.00025, "cost_per_1k_output": 0.00125, "latency_label": "Fast"}
+           ]
+
+         GET /api/mission/<id>/task/<tid>/attempts
+           Load mission state, return list of attempt records from task_state.
+           If task_state has no attempt history field, return [{attempt: 1, output: worker_output}].
+           Return: [{"attempt_number": N, "output": str, "review": str|null, "score": int|null}]
+
+         GET /api/connectors
+           Load ~/.agentforce/connectors.json (create if missing, default {})
+           For each known connector name, check keyring.get_password("agentforce", name) is not None
+           Return: [{"name": str, "display_name": str, "active": bool, "last_configured": str|null}]
+           Known connector names: github, slack, linear, sentry, notion, anthropic
+
+         GET /api/telemetry
+           Load all missions, aggregate:
+           - total_missions, total_tasks, total_cost_usd, total_tokens_in, total_tokens_out
+           - missions_by_cost: sorted desc by cost_usd (top 5)
+           - tasks_by_cost: sorted desc by cost_usd across all missions (top 5)
+           - retry_distribution: {"0": N, "1": N, "2+": N}
+           Return as JSON
+
+      3. ADD DELETE support (do_DELETE):
+         DELETE /api/connectors/<name>
+           keyring.delete_password("agentforce", name) (ignore if not set)
+           Remove from connectors.json metadata
+           Return {"deleted": true}
+
+      4. EXTEND ws.py with new broadcast functions:
+         broadcast_mission_cost_update(mission_id, tokens_in, tokens_out, cost_usd)
+         broadcast_task_cost_update(mission_id, task_id, tokens_in, tokens_out, cost_usd)
+         broadcast_task_attempt_start(mission_id, task_id, attempt_number)
+
+      5. Add CORS headers to do_POST and do_DELETE (Access-Control-Allow-Origin: *)
+         Add do_OPTIONS handler returning 200 with CORS headers for preflight.
+
+      Write tests in tests/test_new_endpoints.py covering the key new routes.
+    acceptance_criteria:
+      - "GET /api/models returns JSON array with 3 Claude models"
+      - "GET /api/connectors returns JSON array with 6 connectors"
+      - "GET /api/telemetry returns JSON with total_missions key (can be 0)"
+      - "POST /api/mission/:id/task/:tid/inject returns 409 when task not in_progress"
+      - "POST /api/mission/:id/restart returns {requeued: N}"
+      - "POST /api/connectors/github/configure stores via keyring and returns {configured: true}"
+      - "DELETE /api/connectors/github returns {deleted: true}"
+      - "ws.py has broadcast_mission_cost_update function"
+      - "pytest tests/test_new_endpoints.py -v passes"
+      - "All existing tests still pass: pytest tests/test_api_routes.py tests/test_ws.py -v"
+    tdd:
+      test_file: "tests/test_new_endpoints.py"
+      test_command: "pytest tests/test_new_endpoints.py tests/test_api_routes.py -v"
+      tests_must_pass: true
+    dependencies:
+      - "01"
+      - "02"
+    output_artifacts:
+      - "agentforce/server/handler.py (extended)"
+      - "agentforce/server/ws.py (extended)"
+      - "tests/test_new_endpoints.py"
+
+  - id: "04"
+    title: "Design system — Space Grotesk, JetBrains Mono, cyan HUD, animations"
+    description: |
+      Transform the UI design system. The current system uses Inter font and has basic
+      color tokens in style.css @theme block. Extend and replace:
+
+      1. ui/src/main.tsx — add font imports at top:
+         import '@fontsource/space-grotesk/400.css'
+         import '@fontsource/space-grotesk/600.css'
+         import '@fontsource/jetbrains-mono/400.css'
+
+      2. ui/tailwind.config.ts — extend colors object with:
+         cyan: '#22d3ee'
+         'cyan-bg': '#061a1f'
+         'glow-cyan': 'rgba(34,211,238,0.15)'
+         'glow-green': 'rgba(46,204,138,0.15)'
+         (keep all existing colors: bg, surface, card, card-hover, border, border-lit, text, dim,
+          muted, blue, green, amber, red, purple, teal and their -bg variants)
+
+      3. ui/src/style.css — comprehensive overhaul:
+         a) Font variables in @theme block:
+            --font-sans: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif
+            --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace
+         b) Update body font-family to var(--font-sans)
+         c) HUD grid background on body (position: relative):
+            body::before {
+              content: ''; position: fixed; inset: 0; pointer-events: none; z-index: -1;
+              background-image:
+                repeating-linear-gradient(rgba(34,211,238,0.04) 0 1px, transparent 1px 60px),
+                repeating-linear-gradient(90deg, rgba(34,211,238,0.04) 0 1px, transparent 1px 60px);
+            }
+            body::after {
+              content: ''; position: fixed; inset: 0; pointer-events: none; z-index: -1;
+              background: radial-gradient(ellipse 80% 60% at 50% 0%, transparent 40%, #090d18 100%);
+            }
+         d) Animation keyframes:
+            @keyframes pulse-glow { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+            @keyframes scan-line { 0% { top: -4px; } 100% { top: 100%; } }
+            @keyframes data-blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+         e) CSS variables: --anim-fast:150ms --anim-mid:300ms --anim-slow:600ms
+         f) Typography utility classes:
+            .text-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; }
+            .text-hero { font-size: 32px; font-weight: 700; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+    acceptance_criteria:
+      - "npm run build (cd ui && npm run build) completes without errors"
+      - "Space Grotesk is referenced in main.tsx imports"
+      - "tailwind.config.ts has cyan, cyan-bg, glow-cyan, glow-green entries"
+      - "style.css has @keyframes pulse-glow, scan-line, data-blink defined"
+      - "style.css has body::before with repeating-linear-gradient for grid"
+    dependencies:
+      - "00"
+    output_artifacts:
+      - "ui/src/main.tsx (updated)"
+      - "ui/src/style.css (updated)"
+      - "ui/tailwind.config.ts (updated)"
+
+  - id: "05"
+    title: "App shell — Sidebar, HudBar, LiveClock, new routes"
+    description: |
+      Create 3 new components and update App.tsx.
+
+      ui/src/components/LiveClock.tsx:
+        export default React.memo(function LiveClock() {
+          - useState for time string (HH:MM:SS)
+          - useEffect: setInterval 1000ms → update state → clear on unmount
+          - Render: <span className="font-mono text-[11px] text-dim tabular-nums">{time}</span>
+        })
+
+      ui/src/components/HudBar.tsx:
+        - Fixed top bar: className="fixed top-0 inset-x-0 h-10 z-30 flex items-center
+          px-4 gap-6 border-b border-border bg-[#0d1525]/90 backdrop-blur-sm"
+        - Left: <span className="font-bold tracking-[0.15em] text-[13px] text-cyan">AGENTFORCE</span>
+          + version badge (text-[10px] text-muted border border-border rounded px-1.5)
+        - Center (flex-1 flex justify-center gap-6 text-[11px] text-dim):
+          Pulls from useMissionList hook: shows "{N} ACTIVE | {M} TASKS | ${cost.toFixed(2)} TODAY"
+          (N = missions with status active/in_progress, M = count of in_progress tasks across missions)
+          (cost = sum of cost_usd from all missions)
+        - Right (flex items-center gap-3):
+          WS status dot: when open → w-2 h-2 rounded-full bg-green animate-[pulse-glow_2s_ease-in-out_infinite]
+          When connecting/closed → bg-amber (no animation)
+          Uses wsClient.onConnectionState() same pattern as ConnectionBanner
+          + <LiveClock />
+
+      ui/src/components/Sidebar.tsx:
+        - Fixed left sidebar with collapse toggle stored in localStorage('sidebar-collapsed')
+        - Collapsed: w-14, Expanded: w-48; transition-all duration-200
+        - Toggle button at top: chevron icon (← / →) as text or SVG
+        - Nav items array: [{label:'Mission Control', icon:'⌘', to:'/'}, {label:'Plan Mode', icon:'◈', to:'/plan'},
+          {label:'Connectors', icon:'⬡', to:'/connectors'}, {label:'Telemetry', icon:'◎', to:'/telemetry'}]
+        - Each NavLink: active state = bg-[#061a1f] border-l-2 border-cyan text-cyan
+          inactive = text-dim hover:text-text hover:bg-card
+        - Collapsed: show only icon centered; Expanded: icon + label
+        - Bottom: WS status dot (small) + version string when expanded
+
+      ui/src/App.tsx — update to:
+        - Layout: <div className="flex h-screen overflow-hidden bg-bg">
+            <Sidebar />
+            <div className="flex-1 flex flex-col min-w-0">
+              <HudBar />
+              <main className="flex-1 overflow-y-auto pt-10">
+                <div className="site-main"> {routes} </div>
+              </main>
+            </div>
+          </div>
+        - Remove <ConnectionBanner /> (replaced by Sidebar + HudBar WS indicators)
+        - Add routes: /plan → <PlanModePage />, /connectors → <ConnectorsPage />,
+          /telemetry → <TelemetryPage />
+        - Create stub pages for new routes (simple <div>Coming soon</div> with page-head)
+
+      Note: site-main has max-width 960px. For sidebar expanded (w-48=192px), the content
+      area narrows. This is fine — site-main centers within the remaining space.
+    acceptance_criteria:
+      - "npm run build passes with no TypeScript errors"
+      - "Sidebar renders with 4 nav items"
+      - "Sidebar collapse/expand toggle works and persists in localStorage"
+      - "HudBar renders at top with WS dot and live clock updating every second"
+      - "Navigating to /plan, /connectors, /telemetry renders stub pages without crash"
+      - "/mission/:id route still works"
+      - "ConnectionBanner is removed from the layout"
+    dependencies:
+      - "04"
+    output_artifacts:
+      - "ui/src/components/LiveClock.tsx"
+      - "ui/src/components/HudBar.tsx"
+      - "ui/src/components/Sidebar.tsx"
+      - "ui/src/App.tsx (updated)"
+      - "ui/src/pages/PlanModePage.tsx (stub)"
+      - "ui/src/pages/ConnectorsPage.tsx (stub)"
+      - "ui/src/pages/TelemetryPage.tsx (stub)"
+
+  - id: "06"
+    title: "Mission list — MissionCard, metrics strip, stop/restart actions"
+    description: |
+      Create ui/src/components/MissionCard.tsx:
+        Props: { mission: MissionSummary, onStop: () => void, onRestart: () => void }
+        - Container: relative group rounded-lg border border-border bg-card
+          overflow-hidden transition-shadow duration-200
+          hover:shadow-[0_0_0_1px_theme(colors.border-lit),0_4px_24px_theme(colors.glow-cyan)]
+        - Left accent bar: absolute left-0 top-0 bottom-0 w-0.5 (color by status:
+          in_progress→cyan, completed/review_approved→green, failed→red, default→border)
+        - Body: pl-5 pr-4 py-3 flex flex-col gap-2
+        - Header row: mission name (Link, text-[14px] font-semibold text-text hover:text-cyan) +
+          <StatusBadge status={mission.status} /> + elapsed time (live via useElapsedTime hook,
+          text-[11px] text-dim font-mono)
+        - Progress row: <MissionProgressBar pct={pct} /> with shimmer overlay when in_progress:
+          absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent
+          animate-[scan-line_2s_linear_infinite] (using overflow-hidden on wrapper)
+        - Stats row: text-[11px] text-dim flex gap-4:
+          "{done}/{total} tasks" | "{retries} retries" | "${cost_usd.toFixed(4)}" |
+          active task title truncated to 40 chars (or "—" if none)
+        - Footer row: workspace path chip (font-mono text-[10px] text-muted truncate max-w-[200px]) +
+          model chips (text-[10px] border border-border rounded-full px-1.5) +
+          created relative date
+        - Action buttons (opacity-0 group-hover:opacity-100 transition-opacity):
+          Stop ⏹ (text-red hover:bg-red/10) + Restart ↺ (text-amber hover:bg-amber/10)
+          Each calls onStop/onRestart after window.confirm() dialog
+
+      Update ui/src/pages/MissionsPage.tsx:
+        - Add <ConfirmDialog> component (inline simple version: use window.confirm for now)
+        - Global metrics strip above list (bg-surface border-b border-border py-2 px-4):
+          flex gap-6 text-[11px]: Total: N | Running: N | Done: N | Cost: $X.XX | Tokens: N
+          Values computed from missions array
+        - "+ New Mission" button top-right: Link to /plan, styled cyan
+        - Replace existing card markup with <MissionCard mission={m} onStop={...} onRestart={...} />
+        - onStop calls api.stopMission(id) then refreshes; onRestart calls api.restartMission(id)
+        - Empty state: "No missions yet. Launch one with Plan Mode →" with Link to /plan
+        - Loading skeleton: 3 placeholder cards with animate-pulse
+
+      Add to ui/src/lib/api.ts:
+        stopMission(id: string): Promise<void> — POST /api/mission/{id}/stop
+        restartMission(id: string): Promise<void> — POST /api/mission/{id}/restart
+
+      Add to ui/src/lib/types.ts (extend MissionSummary):
+        tokens_in?: number; tokens_out?: number; cost_usd?: number;
+        workspace?: string; models?: string[];
+
+      Add hook ui/src/hooks/useElapsedTime.ts:
+        useElapsedTime(startedAt: string | null | undefined): string
+        Returns formatted elapsed "1h 23m" or "45s", updates every 5s via setInterval.
+    acceptance_criteria:
+      - "MissionCard renders with left accent bar color matching status"
+      - "MissionCard hover shows glow shadow and action buttons"
+      - "Stop/Restart buttons show confirm dialog before calling API"
+      - "Metrics strip shows correct aggregated counts and cost"
+      - "Empty state renders with link to /plan when no missions"
+      - "npm run build passes"
+    dependencies:
+      - "05"
+      - "03"
+    output_artifacts:
+      - "ui/src/components/MissionCard.tsx"
+      - "ui/src/pages/MissionsPage.tsx (updated)"
+      - "ui/src/hooks/useElapsedTime.ts"
+      - "ui/src/lib/api.ts (updated)"
+      - "ui/src/lib/types.ts (updated)"
+
+  - id: "07"
+    title: "Mission detail — control bar, TokenMeter, task timeline view"
+    description: |
+      Create ui/src/components/TokenMeter.tsx:
+        Props: { tokensIn: number, tokensOut: number, costUsd: number, label?: string }
+        Render 3 chips in flex row:
+          "↓ {tokensIn.toLocaleString()} in" | "↑ {tokensOut.toLocaleString()} out" | "${costUsd.toFixed(4)}"
+        Chip style: bg-surface border border-border rounded-full px-3 py-0.5 font-mono text-[11px]
+        Cost chip: if costUsd > 0, add text-green
+
+      Update ui/src/pages/MissionDetailPage.tsx:
+        Replace StatsBar top section with enhanced header:
+        - Large mission title (text-title class)
+        - <StatusBadge> — if in_progress, add animate-[pulse-glow_2s_ease_infinite]
+        - Elapsed wall time (live) using useElapsedTime
+        - Workspace path chip (font-mono text-[11px] text-muted truncate)
+        - <TokenMeter tokensIn={...} tokensOut={...} costUsd={...} />
+
+        Mission Control Bar (flex gap-2 mb-6):
+          "Stop Mission" button: text-red border-red/30 hover:bg-red/10 — onClick: confirm + stopMission(id)
+          "Restart Mission" button: text-amber border-amber/30 hover:bg-amber/10 — onClick: confirm + restartMission(id)
+          Both: rounded border px-3 py-1 text-[12px] transition-colors
+
+        Task Timeline — replace flat <table> with CSS grid of task cards:
+          Grid: grid grid-cols-1 gap-2 (or 2 cols on wide screens)
+          Each task card (rounded border border-border bg-surface px-4 py-3 cursor-pointer hover:bg-card-hover):
+            - Left: task ID badge (monospace) + title (text-[13px] font-medium)
+            - Right: <StatusBadge> + retry badge (if retries>0: "↺{N}" in amber) + model chip
+            - Below: dependency chips "needs #01, #02" (text-[10px] text-muted border rounded-full px-1.5)
+            - in_progress tasks: add relative overflow-hidden + scan-line shimmer (same as MissionCard)
+              Only apply animation to first 5 in_progress tasks: check index in filter
+          onClick: navigate to /mission/:id/task/:tid
+
+        Event Log: keep EventLogTable but add a text input filter above it (filter by event_type substring)
+        Timestamps: show relative ("2s ago") with title attribute for absolute time
+
+        Subscribe to mission_cost_update WS events in useMission hook to update cost display live.
+        Add to ui/src/lib/ws.ts: register 'mission_cost_update' and 'task_cost_update' event types.
+    acceptance_criteria:
+      - "TokenMeter renders 3 chips with formatted values"
+      - "Mission control bar shows Stop + Restart with confirm dialogs"
+      - "Task timeline renders task cards in grid (not flat table)"
+      - "in_progress tasks have animated shimmer (first 5 only)"
+      - "Dependency chips show 'needs #01' etc."
+      - "Event log has working text filter"
+      - "npm run build passes"
+    dependencies:
+      - "06"
+    output_artifacts:
+      - "ui/src/components/TokenMeter.tsx"
+      - "ui/src/pages/MissionDetailPage.tsx (updated)"
+      - "ui/src/lib/ws.ts (updated — new event types)"
+      - "ui/src/hooks/useElapsedTime.ts (created in task 06, reused here)"
+
+  - id: "08"
+    title: "ANSI parser, stream line parser, Markdown renderer"
+    description: |
+      Create ui/src/lib/ansi.ts:
+        export type AnsiSpan = { text: string; style: React.CSSProperties }
+        export function parseAnsi(line: string): AnsiSpan[]
+          - Strip and parse ANSI escape sequences: \x1b[Xm codes
+          - Handle: 0 (reset), 1 (bold), 30-37 (fg colors), 90-97 (bright fg)
+          - Color map: 31/91→'#ff6b6b', 32/92→'#2ecc8a', 33/93→'#f0b429',
+                       34/94→'#4d94ff', 35/95→'#9b7dff', 36/96→'#22d3ee', 37/97→'#dde6f0'
+          - If no ANSI codes: return [{text: line, style: {}}]
+          - Properly handle multi-code sequences like \x1b[1;32m
+
+      Create ui/src/lib/streamParser.ts:
+        export type LineType = 'command'|'pass'|'fail'|'warn'|'inject'|'path'|'default'
+        export function parseStreamLine(line: string): { type: LineType; raw: string }
+          - 'inject': line starts with '[USER INSTRUCTION]'
+          - 'command': line starts with '$ ' or '❯ ' or '> '
+          - 'pass': line contains /PASS(ED)?|✓|✔/i or ends with ' ok'
+          - 'fail': line contains /FAIL(ED)?|ERROR|✗|✘/i
+          - 'warn': line contains /WARN(ING)?|⚠/i
+          - 'path': line contains a path-like pattern /\/[a-zA-Z0-9_./-]+\.[a-z]{1,5}/
+          - else: 'default'
+        export const LINE_CLASSES: Record<LineType, string>
+          'inject': 'bg-amber/10 border-l-2 border-amber text-amber'
+          'command': 'text-cyan opacity-90'
+          'pass': 'text-green'
+          'fail': 'text-red'
+          'warn': 'text-amber'
+          'path': 'text-dim'
+          'default': ''
+
+      Create ui/src/lib/markdown.ts:
+        import { marked } from 'marked'
+        import DOMPurify from 'dompurify'
+        marked.setOptions({ gfm: true, breaks: true })
+        export function renderMarkdown(md: string): string {
+          const raw = marked.parse(md) as string
+          return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true } })
+        }
+
+      Add unit tests in ui/src/lib/ansi.test.ts and ui/src/lib/streamParser.test.ts using vitest.
+    acceptance_criteria:
+      - "parseAnsi('\\x1b[32mhello\\x1b[0m') returns [{text:'hello',style:{color:'#2ecc8a'}}]"
+      - "parseAnsi('plain') returns [{text:'plain',style:{}}]"
+      - "parseStreamLine('$ npm test') returns {type:'command'}"
+      - "parseStreamLine('[USER INSTRUCTION] do this') returns {type:'inject'}"
+      - "parseStreamLine('PASSED 5 tests') returns {type:'pass'}"
+      - "renderMarkdown('# Hello') contains '<h1'"
+      - "renderMarkdown('<script>alert(1)</script>') does NOT contain '<script'"
+      - "npm run test passes (vitest)"
+    tdd:
+      test_file: "ui/src/lib/ansi.test.ts"
+      test_command: "cd ui && npm run test"
+      tests_must_pass: true
+    dependencies:
+      - "04"
+    output_artifacts:
+      - "ui/src/lib/ansi.ts"
+      - "ui/src/lib/streamParser.ts"
+      - "ui/src/lib/markdown.ts"
+      - "ui/src/lib/ansi.test.ts"
+      - "ui/src/lib/streamParser.test.ts"
+
+  - id: "09"
+    title: "Enhanced Terminal component with virtual scroll and ANSI"
+    description: |
+      Create ui/src/components/Terminal.tsx to REPLACE TerminalPanel.tsx.
+
+      Props: { lines: string[], done: boolean, className?: string }
+
+      Implementation:
+        1. Virtual scrollizer via @tanstack/virtual:
+           import { useVirtualizer } from '@tanstack/virtual'
+           const parentRef = useRef<HTMLDivElement>(null)
+           const virtualizer = useVirtualizer({
+             count: filteredLines.length,
+             getScrollElement: () => parentRef.current,
+             estimateSize: () => 20,
+             overscan: 30,
+           })
+
+        2. Filtered lines: useMemo — if searchQuery is empty, use lines; else filter by
+           line.toLowerCase().includes(searchQuery.toLowerCase())
+
+        3. Toolbar above terminal (flex items-center gap-2 mb-1 text-[11px]):
+           - Search input (flex-1): placeholder "Filter output..." px-2 py-0.5 bg-surface
+             border border-border rounded font-mono text-[11px] text-text
+           - Auto-scroll toggle button: "↓ Auto" (active, bg-cyan/10 text-cyan) / "↑ Manual"
+           - Copy button: "⎘ Copy" — onClick copies all lines.join('\n') to clipboard
+
+        4. Terminal container (ref=parentRef):
+           className: "bg-[#050810] rounded-lg border border-border font-mono text-[12px]
+                       leading-5 overflow-auto" style={{ height: '480px' }}
+
+        5. Virtual list inner div: style={{ height: virtualizer.getTotalSize(), position:'relative' }}
+           Each virtual item:
+             const line = filteredLines[item.index]
+             const { type } = parseStreamLine(line)
+             const spans = parseAnsi(line)
+             <div style={{ position:'absolute', top:item.start, left:0, right:0 }}
+                  className={`px-3 ${LINE_CLASSES[type]}`}>
+               {type==='inject' && <span className="text-[10px] font-bold mr-2 text-amber bg-amber/20 rounded px-1">[USER]</span>}
+               {spans.map((s, i) => <span key={i} style={s.style}>{s.text}</span>)}
+             </div>
+
+        6. Auto-scroll: useEffect on lines.length — if autoScroll, parentRef.current?.scrollTo(0, totalSize)
+
+        7. Active cursor: when !done, append a blinking _ to last line display
+           (add class animate-[data-blink_1s_step-end_infinite] to a <span>_</span> after last line)
+
+        8. When search query is active and no lines match, show "No matches for '{query}'"
+
+      After Terminal.tsx is working:
+        - Delete ui/src/components/TerminalPanel.tsx
+        - Update ui/src/pages/TaskDetailPage.tsx to import Terminal instead of TerminalPanel
+          (same props interface: lines + done)
+    acceptance_criteria:
+      - "Terminal renders 10,000 lines without browser freeze (only ~24 DOM rows visible)"
+      - "ANSI escape codes render as colored spans, not raw escape characters"
+      - "Search input filters displayed lines"
+      - "Auto-scroll toggle changes scroll behavior"
+      - "Copy button copies all lines text to clipboard"
+      - "[USER INSTRUCTION] lines render with amber [USER] badge"
+      - "npm run build passes"
+    dependencies:
+      - "08"
+    output_artifacts:
+      - "ui/src/components/Terminal.tsx"
+      - "ui/src/components/TerminalPanel.tsx (deleted)"
+      - "ui/src/pages/TaskDetailPage.tsx (updated import)"
+
+  - id: "10"
+    title: "RetryHistory tabs and ReviewPanel with Markdown"
+    description: |
+      Create ui/src/components/RetryHistory.tsx:
+        Props: { missionId: string, taskId: string, currentRetryCount: number }
+        - On mount: fetch GET /api/mission/:id/task/:tid/attempts
+        - State: attempts array, selectedAttempt index (default last)
+        - If only 1 attempt or loading fails: show "First attempt — no history"
+        - Tab row: for each attempt, render pill tab "Attempt {N}" (selected: bg-cyan-bg text-cyan border-cyan)
+        - Selected tab content:
+          <Terminal lines={attempt.output.split('\n')} done={true} />
+          If attempt has review: compact review summary (score badge + first 150 chars of feedback)
+        - Add to api.ts: getTaskAttempts(missionId, taskId) → GET /api/.../attempts
+
+      Create ui/src/components/ReviewPanel.tsx:
+        Props: { feedback: string, score: number, criteriaResults?: Record<string,string>,
+                 blockingIssues?: string[], suggestions?: string[] }
+        Layout:
+          - Score badge (60px circle): bg and text color by score
+            ≤4 → bg-red/10 text-red border-red/30
+            5-7 → bg-amber/10 text-amber border-amber/30
+            ≥8 → bg-green/10 text-green border-green/30
+            Text: {score}/10, font-bold text-xl
+            Add animate-[pulse-glow_3s_ease_infinite] when score ≥ 8
+          - Feedback: <div className="prose-like text-[13px] leading-6"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(feedback) }} />
+            Add style rules in style.css for .prose-like: h1-h3 text-sub, ul/ol ml-4 list-disc,
+            code bg-surface rounded px-1 font-mono text-[12px], p mb-3
+          - Criteria results: if present, checklist rows with ✓ (green) / ✗ (red) / ~ (amber)
+          - Blocking issues: if present, red callout box:
+            bg-red/10 border border-red/20 rounded p-3 text-[12px]
+            Header "⚠ Blocking Issues" text-red font-semibold mb-2
+            ul list-disc ml-4
+          - Suggestions: if present, amber collapsible <details>:
+            <summary> "💡 Suggestions ({N})" </summary>
+            ul list-disc ml-4 text-dim
+
+      Update ui/src/pages/TaskDetailPage.tsx:
+        - Replace TerminalPanel with <Terminal lines={lines} done={done} />
+        - Replace raw review text block with <ReviewPanel feedback={...} score={...}
+            criteriaResults={...} blockingIssues={...} suggestions={...} />
+          (Parse review JSON from task.review_feedback if it's JSON, else pass as plain text)
+        - Add RetryHistory section: show only when task.retry_count > 0
+          Render <RetryHistory missionId={...} taskId={...} currentRetryCount={...} />
+        - Add inject prompt panel (show when task.status === 'in_progress'):
+            <details className="sec"> <summary className="section-title cursor-pointer">
+              Send Instruction to Agent</summary>
+              <textarea rows={3} className="...font-mono..." value={injectMsg} onChange={...} />
+              <button onClick={handleInject}>Send Instruction</button>
+              {injectResult && <p className={...}>{injectResult}</p>}
+            </details>
+          handleInject calls POST /api/mission/:id/task/:tid/inject
+          Shows "Instruction delivered" on 200, "Agent not ready" on 409
+
+        - Task control bar (flex gap-2 mb-4):
+          Stop (red) | Retry (amber) | Mark Failed (red, dim) | Resolve Block (green, when needs_human)
+          Each calls corresponding API + confirm dialog
+
+        - Add <TokenMeter> below task header showing task-level tokens_in/out/cost_usd
+
+        Update api.ts: stopTask, retryTask, injectPrompt, resolveHumanBlock functions
+    acceptance_criteria:
+      - "ReviewPanel renders Markdown feedback (not raw text)"
+      - "Score badge is red/amber/green based on score range"
+      - "Blocking issues appear in red callout box"
+      - "Inject panel visible only when task status is in_progress"
+      - "Send Instruction calls API and shows result message"
+      - "RetryHistory shows 'First attempt' when retry_count is 0"
+      - "Task control bar visible with appropriate active buttons per status"
+      - "npm run build passes"
+    dependencies:
+      - "09"
+      - "08"
+      - "07"
+    output_artifacts:
+      - "ui/src/components/RetryHistory.tsx"
+      - "ui/src/components/ReviewPanel.tsx"
+      - "ui/src/pages/TaskDetailPage.tsx (updated)"
+      - "ui/src/lib/api.ts (updated)"
+
+  - id: "11"
+    title: "Plan Mode — prompt to YAML with model selection and launch"
+    description: |
+      Create ui/src/components/ModelSelector.tsx:
+        Props: { models: Model[], selected: string[], onChange: (ids: string[]) => void }
+        Grid of model cards (grid-cols-1 sm:grid-cols-3 gap-3):
+          Each card: border rounded-lg p-3 cursor-pointer
+          Selected: border-cyan bg-cyan-bg
+          Unselected: border-border bg-surface hover:bg-card-hover
+          Content: model name (font-semibold), provider badge (text-[10px] bg-surface rounded px-1.5),
+                   cost string ("$X.XXX/1k"), latency badge (Fast=green / Standard=amber / Powerful=purple)
+          Click toggles selection; at least 1 must remain selected
+
+      Replace PlanModePage.tsx stub with full implementation:
+
+        STEP 1 — Compose:
+          - Large textarea (rows=10, font-mono=false, font-sans text-[14px]):
+            placeholder="Describe what you want to build..."
+            Char count shown right-aligned dim
+          - Workspace input: text field, placeholder="/path/to/project"
+            label="Working directory for mission execution"
+          - <ModelSelector models={models} selected={selectedModels} onChange={...} />
+            models fetched from GET /api/models on mount
+          - "Generate Plan →" button: disabled until textarea + workspace + ≥1 model selected
+            On click: set step=2, call generatePlan()
+
+        STEP 2 — Review & Edit (after plan generation):
+          generatePlan(): POST /api/plan with {prompt, approved_models, workspace}
+          Use EventSource (SSE) for streaming: collect chunks, assemble final YAML string
+          While streaming: show live streaming output in Terminal component (readonly, done=false)
+          After [DONE] event: parse YAML into editable state
+
+          Editable plan cards:
+            Mission name: <input className="text-title font-semibold bg-transparent border-b border-border" />
+            Goal: <textarea rows=3 />
+            DoD: list with [x] remove + [+ Add criterion] button
+            Tasks: accordion cards (click header to expand):
+              Task ID badge + title input + description textarea + acceptance criteria list
+              Model dropdown (only from selectedModels):
+                <select> with options for each approved model
+              "Remove task" button (red, small)
+            "Add Task" button at bottom
+
+          Raw YAML toggle: <details><summary>Raw YAML</summary><textarea rows=20 value={yaml} onChange={...}/></details>
+
+          "← Back" button (goes to step 1, preserves prompt)
+          "Launch Mission →" button: validates then POST /api/missions {yaml: assembledYaml}
+            On success: navigate('/mission/' + response.id)
+            On error: show error message inline
+
+      Add to ui/src/lib/types.ts:
+        Model { id: string; name: string; provider: string; cost_per_1k_input: number;
+                cost_per_1k_output: number; latency_label: string; }
+      Add to ui/src/lib/api.ts:
+        getModels(): Promise<Model[]> — GET /api/models
+        createMission(yaml: string): Promise<{id: string}> — POST /api/missions
+    acceptance_criteria:
+      - "Step 1: prompt, workspace, model selector all functional"
+      - "Generate Plan button disabled until all required fields filled"
+      - "SSE streaming shows live progress during generation"
+      - "After generation: mission fields render as editable inputs"
+      - "Per-task model dropdown only shows approved models"
+      - "Raw YAML toggle shows textarea with editable YAML"
+      - "Launch validates and POSTs, then navigates to /mission/:id"
+      - "npm run build passes"
+    dependencies:
+      - "06"
+      - "03"
+    output_artifacts:
+      - "ui/src/components/ModelSelector.tsx"
+      - "ui/src/pages/PlanModePage.tsx (complete)"
+      - "ui/src/lib/types.ts (updated)"
+      - "ui/src/lib/api.ts (updated)"
+
+  - id: "12"
+    title: "Connectors page with keyring token management"
+    description: |
+      Replace ConnectorsPage.tsx stub with full implementation:
+
+        KNOWN_CONNECTORS hardcoded list:
+          { name: 'github', display_name: 'GitHub', description: 'Access repos and PRs' }
+          { name: 'anthropic', display_name: 'Anthropic', description: 'Claude API key' }
+          { name: 'slack', display_name: 'Slack', description: 'Send notifications' }
+          { name: 'linear', display_name: 'Linear', description: 'Track issues' }
+          { name: 'sentry', display_name: 'Sentry', description: 'Error monitoring' }
+          { name: 'notion', display_name: 'Notion', description: 'Documentation' }
+
+        Page header: "Connectors" title + description "Manage API tokens for external services"
+
+        Connector cards grid (grid-cols-1 sm:grid-cols-2 gap-4):
+          Each card: rounded-lg border border-border bg-card p-4
+          Header: connector name (font-semibold) + active status dot (green=active / muted=inactive)
+          Description: text-dim text-[12px]
+          If active: show "Token: ••••{last4}" text-[11px] font-mono text-muted
+          Buttons row:
+            If active: "Reconfigure" (dim) + "Remove" (red, confirm dialog: calls DELETE + refresh)
+            If inactive: "Configure" (cyan)
+
+          Configure form (expandable below buttons, shown when configuring this connector):
+            <input type="password" placeholder="Paste API token..." />
+            Show/hide toggle button (👁)
+            "Save & Test" button → POST /api/connectors/:name/configure
+              On success: POST /api/connectors/:name/test
+              Show "✓ Connected" (green) or "✗ Failed: {error}" (red)
+            Clear form on success; never log token to console
+
+        IMPORTANT security: use useRef instead of useState for token value to prevent
+        React devtools exposure; clear ref on successful submit.
+
+      Add to ui/src/lib/types.ts:
+        Connector { name: string; display_name: string; active: boolean;
+                    last_configured?: string; token_last4?: string; }
+      Add to ui/src/lib/api.ts:
+        getConnectors(): Promise<Connector[]>
+        configureConnector(name: string, token: string): Promise<void>
+        testConnector(name: string): Promise<{ok: boolean; error?: string}>
+        deleteConnector(name: string): Promise<void>
+    acceptance_criteria:
+      - "Connectors page shows grid of 6 connector cards"
+      - "Configure form expands inline and shows password input with show/hide"
+      - "Save & Test calls both configure and test endpoints"
+      - "Active connectors show token_last4 display"
+      - "Remove shows confirm dialog and calls DELETE endpoint"
+      - "Token input cleared after successful submit"
+      - "npm run build passes"
+    dependencies:
+      - "05"
+      - "03"
+    output_artifacts:
+      - "ui/src/pages/ConnectorsPage.tsx (complete)"
+      - "ui/src/lib/types.ts (updated)"
+      - "ui/src/lib/api.ts (updated)"
+
+  - id: "13"
+    title: "Telemetry dashboard with SVG charts"
+    description: |
+      Replace TelemetryPage.tsx stub with full implementation:
+
+        Fetch GET /api/telemetry on mount; auto-refresh every 30s via useInterval.
+        Show last-updated timestamp + manual "Refresh" button.
+
+        Hero stats row (4 cards using StatsBar or custom layout):
+          Total Missions | Total Tasks | Total Cost ($X.XXXX) | Total Tokens (input+output formatted)
+          Use text-hero class for values, text-label for labels
+
+        Tables section:
+          "Top Missions by Cost" table:
+            columns: Mission Name | Cost | Tokens In | Tokens Out | Duration | Retries
+            Top 5 from missions_by_cost
+          "Top Tasks by Cost" table:
+            columns: Task | Mission | Model | Cost | Retries
+            Top 5 from tasks_by_cost
+
+        SVG Charts (no external library):
+          "Retry Distribution" bar chart:
+            Width: 100%, height: 140px, SVG element
+            3 bars: "0 retries", "1 retry", "2+ retries"
+            Bar height = (count/maxCount)*100, fill=#4d94ff (or green/amber/red)
+            X-axis labels below bars, Y-axis count above bars
+            Title text above chart
+
+          "Cumulative Cost" line chart:
+            Width: 100%, height: 120px, SVG
+            Points: cost_over_time array [{mission_name, cumulative_cost}]
+            Compute min/max for normalization
+            Draw <polyline> with stroke=#22d3ee fill=none stroke-width=2
+            Dots at each point (circle r=3 fill=#22d3ee)
+            If only 1 point: show flat line
+            If empty: "No data yet" text in center
+
+        Export button: downloads JSON.stringify(telemetryData, null, 2) as agentforce-telemetry.json
+          via URL.createObjectURL(new Blob([...], {type:'application/json'}))
+    acceptance_criteria:
+      - "Telemetry page renders hero stats without crash when API returns zeros"
+      - "SVG bar chart renders 3 bars proportional to retry_distribution values"
+      - "SVG line chart renders polyline connecting cost_over_time points"
+      - "Export button downloads a .json file"
+      - "Auto-refresh fires every 30s (verify with network tab)"
+      - "npm run build passes"
+    dependencies:
+      - "05"
+      - "03"
+    output_artifacts:
+      - "ui/src/pages/TelemetryPage.tsx (complete)"
+
+  - id: "14"
+    title: "Polish, ConfirmDialog, Toast, smoke test, final build"
+    description: |
+      Final integration, shared UI primitives, and verification:
+
+      1. Create ui/src/components/ConfirmDialog.tsx:
+         Props: { open: boolean, title: string, message: string, onConfirm: () => void,
+                  onCancel: () => void, confirmLabel?: string, variant?: 'danger'|'warning' }
+         - Modal overlay: fixed inset-0 bg-black/60 z-50 flex items-center justify-center
+         - Card: bg-card border border-border rounded-xl p-6 max-w-sm w-full mx-4 shadow-xl
+         - Title: text-[16px] font-semibold mb-2
+         - Message: text-dim text-[13px] mb-6
+         - Buttons: flex gap-3 justify-end
+           Cancel: border border-border text-dim hover:bg-surface rounded px-4 py-1.5 text-[13px]
+           Confirm (danger): bg-red/10 border border-red/30 text-red hover:bg-red/20
+           Confirm (warning): bg-amber/10 border border-amber/30 text-amber hover:bg-amber/20
+
+      2. Create ui/src/components/Toast.tsx + ui/src/hooks/useToast.ts:
+         useToast returns { toasts, addToast, removeToast }
+         addToast(message, type: 'success'|'error'|'info'): adds toast with auto-dismiss 3s
+         Toast container: fixed bottom-4 right-4 z-50 flex flex-col gap-2
+         Each toast: rounded-lg border px-4 py-3 text-[13px] shadow-lg
+           success: border-green/30 bg-green/10 text-green
+           error: border-red/30 bg-red/10 text-red
+           info: border-cyan/30 bg-cyan/10 text-cyan
+         Provide via React Context so all pages can call useToast()
+
+      3. Replace all window.confirm() dialogs in MissionCard, MissionsPage, TaskDetailPage,
+         ConnectorsPage with the proper <ConfirmDialog> component.
+
+      4. Replace all inline success/error text feedback with useToast() calls.
+
+      5. Add consistent loading states: all API calls show a loading spinner or skeleton
+         (use existing animate-pulse pattern for skeletons).
+
+      6. Verify full TypeScript: cd ui && npx tsc --noEmit (must exit 0)
+
+      7. Verify build: cd ui && npm run build (must exit 0, producing dist/)
+
+      8. Write scripts/smoke_test.sh:
+         #!/bin/bash
+         set -e
+         python -m agentforce.server.handler &  # or however server starts
+         SERVER_PID=$!
+         sleep 2
+         curl -sf http://localhost:8080/api/missions | grep -q '\[\|{' && echo "✓ /api/missions"
+         curl -sf http://localhost:8080/api/models | grep -q 'claude-sonnet' && echo "✓ /api/models"
+         curl -sf http://localhost:8080/api/connectors | grep -q 'github' && echo "✓ /api/connectors"
+         curl -sf http://localhost:8080/api/telemetry | grep -q 'total_missions' && echo "✓ /api/telemetry"
+         kill $SERVER_PID
+         echo "All smoke tests passed"
+
+      9. Run: pytest tests/ -v --tb=short (all tests must pass)
+    acceptance_criteria:
+      - "ConfirmDialog renders as proper modal (not browser confirm())"
+      - "Toast appears bottom-right and auto-dismisses after 3 seconds"
+      - "npx tsc --noEmit in ui/ exits 0"
+      - "npm run build produces dist/ successfully"
+      - "scripts/smoke_test.sh exits 0"
+      - "pytest tests/ -v passes all existing tests"
+      - "No console errors on any page in browser"
+    dependencies:
+      - "10"
+      - "11"
+      - "12"
+      - "13"
+    output_artifacts:
+      - "ui/src/components/ConfirmDialog.tsx"
+      - "ui/src/components/Toast.tsx"
+      - "ui/src/hooks/useToast.ts"
+      - "scripts/smoke_test.sh"

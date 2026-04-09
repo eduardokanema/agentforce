@@ -24,6 +24,9 @@ from agentforce.server.ws import (
     broadcast_mission,
     broadcast_stream_line,
     broadcast_task_stream_done,
+    broadcast_mission_cost_update,
+    broadcast_task_cost_update,
+    broadcast_task_attempt_start,
 )
 
 
@@ -302,6 +305,21 @@ class TestSubscriptionFunctions(unittest.TestCase):
         self.assertEqual(message["type"], "task_stream_done")
         self.assertEqual(message["mission_id"], "mission1")
         self.assertEqual(message["task_id"], "task1")
+
+    def test_broadcast_cost_and_attempt_events(self):
+        """Test the new cost and attempt broadcast payloads."""
+        conn = Mock(spec=WsConnection)
+        register(conn, "mission1")
+
+        broadcast_mission_cost_update("mission1", 10, 20, 0.5)
+        broadcast_task_cost_update("mission1", "task1", 3, 4, 0.1)
+        broadcast_task_attempt_start("mission1", "task1", 2)
+
+        self.assertEqual(conn.send_text.call_count, 3)
+        payloads = [json.loads(call.args[0]) for call in conn.send_text.call_args_list]
+        self.assertEqual(payloads[0]["type"], "mission_cost_update")
+        self.assertEqual(payloads[1]["type"], "task_cost_update")
+        self.assertEqual(payloads[2]["type"], "task_attempt_start")
     
     def test_broadcast_handles_dead_connections(self):
         """Test that broadcast functions handle dead connections."""

@@ -55,7 +55,7 @@ The production output is written to `ui/dist/`.
   - `AgentChip`
   - `StatsBar`
   - `EventLogTable`
-  - `TerminalPanel`
+  - `Terminal`
 - `src/hooks/` contains the data and live-stream hooks:
   - `useMissionList`
   - `useMission`
