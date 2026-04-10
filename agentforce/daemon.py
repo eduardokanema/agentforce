@@ -162,6 +162,7 @@ class MissionDaemon:
         self._stopping = False
         self._supervisor_thread: Optional[threading.Thread] = None
         self._daemon_lock: Optional[DaemonLock] = None
+        self._last_heartbeat_at: Optional[str] = None
 
         # Restore state from previous run
         self._compact_queue()
@@ -273,7 +274,7 @@ class MissionDaemon:
                 for mid, state in self._job_states.items()
                 if state.get("state") == "running"
             }
-        return {"running": running, "queue": queue, "active": active}
+        return {"running": running, "queue": queue, "active": active, "last_heartbeat": self._last_heartbeat_at}
 
     # ------------------------------------------------------------------
     # Internal — supervisor loop
@@ -283,6 +284,7 @@ class MissionDaemon:
         import queue as _q
         while not self._stop_event.is_set():
             self._tick()
+            self._last_heartbeat_at = self._now()
             self._append_journal({"action": "heartbeat"})
             if self._notify_queue is not None:
                 try:

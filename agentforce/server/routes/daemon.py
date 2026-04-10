@@ -49,8 +49,8 @@ def get(handler, parts, query):
     raw = daemon.status()
     return 200, {
         "running": raw["running"],
-        "queue": list(raw["queue"].keys()),
-        "active": list(raw["active"].keys()),
+        "queue": list(raw["queue"].values()),
+        "active": list(raw["active"].values()),
         "last_heartbeat": raw.get("last_heartbeat"),
     }
 
@@ -85,5 +85,13 @@ def post(handler, parts, query):
         import threading
         threading.Thread(target=daemon.stop, daemon=True, name="daemon-stop").start()
         return 200, {"stopping": True}
+
+    if action == "restart":
+        import threading
+        def _do_restart():
+            daemon.stop()
+            daemon.start()
+        threading.Thread(target=_do_restart, daemon=True, name="daemon-restart").start()
+        return 200, {"restarting": True}
 
     raise FileNotFoundError()

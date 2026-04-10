@@ -15,6 +15,17 @@ const apiHarness = vi.hoisted(() => ({
   injectPrompt: vi.fn(async () => undefined),
   resolveHumanBlock: vi.fn(async () => undefined),
   markTaskFailed: vi.fn(async () => undefined),
+  changeTaskModel: vi.fn(async () => ({
+    worker_agent: 'codex',
+    worker_model: 'gpt-5',
+    reviewer_agent: 'claude',
+    reviewer_model: 'claude-sonnet-4-6',
+    retried: true,
+  })),
+  getModels: vi.fn(async () => [
+    { id: 'gpt-5', name: 'GPT-5', provider: 'Codex', provider_id: 'codex', cost_per_1k_input: 0, cost_per_1k_output: 0, latency_label: 'Standard' },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet', provider: 'Claude', provider_id: 'claude', cost_per_1k_input: 0, cost_per_1k_output: 0, latency_label: 'Standard' },
+  ]),
 }));
 const toastHarness = vi.hoisted(() => ({
   addToast: vi.fn(),
@@ -40,6 +51,8 @@ vi.mock('../lib/api', () => ({
   injectPrompt: apiHarness.injectPrompt,
   resolveHumanBlock: apiHarness.resolveHumanBlock,
   markTaskFailed: apiHarness.markTaskFailed,
+  changeTaskModel: apiHarness.changeTaskModel,
+  getModels: apiHarness.getModels,
 }));
 
 vi.mock('../hooks/useToast', () => ({
@@ -155,6 +168,8 @@ describe('TaskDetailPage', () => {
     apiHarness.injectPrompt.mockClear();
     apiHarness.resolveHumanBlock.mockClear();
     apiHarness.markTaskFailed.mockClear();
+    apiHarness.changeTaskModel.mockClear();
+    apiHarness.getModels.mockClear();
     toastHarness.addToast.mockClear();
     document.body.innerHTML = '';
   });
@@ -370,6 +385,174 @@ describe('TaskDetailPage', () => {
       'Human guidance applied.',
     );
     expect(toastHarness.addToast).toHaveBeenCalledWith('Human block resolved', 'success');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('renders destructive-action choices and submits the selected decision', async () => {
+    missionForHook = {
+      ...mockMission,
+      task_states: {
+        'task-1': {
+          ...mockMission.task_states['task-1'],
+          status: 'needs_human',
+          human_intervention_kind: 'destructive_action',
+          human_intervention_message: 'Potential destructive action requested',
+          human_intervention_context: {
+            summary: 'Delete stale build output',
+            risk: 'This removes generated files from dist.',
+            proposed_action: 'rm -rf dist',
+            targets: ['dist'],
+            action_key: 'delete:dist',
+          },
+          human_intervention_options: [
+            { id: 'approve_once', label: 'Approve once', description: 'Allow once.' },
+            { id: 'always_allow', label: 'Always allow this exact action', description: 'Persist for this mission.' },
+            { id: 'deny', label: 'Deny', description: 'Do not run it.' },
+            { id: 'revise', label: 'Revise with instructions', description: 'Provide an alternative.' },
+          ],
+        },
+      },
+    };
+    streamForHook = { lines: ['waiting on decision'], done: true };
+
+    const { container, root } = renderToContainer(
+      <MemoryRouter initialEntries={['/mission/mission-123/task/task-1']}>
+        <Routes>
+          <Route path="/mission/:mission_id/task/:task_id" element={<TaskDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(container.textContent).toContain('Destructive Action Requires Approval');
+    expect(container.textContent).toContain('Delete stale build output');
+    expect(container.textContent).toContain('rm -rf dist');
+    expect(container.textContent).toContain('Always allow this exact action');
+
+    const alwaysAllow = Array.from(container.querySelectorAll('input[type="radio"]')).find(
+      (input) => (input as HTMLInputElement).value === 'always_allow',
+    ) as HTMLInputElement;
+    await act(async () => {
+      alwaysAllow.checked = true;
+      Simulate.change(alwaysAllow);
+    });
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      Simulate.change(textarea, { target: { value: 'Generated output only.' } } as any);
+    });
+
+    const submit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Submit Decision',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      submit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiHarness.resolveHumanBlock).toHaveBeenCalledWith('mission-123', 'task-1', {
+      choice_id: 'always_allow',
+      message: 'Generated output only.',
+    });
+    expect(toastHarness.addToast).toHaveBeenCalledWith('Destructive action decision saved', 'success');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('requires instructions before submitting a revise destructive-action decision', async () => {
+    missionForHook = {
+      ...mockMission,
+      task_states: {
+        'task-1': {
+          ...mockMission.task_states['task-1'],
+          status: 'needs_human',
+          human_intervention_kind: 'destructive_action',
+          human_intervention_context: {
+            summary: 'Delete stale build output',
+            risk: 'This removes generated files from dist.',
+            proposed_action: 'rm -rf dist',
+            targets: ['dist'],
+            action_key: 'delete:dist',
+          },
+          human_intervention_options: [
+            { id: 'approve_once', label: 'Approve once' },
+            { id: 'revise', label: 'Revise with instructions' },
+          ],
+        },
+      },
+    };
+    streamForHook = { lines: ['waiting on decision'], done: true };
+
+    const { container, root } = renderToContainer(
+      <MemoryRouter initialEntries={['/mission/mission-123/task/task-1']}>
+        <Routes>
+          <Route path="/mission/:mission_id/task/:task_id" element={<TaskDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const revise = Array.from(container.querySelectorAll('input[type="radio"]')).find(
+      (input) => (input as HTMLInputElement).value === 'revise',
+    ) as HTMLInputElement;
+    await act(async () => {
+      revise.checked = true;
+      Simulate.change(revise);
+    });
+
+    const submit = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Submit Decision',
+    ) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('sends selected worker and reviewer agents with model changes', async () => {
+    missionForHook = mockMission;
+    streamForHook = { lines: ['booting worker'], done: false };
+
+    const { container, root } = renderToContainer(
+      <MemoryRouter initialEntries={['/mission/mission-123/task/task-1']}>
+        <Routes>
+          <Route path="/mission/:mission_id/task/:task_id" element={<TaskDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const changeButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Change Model',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      changeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+    expect(selects).toHaveLength(2);
+    await act(async () => {
+      selects[0].value = 'gpt-5';
+      Simulate.change(selects[0]);
+      selects[1].value = 'claude-sonnet-4-6';
+      Simulate.change(selects[1]);
+    });
+
+    const save = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Change & Retry',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      save.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiHarness.changeTaskModel).toHaveBeenCalledWith('mission-123', 'task-1', {
+      worker_agent: 'codex',
+      worker_model: 'gpt-5',
+      reviewer_agent: 'claude',
+      reviewer_model: 'claude-sonnet-4-6',
+    });
 
     act(() => {
       root.unmount();

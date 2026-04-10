@@ -73,6 +73,7 @@ class LivePlannerAdapter(PlannerAdapter):
 
     def plan_turn(self, draft: dict[str, Any], user_message: str) -> PlannerTurnResult:
         from agentforce.connectors import claude as _claude_connector
+        from agentforce.connectors import gemini as _gemini_connector
 
         system_prompt = _build_system_prompt(draft)
         prompt = _build_user_prompt(draft, user_message)
@@ -80,6 +81,8 @@ class LivePlannerAdapter(PlannerAdapter):
 
         if _claude_connector.available():
             response_text = _claude_cli_completion(model, system_prompt, prompt)
+        elif _gemini_connector.available():
+            response_text = _gemini_cli_completion(model, system_prompt, prompt)
         else:
             openrouter_key, anthropic_key = _load_provider_keys()
             if not openrouter_key and not anthropic_key:
@@ -183,6 +186,32 @@ def _build_system_prompt(draft: dict[str, Any]) -> str:
     )
 
 
+def _gemini_cli_completion(model: str, system_prompt: str, prompt: str) -> str:
+    """Run the planner turn via the Gemini CLI connector."""
+    from agentforce.connectors import gemini as _gemini_connector
+    import os
+
+    full_prompt = f"{system_prompt}\n\n{prompt}"
+    workdir = os.getcwd()
+    success, output, error, _, _ = _gemini_connector.run(
+        prompt=full_prompt,
+        workdir=workdir,
+        timeout=120,
+        model=model,
+    )
+    if not success and not output:
+        raise RuntimeError(f"gemini CLI planner failed: {error[:200]}")
+    # Strip markdown fences if gemini wraps JSON in ```json ... ```
+    text = output.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(
+            line for line in lines
+            if not line.startswith("```")
+        ).strip()
+    return text
+
+
 def _claude_cli_completion(model: str, system_prompt: str, prompt: str) -> str:
     """Run the planner turn via the Claude Code CLI connector."""
     from agentforce.connectors import claude as _claude_connector
@@ -194,7 +223,7 @@ def _claude_cli_completion(model: str, system_prompt: str, prompt: str) -> str:
         success, output, error, _, _ = _claude_connector.run(
             prompt=full_prompt,
             workdir=workdir,
-            timeout=120,
+            timeout=180,
             model=model,
         )
     if not success and not output:

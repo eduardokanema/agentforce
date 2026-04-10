@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import ConfirmDialog from './ConfirmDialog';
-import MissionProgressBar from './MissionProgressBar';
+import SpaceProgress from './SpaceProgress';
 import StatusBadge from './StatusBadge';
 import { useElapsedTime } from '../hooks/useElapsedTime';
 import type { MissionSummary } from '../lib/types';
@@ -14,20 +14,20 @@ interface MissionCardProps {
   onDelete: () => void;
 }
 
-function accentBarClassName(status: MissionSummary['status']): string {
+function accentColorClassName(status: MissionSummary['status']): string {
   if (status === 'in_progress' || status === 'active') {
-    return 'bg-cyan';
+    return 'text-cyan border-cyan/40 bg-cyan/10';
   }
 
   if (status === 'completed' || status === 'review_approved' || status === 'complete') {
-    return 'bg-green';
+    return 'text-green border-green/40 bg-green/10';
   }
 
   if (status === 'failed') {
-    return 'bg-red';
+    return 'text-red border-red/40 bg-red/10';
   }
 
-  return 'bg-border';
+  return 'text-dim border-border bg-surface';
 }
 
 function isRunningStatus(status: MissionSummary['status']): boolean {
@@ -88,8 +88,9 @@ function getModelChips(mission: MissionSummary): string[] {
 
 export default function MissionCard({ mission, onStop, onRestart, onArchive, onDelete }: MissionCardProps) {
   const elapsed = useElapsedTime(mission.started_at);
-  const accentClassName = accentBarClassName(mission.status);
+  const accentStyles = accentColorClassName(mission.status);
   const running = isRunningStatus(mission.status);
+  const isDraft = mission.status === 'draft';
   const workspace = mission.workspace?.trim() || '—';
   const modelChips = getModelChips(mission);
   const retries = mission.retries ?? 0;
@@ -114,25 +115,27 @@ export default function MissionCard({ mission, onStop, onRestart, onArchive, onD
     void Promise.resolve(action()).catch(() => undefined);
   };
 
+  const missionHref = isDraft ? `/plan/${mission.mission_id}` : `/mission/${mission.mission_id}`;
+
   return (
     <>
-      <article className="group relative overflow-hidden rounded-lg border border-border bg-card transition-shadow duration-200 hover:shadow-[0_0_0_1px_theme(colors.border-lit),0_4px_24px_theme(colors.glow-cyan)]">
-        <div className={`absolute bottom-0 left-0 top-0 w-0.5 ${accentClassName}`} />
-
-        <div className="flex flex-col gap-2 px-4 py-3 pl-5">
+      <article className="group relative overflow-hidden rounded-lg border border-border bg-card transition-all duration-300 hover:border-border-lit hover:shadow-[0_0_24px_rgba(34,211,238,0.1)]">
+        <div className="flex flex-col gap-2 px-4 py-3">
           <div className="flex flex-wrap items-center gap-2">
-            <Link className="text-[14px] font-semibold text-text transition-colors hover:text-cyan hover:no-underline" to={`/mission/${mission.mission_id}`}>
+            <span className={`inline-flex h-2 w-2 rounded-full border ${accentStyles}`} />
+            <Link className="text-[14px] font-semibold text-text transition-colors hover:text-cyan hover:no-underline" to={missionHref}>
               {mission.name}
             </Link>
             <StatusBadge status={mission.status} />
             <span className="ml-auto font-mono text-[11px] text-dim tabular-nums">{elapsed}</span>
           </div>
 
-          <div className="relative overflow-hidden">
-            <MissionProgressBar pct={mission.pct} />
-            {running ? (
-              <div className="pointer-events-none absolute inset-0 animate-[scan-line_2s_linear_infinite] bg-gradient-to-r from-transparent via-white/5 to-transparent" />
-            ) : null}
+          <div className="relative">
+            <SpaceProgress 
+              pct={mission.pct} 
+              isRunning={running} 
+              variant="compact"
+            />
           </div>
 
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-dim">
@@ -155,36 +158,40 @@ export default function MissionCard({ mission, onStop, onRestart, onArchive, onD
           </div>
 
           <div className="flex items-center gap-2 pt-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-            <button
-              type="button"
-              className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-red transition-colors hover:bg-red/10"
-              onClick={() => {
-                setPendingAction({
-                  title: `Stop mission "${mission.name}"?`,
-                  message: 'This will halt the mission immediately.',
-                  confirmLabel: 'Stop Mission',
-                  variant: 'danger',
-                  action: onStop,
-                });
-              }}
-            >
-              ⏹ Stop
-            </button>
-            <button
-              type="button"
-              className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-amber transition-colors hover:bg-amber/10"
-              onClick={() => {
-                setPendingAction({
-                  title: `Restart mission "${mission.name}"?`,
-                  message: 'This will queue a fresh run from the current mission state.',
-                  confirmLabel: 'Restart Mission',
-                  variant: 'warning',
-                  action: onRestart,
-                });
-              }}
-            >
-              ↺ Restart
-            </button>
+            {!isDraft && (
+              <>
+                <button
+                  type="button"
+                  className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-red transition-colors hover:bg-red/10"
+                  onClick={() => {
+                    setPendingAction({
+                      title: `Stop mission "${mission.name}"?`,
+                      message: 'This will halt the mission immediately.',
+                      confirmLabel: 'Stop Mission',
+                      variant: 'danger',
+                      action: onStop,
+                    });
+                  }}
+                >
+                  ⏹ Stop
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-amber transition-colors hover:bg-amber/10"
+                  onClick={() => {
+                    setPendingAction({
+                      title: `Restart mission "${mission.name}"?`,
+                      message: 'This will queue a fresh run from the current mission state.',
+                      confirmLabel: 'Restart Mission',
+                      variant: 'warning',
+                      action: onRestart,
+                    });
+                  }}
+                >
+                  ↺ Restart
+                </button>
+              </>
+            )}
             <button
               type="button"
               className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-dim transition-colors hover:bg-surface"

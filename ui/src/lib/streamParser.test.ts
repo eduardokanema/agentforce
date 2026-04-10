@@ -39,7 +39,7 @@ describe("parseStreamLine", () => {
 
   it("exposes the requested line classes", () => {
     expect(LINE_CLASSES).toMatchObject({
-      inject: "bg-amber/10 border-l-2 border-amber text-amber",
+      inject: "bg-amber-bg/60 px-2 rounded-sm text-amber font-bold",
       command: "text-cyan opacity-90",
       pass: "text-green",
       fail: "text-red",

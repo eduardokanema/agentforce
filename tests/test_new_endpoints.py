@@ -5,7 +5,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from agentforce.core.spec import Caps, MissionSpec, TaskSpec, TaskStatus
+from agentforce.core.spec import Caps, ExecutionConfig, ExecutionProfile, MissionSpec, TaskSpec, TaskStatus
 from agentforce.core.state import MissionState, TaskState
 from agentforce.server import state_io
 from agentforce.server.handler import DashboardHandler
@@ -224,10 +224,84 @@ def test_post_resolve_can_mark_failed(tmp_path, monkeypatch):
     assert reloaded.task_states["task-1"].status == TaskStatus.FAILED
 
 
+def test_post_resolve_destructive_choice_requeues_and_stores_allow_rule(tmp_path, monkeypatch):
+    state_dir = _seed_state(tmp_path, monkeypatch)
+    state = _state()
+    task = state.task_states["task-1"]
+    task.status = TaskStatus.NEEDS_HUMAN
+    task.human_intervention_needed = True
+    task.human_intervention_kind = "destructive_action"
+    task.human_intervention_message = "Potential destructive action requested"
+    task.human_intervention_context = {
+        "type": "destructive_action_request",
+        "summary": "Delete stale build output",
+        "risk": "Removes generated files from dist.",
+        "proposed_action": "rm -rf dist",
+        "targets": ["dist"],
+        "action_key": "delete:dist",
+    }
+    task.human_intervention_options = [
+        {"id": "approve_once", "label": "Approve once"},
+        {"id": "always_allow", "label": "Always allow this exact action"},
+        {"id": "deny", "label": "Deny"},
+        {"id": "revise", "label": "Revise with instructions"},
+    ]
+    state.save(state_dir / "mission-123.json")
+
+    payload = json.dumps({"choice_id": "always_allow", "message": "Generated output only."}).encode("utf-8")
+    handler = _make_handler(
+        "/api/mission/mission-123/task/task-1/resolve",
+        body=payload,
+        headers={"Content-Length": str(len(payload))},
+    )
+
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (200,)
+    assert _response_body(handler) == {"resolved": True, "choice_id": "always_allow"}
+    reloaded = MissionState.load(state_dir / "mission-123.json")
+    task = reloaded.task_states["task-1"]
+    assert task.status == TaskStatus.RETRY
+    assert task.human_intervention_needed is False
+    assert task.human_intervention_kind == ""
+    assert "delete:dist" in reloaded.destructive_action_allow_rules
+
+
+def test_post_resolve_destructive_revise_requires_message(tmp_path, monkeypatch):
+    state_dir = _seed_state(tmp_path, monkeypatch)
+    state = _state()
+    task = state.task_states["task-1"]
+    task.status = TaskStatus.NEEDS_HUMAN
+    task.human_intervention_needed = True
+    task.human_intervention_kind = "destructive_action"
+    task.human_intervention_context = {"action_key": "delete:dist", "proposed_action": "rm -rf dist"}
+    task.human_intervention_options = [
+        {"id": "approve_once", "label": "Approve once"},
+        {"id": "always_allow", "label": "Always allow this exact action"},
+        {"id": "deny", "label": "Deny"},
+        {"id": "revise", "label": "Revise with instructions"},
+    ]
+    state.save(state_dir / "mission-123.json")
+
+    payload = json.dumps({"choice_id": "revise"}).encode("utf-8")
+    handler = _make_handler(
+        "/api/mission/mission-123/task/task-1/resolve",
+        body=payload,
+        headers={"Content-Length": str(len(payload))},
+    )
+
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (400,)
+    assert _response_body(handler)["error"] == "message is required for revise"
+
+
 def test_post_restart_requeues_matching_tasks(tmp_path, monkeypatch):
     state_dir = _seed_state(tmp_path, monkeypatch)
     state = _state()
     state.task_states["task-1"].status = TaskStatus.FAILED
+    state.task_states["task-1"].worker_output = "failed output"
+    state.task_states["task-1"].attempt_history = [{"attempt_number": 1, "output": "failed output"}]
     state.task_states["task-2"].status = TaskStatus.BLOCKED
     state.task_states["task-2"].worker_output = "needs reset"
     state.task_states["task-3"] = TaskState(
@@ -236,6 +310,20 @@ def test_post_restart_requeues_matching_tasks(tmp_path, monkeypatch):
         status=TaskStatus.REVIEW_REJECTED,
         worker_output="old output",
     )
+    state.task_states["task-4"] = TaskState(
+        task_id="task-4",
+        spec_summary="Worker done",
+        status=TaskStatus.COMPLETED,
+        worker_output="ready for review",
+    )
+    state.task_states["task-5"] = TaskState(
+        task_id="task-5",
+        spec_summary="Approved",
+        status=TaskStatus.REVIEW_APPROVED,
+        worker_output="done",
+    )
+    state.active_wall_time_seconds = 125
+    state.completed_at = "2024-01-01T00:30:00+00:00"
     state.save(state_dir / "mission-123.json")
 
     handler = _make_handler("/api/mission/mission-123/restart")
@@ -243,6 +331,98 @@ def test_post_restart_requeues_matching_tasks(tmp_path, monkeypatch):
     handler.do_POST()
 
     assert _response_body(handler) == {"requeued": 3}
+    reloaded = MissionState.load(state_dir / "mission-123.json")
+    assert reloaded.active_wall_time_seconds == 0
+    assert reloaded.started_at == "2024-01-01T00:00:00+00:00"
+    assert reloaded.completed_at is None
+    assert reloaded.task_states["task-1"].status == TaskStatus.RETRY
+    assert reloaded.task_states["task-1"].worker_output == "failed output"
+    assert reloaded.task_states["task-1"].attempt_history == [{"attempt_number": 1, "output": "failed output"}]
+    assert reloaded.task_states["task-2"].status == TaskStatus.RETRY
+    assert reloaded.task_states["task-2"].worker_output == "needs reset"
+    assert reloaded.task_states["task-3"].status == TaskStatus.RETRY
+    assert reloaded.task_states["task-3"].worker_output == "old output"
+    assert reloaded.task_states["task-4"].status == TaskStatus.COMPLETED
+    assert reloaded.task_states["task-4"].worker_output == "ready for review"
+    assert reloaded.task_states["task-5"].status == TaskStatus.REVIEW_APPROVED
+
+
+def test_post_default_models_updates_pending_defaults_and_preserves_started_tasks(tmp_path, monkeypatch):
+    state_dir = _seed_state(tmp_path, monkeypatch)
+    state = _state()
+    state.execution_defaults = ExecutionConfig(
+        worker=ExecutionProfile(model="old-worker"),
+        reviewer=ExecutionProfile(model="old-reviewer"),
+    )
+    state.task_states["task-1"].status = TaskStatus.PENDING
+    state.task_states["task-1"].started_at = None
+    state.task_states["task-2"].status = TaskStatus.IN_PROGRESS
+    state.task_states["task-2"].started_at = "2024-01-01T00:01:00+00:00"
+    state.save(state_dir / "mission-123.json")
+
+    payload = json.dumps({
+        "worker_agent": "codex",
+        "worker_model": "new-worker",
+        "reviewer_agent": "claude",
+        "reviewer_model": "new-reviewer",
+    }).encode("utf-8")
+    handler = _make_handler(
+        "/api/mission/mission-123/default_models",
+        body=payload,
+        headers={"Content-Length": str(len(payload))},
+    )
+
+    handler.do_POST()
+
+    body = _response_body(handler)
+    assert body["worker_agent"] == "codex"
+    assert body["worker_model"] == "new-worker"
+    assert body["reviewer_agent"] == "claude"
+    assert body["reviewer_model"] == "new-reviewer"
+    assert body["pinned_tasks"] == 1
+    reloaded = MissionState.load(state_dir / "mission-123.json")
+    assert reloaded.execution_defaults.worker.agent == "codex"
+    assert reloaded.execution_defaults.worker.model == "new-worker"
+    assert reloaded.execution_defaults.reviewer.agent == "claude"
+    assert reloaded.execution_defaults.reviewer.model == "new-reviewer"
+    assert reloaded.spec.tasks[0].execution.worker is None
+    assert reloaded.spec.tasks[0].execution.reviewer is None
+    assert reloaded.spec.tasks[1].execution.worker.model == "old-worker"
+    assert reloaded.spec.tasks[1].execution.reviewer.model == "old-reviewer"
+
+
+def test_post_task_change_model_updates_agent_and_model(tmp_path, monkeypatch):
+    state_dir = _seed_state(tmp_path, monkeypatch)
+    state = _state()
+    state.task_states["task-1"].status = TaskStatus.IN_PROGRESS
+    state.spec.tasks[0].execution.worker = ExecutionProfile(agent="gemini", model="gemini-2.5-pro")
+    state.save(state_dir / "mission-123.json")
+
+    payload = json.dumps({
+        "worker_agent": "codex",
+        "worker_model": "gpt-5.4",
+        "reviewer_agent": "claude",
+        "reviewer_model": "claude-sonnet-4-6",
+    }).encode("utf-8")
+    handler = _make_handler(
+        "/api/mission/mission-123/task/task-1/change_model",
+        body=payload,
+        headers={"Content-Length": str(len(payload))},
+    )
+
+    handler.do_POST()
+
+    body = _response_body(handler)
+    assert body["worker_agent"] == "codex"
+    assert body["worker_model"] == "gpt-5.4"
+    assert body["reviewer_agent"] == "claude"
+    assert body["reviewer_model"] == "claude-sonnet-4-6"
+    assert body["retried"] is True
+    reloaded = MissionState.load(state_dir / "mission-123.json")
+    assert reloaded.spec.tasks[0].execution.worker.agent == "codex"
+    assert reloaded.spec.tasks[0].execution.worker.model == "gpt-5.4"
+    assert reloaded.spec.tasks[0].execution.reviewer.agent == "claude"
+    assert reloaded.spec.tasks[0].execution.reviewer.model == "claude-sonnet-4-6"
 
 
 def test_post_connectors_configure_persists_token(tmp_path, monkeypatch):

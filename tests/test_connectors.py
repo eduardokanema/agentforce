@@ -13,6 +13,7 @@ from agentforce.connectors import opencode as oc_mod
 from agentforce.connectors import claude as cl_mod
 from agentforce.connectors import openrouter as or_mod
 from agentforce.connectors import codex as cx_mod
+from agentforce.connectors import gemini as gm_mod
 from agentforce.core.token_event import TokenEvent
 
 
@@ -20,7 +21,7 @@ from agentforce.core.token_event import TokenEvent
 
 class TestConnectorRegistry:
     def test_all_connectors_present(self):
-        assert set(CONNECTORS) == {"opencode", "claude", "openrouter", "codex"}
+        assert set(CONNECTORS) == {"opencode", "claude", "openrouter", "codex", "gemini"}
 
     def test_connectors_are_callable(self):
         for name, fn in CONNECTORS.items():
@@ -31,6 +32,8 @@ class TestConnectorRegistry:
         assert CONNECTORS["claude"] is run_claude
         assert CONNECTORS["openrouter"] is run_openrouter
         assert CONNECTORS["codex"] is run_codex
+        from agentforce.connectors.gemini import run as run_gemini
+        assert CONNECTORS["gemini"] is run_gemini
 
 
 # ── opencode connector ────────────────────────────────────────────────────────
@@ -265,6 +268,94 @@ class TestClaudeConnector:
         assert "--dangerously-skip-permissions" in cmd
 
 
+# ── gemini connector ──────────────────────────────────────────────────────────
+
+class TestGeminiConnector:
+    def test_available_true_when_gemini_exists(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            assert gm_mod.available() is True
+
+    def test_available_false_when_not_found(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert gm_mod.available() is False
+
+    def test_run_returns_five_tuple_with_session_id(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = [
+            '{"type":"init","session_id":"ses_gem_123"}\n',
+            '{"type":"message","role":"assistant","content":"hello","delta":true}\n',
+            '{"type":"result","status":"success","stats":{"input_tokens":10,"output_tokens":20}}\n'
+        ]
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            success, output, error, session_id, token_event = gm_mod.run("prompt", str(tmp_path))
+
+        assert success is True
+        assert output == "hello"
+        assert session_id == "ses_gem_123"
+        assert token_event.tokens_in == 10
+        assert token_event.tokens_out == 20
+
+    def test_run_uses_stream_json_format(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            gm_mod.run("x", str(tmp_path))
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--output-format" in cmd
+        assert "stream-json" in cmd
+        assert "-p" in cmd
+
+    def test_run_passes_model_flag(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            gm_mod.run("x", str(tmp_path), model="gemini-2.5-pro")
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--model" in cmd
+        assert "gemini-2.5-pro" in cmd
+
+    def test_run_normalizes_short_model_alias(self, tmp_path):
+        mock_proc = MagicMock()
+        mock_proc.stdout = []
+        mock_proc.returncode = 0
+        mock_proc.stderr.read.return_value = ""
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            gm_mod.run("x", str(tmp_path), model="pro")
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--model" in cmd
+        assert "gemini-2.5-pro" in cmd
+
+    def test_run_rejects_non_gemini_model_before_cli(self, tmp_path):
+        with patch("subprocess.Popen") as mock_popen:
+            success, output, error, session_id, token_event = gm_mod.run(
+                "x",
+                str(tmp_path),
+                model="gpt-5.4",
+                session_id="ses_1",
+            )
+
+        assert success is False
+        assert output == ""
+        assert "not a Gemini model" in error
+        assert session_id == "ses_1"
+        assert token_event.tokens_in == 0
+        mock_popen.assert_not_called()
+
+
 # ── openrouter connector ──────────────────────────────────────────────────────
 
 class TestOpenrouterConnector:
@@ -334,14 +425,27 @@ class TestAutonomousDefaults:
     def test_default_variant_is_high(self):
         assert autonomous._DEFAULT_VARIANT == "high"
 
-    def test_detect_agent_returns_opencode_when_available(self):
-        with patch.object(oc_mod, "available", return_value=True):
-            assert autonomous._detect_agent() == "opencode"
+    def test_detect_agent_returns_gemini_when_available(self):
+        with patch.object(gm_mod, "available", return_value=True):
+            assert autonomous._detect_agent() == "gemini"
 
-    def test_detect_agent_raises_when_opencode_missing(self):
-        with patch.object(oc_mod, "available", return_value=False):
-            with pytest.raises(SystemExit):
-                autonomous._detect_agent()
+    def test_detect_agent_returns_claude_when_no_gemini(self):
+        with patch.object(gm_mod, "available", return_value=False):
+            with patch.object(cl_mod, "available", return_value=True):
+                assert autonomous._detect_agent() == "claude"
+
+    def test_detect_agent_returns_opencode_when_only_oc_available(self):
+        with patch.object(gm_mod, "available", return_value=False):
+            with patch.object(cl_mod, "available", return_value=False):
+                with patch.object(oc_mod, "available", return_value=True):
+                    assert autonomous._detect_agent() == "opencode"
+
+    def test_detect_agent_raises_when_all_missing(self):
+        with patch.object(gm_mod, "available", return_value=False):
+            with patch.object(cl_mod, "available", return_value=False):
+                with patch.object(oc_mod, "available", return_value=False):
+                    with pytest.raises(SystemExit):
+                        autonomous._detect_agent()
 
     def test_run_agent_dispatches_to_opencode_connector(self, tmp_path):
         from agentforce.core.token_event import TokenEvent

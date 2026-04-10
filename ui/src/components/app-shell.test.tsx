@@ -177,7 +177,7 @@ describe('app shell components', () => {
 
     expect(container.textContent).not.toContain('Mission Control');
     expect(container.textContent).not.toContain('Plan Mode');
-    expect(container.querySelectorAll('a').length).toBe(5);
+    expect(container.querySelectorAll('a').length).toBe(6);
     expect(container.textContent).not.toContain('v0.0.0');
 
     const button = container.querySelector('button');

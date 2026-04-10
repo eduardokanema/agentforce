@@ -8,7 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from ..utils import fmt_duration
+from ..utils import fmt_duration_seconds
 from .spec import MissionSpec, TaskStatus, Caps, ExecutionConfig
 
 
@@ -23,6 +23,7 @@ class TaskState:
     spec_summary: str = ""              # title + first 200 chars of description
     status: TaskStatus = TaskStatus.PENDING
     retries: int = 0
+    lifetime_retries: int = 0
     retry_not_before: float = 0.0
     worker_output: str = ""
     review_feedback: str = ""
@@ -30,8 +31,12 @@ class TaskState:
     blocking_issues: list[str] = field(default_factory=list)
     human_intervention_needed: bool = False
     human_intervention_message: str = ""
+    human_intervention_kind: str = ""
+    human_intervention_options: list[dict] = field(default_factory=list)
+    human_intervention_context: dict = field(default_factory=dict)
     hard_block_reason: Optional[str] = None
     error_message: str = ""
+    timeout_output: str = ""             # partial output from a timed-out run, fed back as context on retry
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
@@ -61,6 +66,7 @@ class TaskState:
             "spec_summary": self.spec_summary,
             "status": status_value,
             "retries": self.retries,
+            "lifetime_retries": self.lifetime_retries,
             "retry_not_before": self.retry_not_before,
             "worker_output": self.worker_output,
             "review_feedback": self.review_feedback,
@@ -68,8 +74,12 @@ class TaskState:
             "blocking_issues": self.blocking_issues,
             "human_intervention_needed": self.human_intervention_needed,
             "human_intervention_message": self.human_intervention_message,
+            "human_intervention_kind": self.human_intervention_kind,
+            "human_intervention_options": self.human_intervention_options,
+            "human_intervention_context": self.human_intervention_context,
             "hard_block_reason": self.hard_block_reason,
             "error_message": self.error_message,
+            "timeout_output": self.timeout_output,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "cost_usd": self.cost_usd,
@@ -86,6 +96,7 @@ class TaskState:
             "spec_summary": "",
             "status": TaskStatus.PENDING,
             "retries": 0,
+            "lifetime_retries": 0,
             "retry_not_before": 0.0,
             "worker_output": "",
             "review_feedback": "",
@@ -93,8 +104,12 @@ class TaskState:
             "blocking_issues": [],
             "human_intervention_needed": False,
             "human_intervention_message": "",
+            "human_intervention_kind": "",
+            "human_intervention_options": [],
+            "human_intervention_context": {},
             "hard_block_reason": None,
             "error_message": "",
+            "timeout_output": "",
             "tokens_in": 0,
             "tokens_out": 0,
             "cost_usd": 0.0,
@@ -106,6 +121,7 @@ class TaskState:
         defaults.update(d)
         defaults["status"] = TaskStatus(d.get("status", "pending"))
         return cls(**defaults)
+
 
 
 @dataclass
@@ -135,7 +151,9 @@ class MissionState:
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: Optional[str] = None
     total_retries: int = 0
+    lifetime_retries: int = 0
     total_human_interventions: int = 0
+    lifetime_human_interventions: int = 0
     total_tokens_used: int = 0
     estimated_cost_usd: float = 0.0
     tokens_in: int = 0
@@ -143,16 +161,20 @@ class MissionState:
     cost_usd: float = 0.0
     caps_hit: dict[str, str] = field(default_factory=dict)  # cap_name -> description
     execution_defaults: ExecutionConfig = field(default_factory=ExecutionConfig)
+    destructive_action_allow_rules: dict[str, dict] = field(default_factory=dict)
+    active_wall_time_seconds: float = 0.0
+    _last_active_tick_at: Optional[datetime] = field(default=None, repr=False, compare=False)
     
     # Derived from spec but we store snapshot
     working_dir: str = ""
-    worker_agent: str = ""   # agent CLI used: "claude", "opencode"
+    worker_agent: str = ""   # agent CLI used: "gemini", "claude", "opencode"
     worker_model: str = ""   # model ID passed to the agent
     daemon_pid: Optional[int] = None
     daemon_started_at: Optional[str] = None
     source_plan_version_id: Optional[str] = None
     source_plan_run_id: Optional[str] = None
     source_draft_id: Optional[str] = None
+    finished_at: Optional[str] = None
 
     @property
     def caps(self) -> Caps:
@@ -226,15 +248,25 @@ class MissionState:
     def retry_budget_exhausted(self) -> bool:
         return self.total_retries >= self.caps.max_retries_global
 
+    def record_active_tick(self, now: datetime | None = None) -> None:
+        """Accumulate supervisor runtime without counting time between processes."""
+        tick_at = now or datetime.now(timezone.utc)
+        if tick_at.tzinfo is None:
+            tick_at = tick_at.replace(tzinfo=timezone.utc)
+
+        if self._last_active_tick_at is not None:
+            elapsed = (tick_at - self._last_active_tick_at).total_seconds()
+            if elapsed > 0:
+                self.active_wall_time_seconds += elapsed
+        self._last_active_tick_at = tick_at
+
+    def reset_active_tick_clock(self) -> None:
+        self._last_active_tick_at = None
+
     def wall_time_exceeded(self) -> bool:
         if not self.caps.max_wall_time_minutes:
             return False
-        started = datetime.fromisoformat(self.started_at)
-        if self.completed_at:
-            ended = datetime.fromisoformat(self.completed_at)
-        else:
-            ended = datetime.now(timezone.utc)
-        elapsed = (ended - started).total_seconds() / 60.0
+        elapsed = self.active_wall_time_seconds / 60.0
         return elapsed >= self.caps.max_wall_time_minutes
 
     def interventions_exhausted(self) -> bool:
@@ -266,10 +298,10 @@ class MissionState:
         total = len(self.task_states)
         done = counts.get(TaskStatus.REVIEW_APPROVED, 0)
         parts = [
-            f"Mission: {self.spec.name} [{self.mission_id}]"
+            f"Mission: {self.spec.name} [{self.mission_id}]",
             f"Progress: {done}/{total} tasks approved",
             f"Status breakdown: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())),
-            f"Retries: {self.total_retries}, Interventions: {self.total_human_interventions}",
+            f"Retries: {self.total_retries} (Lifetime: {self.lifetime_retries}), Interventions: {self.total_human_interventions} (Lifetime: {self.lifetime_human_interventions})",
         ]
         if self.caps_hit:
             parts.append(f"CAPS HIT: {', '.join(f'{k}: {v}' for k, v in self.caps_hit.items())}")
@@ -330,9 +362,13 @@ class MissionState:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "total_retries": self.total_retries,
+            "lifetime_retries": self.lifetime_retries,
             "total_human_interventions": self.total_human_interventions,
+            "lifetime_human_interventions": self.lifetime_human_interventions,
             "caps_hit": self.caps_hit,
             "execution_defaults": self.execution_defaults.to_dict(),
+            "destructive_action_allow_rules": self.destructive_action_allow_rules,
+            "active_wall_time_seconds": self.active_wall_time_seconds,
             "execution": self.execution_metadata(include_tasks=True),
             "working_dir": self.working_dir,
             "worker_agent": self.worker_agent,
@@ -343,13 +379,16 @@ class MissionState:
             "source_plan_version_id": self.source_plan_version_id,
             "source_plan_run_id": self.source_plan_run_id,
             "source_draft_id": self.source_draft_id,
+            "finished_at": self.finished_at,
         }
 
     def to_summary_dict(self) -> dict:
         done_tasks = sum(1 for ts in self.task_states.values() if ts.status == TaskStatus.REVIEW_APPROVED)
         total_tasks = len(self.spec.tasks)
         pct = int(done_tasks / total_tasks * 100) if total_tasks else 0
-        if self.is_done():
+        if self.finished_at:
+            status = "finished"
+        elif self.is_done():
             status = "complete"
         elif self.is_failed():
             status = "failed"
@@ -365,11 +404,14 @@ class MissionState:
             "done_tasks": done_tasks,
             "total_tasks": total_tasks,
             "pct": pct,
-            "duration": fmt_duration(self.started_at, self.completed_at),
+            "duration": fmt_duration_seconds(self.active_wall_time_seconds),
             "worker_agent": self.worker_agent,
             "worker_model": self.worker_model,
             "execution": self.execution_metadata(),
             "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "total_retries": self.total_retries,
+            "lifetime_retries": self.lifetime_retries,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "cost_usd": self.cost_usd,
@@ -391,19 +433,25 @@ class MissionState:
             started_at=d.get("started_at", datetime.now(timezone.utc).isoformat()),
             completed_at=d.get("completed_at"),
             total_retries=d.get("total_retries", 0),
+            lifetime_retries=d.get("lifetime_retries", 0),
             total_human_interventions=d.get("total_human_interventions", 0),
+            lifetime_human_interventions=d.get("lifetime_human_interventions", 0),
             tokens_in=d.get("tokens_in", 0),
             tokens_out=d.get("tokens_out", 0),
             cost_usd=d.get("cost_usd", 0.0),
             caps_hit=d.get("caps_hit", {}),
             execution_defaults=ExecutionConfig.from_dict(d.get("execution_defaults")),
+            destructive_action_allow_rules=d.get("destructive_action_allow_rules", {}),
+            active_wall_time_seconds=d.get("active_wall_time_seconds", 0.0),
             working_dir=d.get("working_dir", ""),
             worker_agent=d.get("worker_agent", ""),
             worker_model=d.get("worker_model", ""),
             source_plan_version_id=d.get("source_plan_version_id"),
             source_plan_run_id=d.get("source_plan_run_id"),
             source_draft_id=d.get("source_draft_id"),
+            finished_at=d.get("finished_at"),
         )
+
 
     def save(self, path: Path | str):
         path = Path(path)

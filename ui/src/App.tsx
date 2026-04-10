@@ -10,12 +10,15 @@ import ModelsPageScreen from './pages/ConnectorsPage';
 import TelemetryPageScreen from './pages/TelemetryPage';
 import TaskDetailPageScreen from './pages/TaskDetailPage';
 import SettingsPageScreen from './pages/SettingsPage';
+import GroundControlPageScreen from './pages/GroundControlPage';
 
 const routeConfig = [
   { path: '/', element: <MissionsPageScreen /> },
   { path: '/mission/:id', element: <MissionDetailPageScreen /> },
   { path: '/mission/:mission_id/task/:task_id', element: <TaskDetailPageScreen /> },
   { path: '/plan', element: <PlanModePageScreen /> },
+  { path: '/plan/:id', element: <PlanModePageScreen /> },
+  { path: '/ground-control', element: <GroundControlPageScreen /> },
   { path: '/models', element: <ModelsPageScreen /> },
   { path: '/telemetry', element: <TelemetryPageScreen /> },
   { path: '/settings', element: <SettingsPageScreen /> },
@@ -25,6 +28,7 @@ type Expect<T extends true> = T;
 type RoutePath = (typeof routeConfig)[number]['path'];
 type _taskRouteExists = Expect<'/mission/:mission_id/task/:task_id' extends RoutePath ? true : false>;
 type _planRouteExists = Expect<'/plan' extends RoutePath ? true : false>;
+type _planIdRouteExists = Expect<'/plan/:id' extends RoutePath ? true : false>;
 type _modelsRouteExists = Expect<'/models' extends RoutePath ? true : false>;
 type _telemetryRouteExists = Expect<'/telemetry' extends RoutePath ? true : false>;
 

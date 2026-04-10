@@ -158,30 +158,104 @@ def _post_task_inject(handler, mission_id: str, task_id: str, body: dict) -> tup
 
 
 def _post_task_resolve(mission_id: str, task_id: str, body: dict) -> tuple[int, dict]:
-    state = _load_state(mission_id)
-    if not state:
+    engine = _load_engine(mission_id)
+    if not engine:
         return 404, {"error": f"Mission {mission_id!r} not found"}
-    task_state = state.task_states.get(task_id)
+    task_state = engine.state.task_states.get(task_id)
     if not task_state:
         return 404, {"error": f"Task {task_id!r} not found in mission {mission_id!r}"}
     if state_io._task_status_value(task_state) != "needs_human":
         return 409, {"error": "task not needs_human"}
     if body.get("failed"):
-        task_state.status = "failed"
-        task_state.human_intervention_needed = False
-        task_state.human_intervention_message = ""
-        task_state.bump()
-        state.save(_state_path(mission_id))
-        _broadcast_mission_refresh(state)
+        engine.resolve_as_failed(task_id)
+        _broadcast_mission_refresh(engine.state)
         return 200, {"failed": True}
-    message = body.get("message")
+
+    choice_id = body.get("choice_id")
+    message = body.get("message", "")
     if not isinstance(message, str):
         return 400, {"error": "message is required"}
-    task_state.status = "pending"
-    task_state.worker_output = (task_state.worker_output + "\n" + message).strip()
-    state.save(_state_path(mission_id))
-    _broadcast_mission_refresh(state)
-    return 200, {"resolved": True}
+    if not isinstance(choice_id, str) and getattr(task_state, "human_intervention_kind", "") == "destructive_action":
+        return 400, {"error": "choice_id is required"}
+    if not isinstance(choice_id, str):
+        choice_id = None
+    if not message and choice_id is None:
+        return 400, {"error": "message is required"}
+
+    try:
+        engine.apply_human_resolution(task_id, message, choice_id=choice_id)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+
+    from agentforce.server import handler as _handler
+    active_daemon = getattr(_handler, "_daemon", None)
+    if active_daemon is not None:
+        active_daemon.enqueue(mission_id)
+
+    _broadcast_mission_refresh(engine.state)
+    payload = {"resolved": True}
+    if choice_id:
+        payload["choice_id"] = choice_id
+    return 200, payload
+
+
+def _post_task_change_model(mission_id: str, task_id: str, body: dict) -> tuple[int, dict]:
+    legacy_model = body.get("model")
+    worker_model = body.get("worker_model")
+    reviewer_model = body.get("reviewer_model")
+    worker_agent = body.get("worker_agent")
+    reviewer_agent = body.get("reviewer_agent")
+    if not isinstance(worker_model, str) and isinstance(legacy_model, str):
+        worker_model = legacy_model
+    if not isinstance(worker_model, str):
+        worker_model = None
+    if not isinstance(reviewer_model, str):
+        reviewer_model = None
+    if not isinstance(worker_agent, str):
+        worker_agent = None
+    if not isinstance(reviewer_agent, str):
+        reviewer_agent = None
+    worker_model = worker_model.strip() if worker_model else None
+    reviewer_model = reviewer_model.strip() if reviewer_model else None
+    worker_agent = worker_agent.strip() if worker_agent else None
+    reviewer_agent = reviewer_agent.strip() if reviewer_agent else None
+    if not worker_model and not reviewer_model and not worker_agent and not reviewer_agent:
+        return 400, {"error": "worker_model, reviewer_model, worker_agent, or reviewer_agent is required"}
+
+    engine = _load_engine(mission_id)
+    if not engine:
+        return 404, {"error": f"Mission {mission_id!r} not found"}
+    if not engine.state.task_states.get(task_id):
+        return 404, {"error": f"Task {task_id!r} not found in mission {mission_id!r}"}
+
+    try:
+        retried = engine.change_models(
+            task_id,
+            worker_model=worker_model,
+            reviewer_model=reviewer_model,
+            worker_agent=worker_agent,
+            reviewer_agent=reviewer_agent,
+        )
+    except ValueError as exc:
+        return 409, {"error": str(exc)}
+
+    if retried:
+        from agentforce.server import handler as _handler
+        active_daemon = getattr(_handler, "_daemon", None)
+        if active_daemon is not None:
+            active_daemon.enqueue(mission_id)
+
+    state = _load_state(mission_id)
+    if state:
+        _broadcast_mission_refresh(state)
+
+    return 200, {
+        "worker_agent": worker_agent,
+        "worker_model": worker_model,
+        "reviewer_agent": reviewer_agent,
+        "reviewer_model": reviewer_model,
+        "retried": retried,
+    }
 
 
 def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
@@ -195,4 +269,6 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
             return _post_task_inject(handler, parts[2], parts[4], body)
         if parts[5] == "resolve":
             return _post_task_resolve(parts[2], parts[4], body)
+        if parts[5] == "change_model":
+            return _post_task_change_model(parts[2], parts[4], body)
     return 404, {"error": "Not found"}

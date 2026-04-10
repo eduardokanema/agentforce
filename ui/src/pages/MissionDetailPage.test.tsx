@@ -1,5 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
+import { Simulate } from 'react-dom/test-utils';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +11,17 @@ const apiHarness = vi.hoisted(() => ({
   stopMission: vi.fn(async () => undefined),
   restartMission: vi.fn(async () => undefined),
   createReadjustedDraft: vi.fn(async () => ({ id: 'draft-321', revision: 1 })),
+  getModels: vi.fn(async () => [
+    { id: 'gpt-5', name: 'GPT-5', provider: 'Codex', provider_id: 'codex', cost_per_1k_input: 0, cost_per_1k_output: 0, latency_label: 'Standard' },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet', provider: 'Claude', provider_id: 'claude', cost_per_1k_input: 0, cost_per_1k_output: 0, latency_label: 'Standard' },
+  ]),
+  updateMissionDefaultModels: vi.fn(async () => ({
+    worker_agent: 'codex',
+    worker_model: 'gpt-5',
+    reviewer_agent: 'claude',
+    reviewer_model: 'claude-sonnet-4-6',
+    pinned_tasks: 1,
+  })),
 }));
 const toastHarness = vi.hoisted(() => ({
   addToast: vi.fn(),
@@ -29,6 +41,8 @@ vi.mock('../lib/api', () => ({
   stopMission: apiHarness.stopMission,
   restartMission: apiHarness.restartMission,
   createReadjustedDraft: apiHarness.createReadjustedDraft,
+  getModels: apiHarness.getModels,
+  updateMissionDefaultModels: apiHarness.updateMissionDefaultModels,
 }));
 
 vi.mock('../hooks/useToast', () => ({
@@ -113,6 +127,11 @@ const mockMission: MissionState = {
     },
     mixed_roles: ['worker', 'reviewer'],
     task_overrides: { worker: 1, reviewer: 1 },
+    tasks: {
+      'task-1': {
+        worker: { agent: 'claude', model: 'claude-sonnet-4-6', thinking: 'medium' },
+      },
+    },
   },
 };
 
@@ -123,6 +142,8 @@ describe('MissionDetailPage', () => {
     apiHarness.stopMission.mockClear();
     apiHarness.restartMission.mockClear();
     apiHarness.createReadjustedDraft.mockClear();
+    apiHarness.getModels.mockClear();
+    apiHarness.updateMissionDefaultModels.mockClear();
     toastHarness.addToast.mockClear();
     document.body.innerHTML = '';
   });
@@ -138,6 +159,7 @@ describe('MissionDetailPage', () => {
 
     expect(markup).toContain('Missions');
     expect(markup).toContain('Mission Alpha');
+    expect(markup).toContain('claude-sonnet-4-6');
     expect(markup).toContain('text-title');
     expect(markup).toContain('↓ 100 in');
     expect(markup).toContain('↑ 23 out');
@@ -229,10 +251,12 @@ describe('MissionDetailPage', () => {
     });
 
     const buttons = Array.from(container.querySelectorAll('button'));
-    expect(buttons).toHaveLength(3);
+    expect(buttons).toHaveLength(4);
+    const stopButton = buttons.find((button) => button.textContent === 'Stop Mission') as HTMLButtonElement;
+    const restartButton = buttons.find((button) => button.textContent === 'Restart Mission') as HTMLButtonElement;
 
     await act(async () => {
-      buttons[1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      stopButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(container.textContent).toContain('Stop mission "Mission Alpha"?');
     const stopDialog = container.querySelector('[role="dialog"]') as HTMLElement;
@@ -246,7 +270,7 @@ describe('MissionDetailPage', () => {
     expect(toastHarness.addToast).toHaveBeenCalledWith('Mission stopped', 'success');
 
     await act(async () => {
-      buttons[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      restartButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(container.textContent).toContain('Restart mission "Mission Alpha"?');
     const restartDialog = container.querySelector('[role="dialog"]') as HTMLElement;
@@ -262,6 +286,54 @@ describe('MissionDetailPage', () => {
     act(() => {
       root.unmount();
     });
+  });
+
+  it('opens worker and reviewer default model selectors from Mission Control', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/mission/mission-123']}>
+          <Routes>
+            <Route path="/mission/:id" element={<MissionDetailPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+
+    const changeDefaults = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Change Default Models',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      changeDefaults.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[];
+    expect(selects).toHaveLength(2);
+    await act(async () => {
+      selects[0].value = 'gpt-5';
+      Simulate.change(selects[0]);
+      selects[1].value = 'claude-sonnet-4-6';
+      Simulate.change(selects[1]);
+    });
+
+    const save = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Save Models',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      save.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(apiHarness.updateMissionDefaultModels).toHaveBeenCalledWith('mission-123', {
+      worker_agent: 'codex',
+      worker_model: 'gpt-5',
+      reviewer_agent: 'claude',
+      reviewer_model: 'claude-sonnet-4-6',
+    });
+
+    root.unmount();
   });
 
   it('offers a visible Readjust Trajectory action that returns to seeded planning', async () => {

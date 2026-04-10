@@ -125,6 +125,7 @@ def cmd_start(args):
     print(f"  python3 -m agentforce.autonomous {mid}")
     print(f"  python3 -m agentforce.autonomous {mid} --agent opencode --model <model-id>")
     print(f"  python3 -m agentforce.autonomous {mid} --agent claude --model claude-sonnet-4-6")
+    print(f"  python3 -m agentforce.autonomous {mid} --agent gemini --model pro")
 
 
 def cmd_status(args):
@@ -187,7 +188,7 @@ def cmd_resolve(args):
         print(f"No mission found: {args.id}", file=sys.stderr)
         sys.exit(1)
     engine = MissionEngine.load(sf, _memory())
-    engine.apply_human_resolution(args.task_id, args.message)
+    engine.apply_human_resolution(args.task_id, args.message, choice_id=args.choice)
     engine._save()
     print(f"Resolved {args.task_id} -> {engine.state.get_task(args.task_id).status}")
 
@@ -375,7 +376,7 @@ def main():
     p = sub.add_parser("start"); p.add_argument("spec"); p.add_argument("--id"); p.add_argument("--workdir"); p.add_argument("--worker-model"); p.add_argument("--reviewer-model")
     p = sub.add_parser("status"); p.add_argument("id"); p.add_argument("--json", action="store_true")
     sub.add_parser("list")
-    p = sub.add_parser("resolve"); p.add_argument("id"); p.add_argument("task_id"); p.add_argument("message")
+    p = sub.add_parser("resolve"); p.add_argument("id"); p.add_argument("task_id"); p.add_argument("message"); p.add_argument("--choice")
     p = sub.add_parser("fail"); p.add_argument("id"); p.add_argument("task_id")
     p = sub.add_parser("report"); p.add_argument("id"); p.add_argument("--events", type=int, default=0)
     p = sub.add_parser("kill"); p.add_argument("id")

@@ -65,6 +65,10 @@ class MissionDraftV1:
     id: str
     revision: int
     status: str
+    name: str
+    goal: str
+    created_at: datetime
+    updated_at: datetime
     draft_spec: dict[str, Any]
     turns: list[dict[str, Any]]
     validation: dict[str, Any]
@@ -79,6 +83,10 @@ class MissionDraftV1:
             "id": self.id,
             "revision": self.revision,
             "status": self.status,
+            "name": self.name,
+            "goal": self.goal,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "draft_spec": self.draft_spec,
             "turns": self.turns,
             "validation": self.validation,
@@ -91,11 +99,33 @@ class MissionDraftV1:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> MissionDraftV1:
+        draft_spec = dict(payload.get("draft_spec") or {})
+
+        created_at_val = payload.get("created_at")
+        if isinstance(created_at_val, str):
+            created_at = _parse_timestamp(created_at_val) or _utc_now()
+        elif isinstance(created_at_val, datetime):
+            created_at = created_at_val
+        else:
+            created_at = _utc_now()
+
+        updated_at_val = payload.get("updated_at")
+        if isinstance(updated_at_val, str):
+            updated_at = _parse_timestamp(updated_at_val) or _utc_now()
+        elif isinstance(updated_at_val, datetime):
+            updated_at = updated_at_val
+        else:
+            updated_at = _utc_now()
+
         return cls(
             id=str(payload["id"]),
             revision=int(payload["revision"]),
             status=str(payload["status"]),
-            draft_spec=dict(payload.get("draft_spec") or {}),
+            name=str(draft_spec.get("name") or payload.get("name") or ""),
+            goal=str(draft_spec.get("goal") or payload.get("goal") or ""),
+            created_at=created_at,
+            updated_at=updated_at,
+            draft_spec=draft_spec,
             turns=list(payload.get("turns") or []),
             validation=dict(payload.get("validation") or {}),
             activity_log=list(payload.get("activity_log") or []),
@@ -137,10 +167,15 @@ class PlanDraftStore:
         companion_profile: dict[str, Any],
         draft_notes: list[dict[str, Any]],
     ) -> MissionDraftV1:
+        now = _utc_now()
         draft = MissionDraftV1(
             id=draft_id,
             revision=1,
             status=status,
+            name=str(draft_spec.get("name") or ""),
+            goal=str(draft_spec.get("goal") or ""),
+            created_at=now,
+            updated_at=now,
             draft_spec=dict(draft_spec),
             turns=list(turns),
             validation=dict(validation),
@@ -161,7 +196,25 @@ class PlanDraftStore:
             return None
         with path.open(encoding="utf-8") as handle:
             payload = json.load(handle)
-        return MissionDraftV1.from_dict(payload)
+        draft = MissionDraftV1.from_dict(payload)
+        return draft.copy_with(updated_at=self._last_activity_at(draft, path))
+
+    def list_all(self, include_terminal: bool = False) -> list[MissionDraftV1]:
+        """Scan the drafts directory and return all MissionDraftV1 objects."""
+        if not self._drafts_dir.exists():
+            return []
+
+        results: list[MissionDraftV1] = []
+        for path in self._drafts_dir.glob("*.json"):
+            draft = self.load(path.stem)
+            if draft is None:
+                continue
+            if not include_terminal and draft.status in _TERMINAL_STATUSES:
+                continue
+            results.append(draft)
+
+        results.sort(key=lambda d: d.updated_at, reverse=True)
+        return results
 
     def save(self, draft: MissionDraftV1, *, expected_revision: int) -> DraftSaveResult:
         with self._locked_store():
@@ -228,14 +281,12 @@ class PlanDraftStore:
         return MissionDraftV1.from_dict(payload)
 
     def _last_activity_at(self, draft: MissionDraftV1, path: Path) -> datetime:
-        timestamps: list[datetime] = []
-        for entry in draft.activity_log:
-            if isinstance(entry, dict):
-                parsed = _parse_timestamp(str(entry.get("timestamp") or ""))
+        if draft.activity_log:
+            last_entry = draft.activity_log[-1]
+            if isinstance(last_entry, dict):
+                parsed = _parse_timestamp(str(last_entry.get("timestamp") or ""))
                 if parsed is not None:
-                    timestamps.append(parsed)
-        if timestamps:
-            return max(timestamps)
+                    return parsed
         return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
 
     @staticmethod

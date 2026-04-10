@@ -25,12 +25,12 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
 from pathlib import Path
 
-_STREAMS_DIR = Path.home() / ".agentforce" / "streams"
-_STATE_DIR = Path.home() / ".agentforce" / "state"
+def _agentforce_home() -> Path:
+    return Path.home() / ".agentforce"
 
 
 def _pause_file(mission_id: str) -> Path:
-    return _STATE_DIR / f"{mission_id}.pause"
+    return _agentforce_home() / "state" / f"{mission_id}.pause"
 
 
 def is_paused(mission_id: str) -> bool:
@@ -38,7 +38,7 @@ def is_paused(mission_id: str) -> bool:
 
 
 def pause_mission(mission_id: str) -> None:
-    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (_agentforce_home() / "state").mkdir(parents=True, exist_ok=True)
     _pause_file(mission_id).touch()
 
 
@@ -71,8 +71,9 @@ def check_inject_queue(mission_id: str, task_id: str) -> str | None:
 
 
 def _stream_path(mission_id: str, task_id: str) -> Path:
-    _STREAMS_DIR.mkdir(parents=True, exist_ok=True)
-    return _STREAMS_DIR / f"{mission_id}_{task_id}.log"
+    streams_dir = _agentforce_home() / "streams"
+    streams_dir.mkdir(parents=True, exist_ok=True)
+    return streams_dir / f"{mission_id}_{task_id}.log"
 
 
 def _ensure_pkg():
@@ -91,11 +92,17 @@ def _ensure_pkg():
 
 
 def _detect_agent() -> str:
-    """Auto-detect which agent to use: opencode only."""
+    """Auto-detect which agent to use: gemini > claude > opencode."""
+    from agentforce.connectors import gemini as _gm
+    from agentforce.connectors import claude as _cl
     from agentforce.connectors import opencode as _oc
+    if _gm.available():
+        return "gemini"
+    if _cl.available():
+        return "claude"
     if _oc.available():
         return "opencode"
-    raise SystemExit("No agent CLI found. Install 'opencode'.")
+    raise SystemExit("No agent CLI found. Install 'gemini', 'claude', or 'opencode'.")
 
 
 def _run_agent(
@@ -372,7 +379,7 @@ def run_autonomous(
         engine.state.total_retries = 0
 
     engine._save()
-    tele_store = TelemetryStore()
+    tele_store = TelemetryStore(_agentforce_home() / "telemetry")
     start = datetime.now(timezone.utc)
 
     eff_pool = max(pool_size, engine.state.caps.max_concurrent_workers * 2 + 2)
@@ -485,6 +492,8 @@ def run_autonomous(
                     ts = engine.state.get_task(tid)
                     if ts:
                         ts.status = TaskStatus.RETRY
+                        if output:
+                            ts.timeout_output = output
                     engine._save()
                     continue
                 if error:
@@ -658,6 +667,13 @@ def run_autonomous(
                     _submit(action)
                 elif hasattr(action, "message"):  # HumanIntervention
                     print(f"  ⚠ Human intervention [{action.task_id}]: {getattr(action, 'message', '')[:120]}")
+                    if getattr(action, "kind", "") == "destructive_action":
+                        options = getattr(action, "options", []) or []
+                        for option in options:
+                            print(f"    - {option.get('id')}: {option.get('label')}")
+                        print("    Waiting for operator decision in Mission Control.")
+                        engine._save()
+                        continue
                     print(f"    Auto-resolving with reviewer context.")
                     engine.apply_human_resolution(
                         action.task_id, getattr(action, "message", "Fix the blocking issues listed above.")
@@ -680,6 +696,8 @@ def run_autonomous(
             # Pause support: block here while pause file exists
             if is_paused(engine.state.mission_id):
                 print(f"  ⏸  Mission paused. Remove pause file or run: mission resume {engine.state.mission_id}")
+                engine.state.reset_active_tick_clock()
+                engine._save()
                 while is_paused(engine.state.mission_id):
                     time.sleep(2)
                 print(f"  ▶  Mission resumed.")
@@ -706,7 +724,7 @@ def run_autonomous(
         mission_name=engine.spec.name,
         started_at=engine.state.started_at,
         completed_at=end.isoformat(),
-        total_duration_s=(end - datetime.fromisoformat(engine.state.started_at)).total_seconds(),
+        total_duration_s=engine.state.active_wall_time_seconds,
         total_tasks=len(engine.spec.tasks),
         approved_on_first_try=sum(
             1 for tm in task_metrics.values()
@@ -758,7 +776,7 @@ if __name__ == "__main__":
         "--agent",
         default="auto",
         choices=["auto", *CONNECTORS],
-        help="Agent CLI to use (default: auto — opencode)",
+        help="Agent CLI to use (default: auto — gemini > claude > opencode)",
     )
     p.add_argument(
         "--model",

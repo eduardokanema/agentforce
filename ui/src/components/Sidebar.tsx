@@ -8,6 +8,7 @@ type WsConnectionState = 'connecting' | 'open' | 'closed';
 const NAV_ITEMS = [
   { label: 'Mission Control', icon: '⌘', to: '/' },
   { label: 'Plan Mode', icon: '◈', to: '/plan' },
+  { label: 'Ground Control', icon: '⊛', to: '/ground-control' },
   { label: 'Models', icon: '⬡', to: '/models' },
   { label: 'Telemetry', icon: '◎', to: '/telemetry' },
   { label: 'Settings', icon: '⚙', to: '/settings' },
@@ -42,8 +43,8 @@ function SidebarNavLink({
   collapsed: boolean;
 }): JSX.Element {
   const inRouter = useInRouterContext();
-  const className = [
-    'flex min-h-10 items-center rounded-none border-l-2 px-3 py-2 text-[12px] transition-colors',
+  const baseClassName = [
+    'flex min-h-10 items-center px-3 py-2 text-[12px] transition-all duration-200',
     collapsed ? 'justify-center px-0' : 'justify-start gap-3',
   ].join(' ');
 
@@ -51,7 +52,7 @@ function SidebarNavLink({
     return (
       <a
         href={item.to}
-        className={[className, 'border-transparent text-dim hover:bg-card hover:text-text'].join(' ')}
+        className={[baseClassName, 'text-dim hover:bg-card hover:text-text'].join(' ')}
         title={item.label}
       >
         <span aria-hidden="true" className="text-[13px] leading-none">
@@ -67,17 +68,17 @@ function SidebarNavLink({
       to={item.to}
       end={item.to === '/'}
       className={({ isActive }) => [
-        className,
+        baseClassName,
         isActive
-          ? 'border-cyan bg-cyan-bg text-cyan'
-          : 'border-transparent text-dim hover:bg-card hover:text-text',
+          ? 'bg-cyan-bg/30 text-cyan shadow-[inset_0_0_12px_rgba(34,211,238,0.1)]'
+          : 'text-dim hover:bg-card hover:text-text',
       ].join(' ')}
       title={item.label}
     >
       <span aria-hidden="true" className="text-[13px] leading-none">
         {item.icon}
       </span>
-      {!collapsed ? <span className="truncate">{item.label}</span> : null}
+      {!collapsed ? <span className="truncate font-medium">{item.label}</span> : null}
     </NavLink>
   );
 }
@@ -135,7 +136,7 @@ export default function Sidebar() {
             aria-label={`Theme: ${THEME_LABELS[mode]}`}
             onClick={cycleTheme}
             className={[
-              'flex min-h-10 w-full items-center rounded-none border-l-2 border-transparent px-3 py-2 text-[12px] text-dim transition-colors hover:bg-card hover:text-text',
+              'flex min-h-10 w-full items-center px-3 py-2 text-[12px] text-dim transition-colors hover:bg-card hover:text-text',
               collapsed ? 'justify-center px-0' : 'justify-start gap-3',
             ].join(' ')}
           >

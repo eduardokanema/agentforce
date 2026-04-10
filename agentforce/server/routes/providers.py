@@ -11,7 +11,7 @@ from typing import Any
 from urllib import request as urllib_request
 
 from .. import state_io
-from ...utils import fmt_duration
+from ...utils import fmt_duration_seconds
 
 
 _KNOWN_CONNECTORS = {
@@ -62,12 +62,30 @@ _PROVIDER_CATALOGUE: dict[str, dict[str, Any]] = {
         "requires_key": False,
         "models": [],
     },
+    "gemini": {
+        "display_name": "Gemini CLI",
+        "description": "The Gemini CLI assistant. Authenticated separately via the `gemini` binary.",
+        "type": "cli",
+        "binary": "gemini",
+        "requires_key": False,
+        "models": [],
+    },
 }
 
 _CLAUDE_CODE_MODELS: list[dict[str, Any]] = [
     {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "latency_label": "Powerful"},
     {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "latency_label": "Standard"},
     {"id": "claude-4-5-haiku", "name": "Claude Haiku 4.5", "latency_label": "Fast"},
+]
+
+_GEMINI_MODELS: list[dict[str, Any]] = [
+    {"id": "auto", "name": "Auto (Optimized)", "latency_label": "Dynamic"},
+    {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview", "latency_label": "Powerful"},
+    {"id": "gemini-3-flash-preview", "name": "Gemini 3 Flash Preview", "latency_label": "Fast"},
+    {"id": "gemini-3.1-flash-lite-preview", "name": "Gemini 3.1 Flash-Lite Preview", "latency_label": "Fastest"},
+    {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "latency_label": "Powerful"},
+    {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "latency_label": "Fast"},
+    {"id": "gemini-2.5-flash-lite", "name": "Gemini 2.5 Flash-Lite", "latency_label": "Fastest"},
 ]
 
 _CODEX_MODELS_STATIC_FALLBACK: list[dict[str, Any]] = [
@@ -183,6 +201,10 @@ def _fetch_claude_code_models() -> list[dict]:
     return [{"cost_per_1k_input": 0.0, "cost_per_1k_output": 0.0, **m} for m in _CLAUDE_CODE_MODELS]
 
 
+def _fetch_gemini_models() -> list[dict]:
+    return [{"cost_per_1k_input": 0.0, "cost_per_1k_output": 0.0, **m} for m in _GEMINI_MODELS]
+
+
 def _codex_latency_label(model_id: str, description: str | None) -> str:
     lowered_id = model_id.lower()
     lowered_description = (description or "").lower()
@@ -254,6 +276,7 @@ def _get_provider_models(provider_name: str) -> list[dict]:
     fetchers = {
         "claude": _fetch_claude_code_models,
         "codex": _fetch_codex_models,
+        "gemini": _fetch_gemini_models,
     }
     fetcher = fetchers.get(provider_name)
     metadata = _provider_metadata()
@@ -299,7 +322,7 @@ def _models_list() -> list[dict]:
                 continue
             if provider_id == "opencode":
                 source: list[dict] = metadata.get("openrouter", {}).get("cached_models", [])
-            elif provider_id in {"claude", "codex"}:
+            elif provider_id in {"claude", "codex", "gemini"}:
                 source = _get_provider_models(provider_id)
             elif "cached_models" in meta:
                 source = meta["cached_models"]
@@ -331,6 +354,7 @@ def _models_list() -> list[dict]:
                     "id": mid,
                     "name": model["name"],
                     "provider": catalogue["display_name"],
+                    "provider_id": provider_id,
                     "cost_per_1k_input": model["cost_per_1k_input"],
                     "cost_per_1k_output": model["cost_per_1k_output"],
                     "latency_label": model["latency_label"],
@@ -359,7 +383,7 @@ def _providers_list() -> list[dict]:
             active = _check_agent_binary(binary)
             if provider_id == "opencode":
                 all_models: list[dict] = metadata.get("openrouter", {}).get("cached_models", [])
-            elif provider_id in {"claude", "codex"}:
+            elif provider_id in {"claude", "codex", "gemini"}:
                 all_models = _get_provider_models(provider_id)
             elif "cached_models" in meta:
                 all_models = meta["cached_models"]
@@ -471,6 +495,8 @@ def _refresh_provider_models(provider_id: str) -> tuple[int, dict]:
                 models = _fetch_claude_code_models()
             elif provider_id == "codex":
                 models = _fetch_codex_models()
+            elif provider_id == "gemini":
+                models = _fetch_gemini_models()
             else:
                 return 400, {"error": f"No model fetcher for {provider_id!r}"}
         except Exception as exc:
@@ -726,7 +752,7 @@ def _telemetry_get(handler, parts: list[str]) -> tuple[int, dict | None]:
             "cost_usd": state.cost_usd,
             "tokens_in": state.tokens_in,
             "tokens_out": state.tokens_out,
-            "duration": fmt_duration(state.started_at, state.completed_at),
+            "duration": fmt_duration_seconds(state.active_wall_time_seconds),
             "retries": state.total_retries,
         })
         for task_id, task_state in state.task_states.items():

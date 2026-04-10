@@ -452,6 +452,100 @@ def _json_request(handler: DashboardHandler, payload: dict) -> None:
     handler.headers["Content-Length"] = str(len(body))
 
 
+def test_api_plan_drafts_list_empty(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    
+    handler = _make_handler("/api/plan/drafts")
+    handler.do_GET()
+    
+    assert handler.send_response.call_args.args == (200,)
+    body = _response_body(handler)
+    assert body == []
+
+
+def test_api_plan_drafts_list_returns_summaries(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda _run_id: None)
+    
+    # Create two drafts
+    for i in range(2):
+        create_handler = _make_handler("/api/plan/drafts")
+        payload = json.dumps({"prompt": f"Draft {i}"}).encode("utf-8")
+        create_handler.rfile = BytesIO(payload)
+        create_handler.headers["Content-Length"] = str(len(payload))
+        create_handler.do_POST()
+        assert create_handler.send_response.call_args.args == (200,)
+
+    list_handler = _make_handler("/api/plan/drafts")
+    list_handler.do_GET()
+
+    assert list_handler.send_response.call_args.args == (200,)
+    body = _response_body(list_handler)
+    assert isinstance(body, list)
+    assert len(body) == 2
+    
+    # Sort by name for consistent testing if needed, though list_all sorts by updated_at desc
+    body.sort(key=lambda x: x["name"])
+    
+    for i, item in enumerate(body):
+        assert "id" in item
+        assert item["name"] == f"Draft {i}"
+        assert item["goal"] == f"Draft {i}"
+        assert item["status"] == "draft"
+        assert "created_at" in item
+        assert "updated_at" in item
+        # Verify ISO format
+        from datetime import datetime
+        assert datetime.fromisoformat(item["created_at"])
+        assert datetime.fromisoformat(item["updated_at"])
+
+
+def test_api_plan_drafts_list_filtering(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda _run_id: None)
+
+    # Create one normal draft, one finalized, one cancelled
+    statuses = ["draft", "finalized", "cancelled"]
+    for status in statuses:
+        create_handler = _make_handler("/api/plan/drafts")
+        payload = json.dumps({"prompt": f"Mission {status}"}).encode("utf-8")
+        create_handler.rfile = BytesIO(payload)
+        create_handler.headers["Content-Length"] = str(len(payload))
+        create_handler.do_POST()
+        created = _response_body(create_handler)
+        
+        if status != "draft":
+            # Manually update status in the filesystem
+            draft_path = tmp_path / "drafts" / f"{created['id']}.json"
+            data = json.loads(draft_path.read_text())
+            data["status"] = status
+            draft_path.write_text(json.dumps(data))
+
+    # Default: should only return "draft"
+    list_handler = _make_handler("/api/plan/drafts")
+    list_handler.do_GET()
+    body = _response_body(list_handler)
+    assert len(body) == 1
+    assert body[0]["status"] == "draft"
+
+    # include_terminal=true: should return all 3
+    list_all_handler = _make_handler("/api/plan/drafts?include_terminal=true")
+    list_all_handler.do_GET()
+    body_all = _response_body(list_all_handler)
+    assert len(body_all) == 3
+    assert {b["status"] for b in body_all} == {"draft", "finalized", "cancelled"}
+
+    # include_terminal=false: should only return "draft"
+    list_none_handler = _make_handler("/api/plan/drafts?include_terminal=false")
+    list_none_handler.do_GET()
+    body_none = _response_body(list_none_handler)
+    assert len(body_none) == 1
+    assert body_none[0]["status"] == "draft"
+
+
 def test_plan_draft_create_and_get_round_trip(tmp_path, monkeypatch):
     from agentforce.server.routes import plan as plan_routes
 

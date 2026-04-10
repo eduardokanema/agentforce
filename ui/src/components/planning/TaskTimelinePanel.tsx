@@ -55,7 +55,7 @@ export default function TaskTimelinePanel({
           const hasBadDeps = task.dependencies.some(
             (dep) => !tasks.find((t) => t.id === dep),
           );
-          const accentColor = hasBadDeps ? 'bg-amber-400/50' : 'bg-cyan/40';
+          const taskStatusColor = hasBadDeps ? 'border-amber text-amber bg-amber-bg/20' : 'border-border text-muted bg-card';
           const taskWorkerModel = task.execution?.worker?.model ?? '';
           const taskReviewerModel = task.execution?.reviewer?.model ?? '';
 
@@ -80,14 +80,12 @@ export default function TaskTimelinePanel({
           return (
             <article
               key={task.id}
-              className="relative overflow-hidden rounded-lg border border-border bg-surface"
+              className="relative overflow-hidden rounded-lg border border-border bg-surface transition-all duration-200 hover:border-border-lit"
             >
-              <div className={`absolute inset-y-0 left-0 w-1 ${accentColor}`} />
-
-              <div className="space-y-3 p-4 pl-5">
+              <div className="space-y-3 p-4">
                 {/* Header */}
                 <div className="flex items-center gap-3">
-                  <span className="flex-shrink-0 rounded-full border border-border bg-card px-2 py-0.5 font-mono text-[11px] font-bold text-muted">
+                  <span className={`flex-shrink-0 rounded-full border px-2 py-0.5 font-mono text-[11px] font-bold transition-colors ${taskStatusColor}`}>
                     {taskNum}
                   </span>
                   <input

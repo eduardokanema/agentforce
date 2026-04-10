@@ -31,7 +31,7 @@ export function parseStreamLine(line: string): { type: LineType; raw: string } {
 }
 
 export const LINE_CLASSES: Record<LineType, string> = {
-  inject: 'bg-amber/10 border-l-2 border-amber text-amber',
+  inject: 'bg-amber-bg/60 px-2 rounded-sm text-amber font-bold',
   command: 'text-cyan opacity-90',
   pass: 'text-green',
   fail: 'text-red',

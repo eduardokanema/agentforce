@@ -5,3 +5,8 @@ build/
 .venv/
 ui/node_modules/
 ui/dist/
+.gemini
+.pytest_cache
+graphify-out/
+tsc*.txt
+plans/

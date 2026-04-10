@@ -237,6 +237,23 @@ ACCEPTANCE CRITERIA (ALL must be met):
 
 OUTPUT EXPECTED:
 Report which files you created/modified and how each acceptance criterion was met.
+
+DESTRUCTIVE ACTION APPROVAL:
+If you are about to run a potentially destructive action (delete/reset/overwrite
+user work, force-push, kill processes, deploy irreversible changes, drop data, or
+similar), stop before executing it. End your response with this exact fenced JSON
+shape so AgentForce can ask the operator:
+
+```agentforce-warning
+{{
+  "type": "destructive_action_request",
+  "summary": "Short operator-facing summary",
+  "risk": "What could be lost or changed",
+  "proposed_action": "Exact command or operation you want to run",
+  "targets": ["affected path, service, branch, database, or resource"],
+  "action_key": "stable exact key such as delete:dist or reset:main"
+}}
+```
 """
 
     def generate_reviewer_prompt(self, worker_output: str, mission_name: str, dod: str, project_memory: str = "") -> str:

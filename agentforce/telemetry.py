@@ -103,6 +103,9 @@ class MissionMetrics:
     
     # Per-task breakdown
     task_metrics: dict[str, dict] = field(default_factory=dict)
+    
+    # Troubleshooting
+    troubleshoot_prompts: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items()}

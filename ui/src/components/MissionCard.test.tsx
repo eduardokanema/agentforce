@@ -80,7 +80,7 @@ describe("MissionCard", () => {
     const { container } = renderCard(mission);
 
     expect(container.innerHTML).toContain(
-      "hover:shadow-[0_0_0_1px_theme(colors.border-lit),0_4px_24px_theme(colors.glow-cyan)]",
+      "hover:shadow-[0_0_24px_rgba(34,211,238,0.1)]",
     );
     expect(container.innerHTML).toContain("bg-cyan");
     expect(container.textContent).toContain("Backfill pipeline");

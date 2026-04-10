@@ -81,6 +81,7 @@ describe('connectors API client', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -89,6 +90,7 @@ describe('connectors API client', () => {
     await retryTask('mission-1', 'task-1');
     await injectPrompt('mission-1', 'task-1', 'please check');
     await resolveHumanBlock('mission-1', 'task-1', 'resolved');
+    await resolveHumanBlock('mission-1', 'task-1', { choice_id: 'always_allow', message: 'ok' });
     await markTaskFailed('mission-1', 'task-1');
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -126,6 +128,15 @@ describe('connectors API client', () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       6,
+      '/api/mission/mission-1/task/task-1/resolve',
+      {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ choice_id: 'always_allow', message: 'ok' }),
+      },
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      7,
       '/api/mission/mission-1/task/task-1/resolve',
       {
         method: 'POST',

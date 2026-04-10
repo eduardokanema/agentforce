@@ -321,6 +321,21 @@ class TestSubscriptionFunctions(unittest.TestCase):
         self.assertEqual(payloads[1]["type"], "task_cost_update")
         self.assertEqual(payloads[2]["type"], "task_attempt_start")
     
+    def test_broadcast_draft_updated(self):
+        """Test broadcasting draft updated event."""
+        from agentforce.server.ws import broadcast_draft_updated
+        conn = Mock(spec=WsConnection)
+        register(conn, "*")
+        
+        broadcast_draft_updated("draft1", "finalized")
+        
+        conn.send_text.assert_called_once()
+        call_args = conn.send_text.call_args[0][0]
+        message = json.loads(call_args)
+        self.assertEqual(message["type"], "draft_updated")
+        self.assertEqual(message["draft_id"], "draft1")
+        self.assertEqual(message["status"], "finalized")
+
     def test_broadcast_handles_dead_connections(self):
         """Test that broadcast functions handle dead connections."""
         # Create a connection that will raise OSError on send

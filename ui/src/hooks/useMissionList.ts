@@ -1,7 +1,24 @@
-import { useEffect, useState } from 'react';
-import { getMissions } from '../lib/api';
+import { useEffect, useState, useCallback } from 'react';
+import { getMissions, getDrafts } from '../lib/api';
 import { wsClient, type MissionListEvent, type MissionListUpdateEvent } from '../lib/ws';
-import type { MissionSummary } from '../lib/types';
+import type { MissionSummary, DraftSummary } from '../lib/types';
+import { useInterval } from './useInterval';
+
+function mapDraftToSummary(draft: DraftSummary): MissionSummary {
+  return {
+    mission_id: draft.id,
+    name: draft.name,
+    status: 'draft',
+    done_tasks: 0,
+    total_tasks: 0,
+    pct: 0,
+    duration: '0s',
+    worker_agent: '',
+    worker_model: '',
+    started_at: draft.created_at,
+    cost_usd: 0,
+  };
+}
 
 function mergeMissionSummaries(
   current: MissionSummary[],
@@ -34,17 +51,30 @@ export function useMissionList(): {
   const [error, setError] = useState<string | null>(null);
   const [refreshIndex, setRefreshIndex] = useState(0);
 
+  const refresh = useCallback(() => {
+    setRefreshIndex((current) => current + 1);
+  }, []);
+
+  // Poll every 15 seconds as a fallback to ensure list is fresh
+  useInterval(refresh, 15000);
+
   useEffect(() => {
     let active = true;
     setLoading(true);
 
-    void getMissions()
-      .then((initialMissions) => {
+    Promise.all([getMissions(), getDrafts()])
+      .then(([fetchedMissions, fetchedDrafts]) => {
         if (!active) {
           return;
         }
 
-        setMissions(initialMissions);
+        const mappedDrafts = fetchedDrafts.map(mapDraftToSummary);
+        
+        // Merge them, giving precedence to missions if there's an ID collision
+        // (which happens when a draft transitions to a mission)
+        const merged = mergeMissionSummaries(mappedDrafts, fetchedMissions);
+        
+        setMissions(merged);
         setError(null);
       })
       .catch((err: unknown) => {
@@ -68,15 +98,24 @@ export function useMissionList(): {
       setMissions((current) => mergeMissionSummaries(current, event.missions));
     };
 
+    const draftUpdatedHandler = (): void => {
+      if (!active) {
+        return;
+      }
+      refresh();
+    };
+
     wsClient.on('mission_list', handler);
     wsClient.on('mission_list_update', handler);
+    wsClient.on('draft_updated', draftUpdatedHandler);
 
     return () => {
       active = false;
       wsClient.off('mission_list', handler);
       wsClient.off('mission_list_update', handler);
+      wsClient.off('draft_updated', draftUpdatedHandler);
     };
-  }, [refreshIndex]);
+  }, [refreshIndex, refresh]);
 
-  return { missions, loading, error, refresh: () => setRefreshIndex((current) => current + 1) };
+  return { missions, loading, error, refresh };
 }

@@ -22,6 +22,9 @@ class PlanningProfile:
 
 
 def _default_profile() -> PlanningProfile:
+    from agentforce.connectors import claude
+    if claude.available():
+        return PlanningProfile(agent="claude", model="claude-sonnet-4-6", thinking="high")
     return PlanningProfile(agent="codex", model="gpt-5.4", thinking="high")
 
 
@@ -132,13 +135,16 @@ def _invoke_profile(profile: PlanningProfile, prompt: str, workdir: str | None) 
     workdir_value = workdir or str(state_io.get_agentforce_home())
     if profile.agent == "codex":
         from agentforce.connectors import codex
-        success, output, error, _, token_event = codex.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180)
+        success, output, error, _, token_event = codex.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
     elif profile.agent == "claude":
         from agentforce.connectors import claude
-        success, output, error, _, token_event = claude.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180)
+        success, output, error, _, token_event = claude.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
     elif profile.agent == "opencode":
         from agentforce.connectors import opencode
-        success, output, error, _, token_event = opencode.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180)
+        success, output, error, _, token_event = opencode.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
+    elif profile.agent == "gemini":
+        from agentforce.connectors import gemini
+        success, output, error, _, token_event = gemini.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
     else:
         raise RuntimeError(f"Unsupported planning agent: {profile.agent}")
     if not success:
@@ -229,12 +235,35 @@ def _critic_prompt(name: str, goal: str, spec_dict: dict[str, Any]) -> str:
 
 
 def _parse_critic_output(text: str) -> dict[str, Any]:
+    text = text.strip()
+    # Try direct parse
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return {"summary": text.strip(), "issues": [], "suggestions": []}
+        payload = None
+
+    # Try extracting from markdown fence
+    if payload is None and "```json" in text:
+        try:
+            block = text.split("```json", 1)[1].split("```", 1)[0].strip()
+            payload = json.loads(block)
+        except (json.JSONDecodeError, IndexError):
+            pass
+
+    # Try backward scanning for JSON object if still not found
+    if payload is None:
+        try:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end > start:
+                candidate = text[start : end + 1]
+                payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
     if not isinstance(payload, dict):
-        return {"summary": text.strip(), "issues": [], "suggestions": []}
+        return {"summary": text, "issues": [], "suggestions": []}
+
     return {
         "summary": str(payload.get("summary") or ""),
         "issues": list(payload.get("issues") or []),
@@ -255,12 +284,69 @@ def _resolver_changelog(validation: dict[str, Any], technical: dict[str, Any], p
     return changelog
 
 
+def _resolver_prompt(goal: str, spec_dict: dict[str, Any], technical: dict[str, Any], practical: dict[str, Any]) -> str:
+    return (
+        "You are the resolver for an AgentForce mission plan. Your job is to integrate feedback from two critics "
+        "into the final mission plan. Ensure all tasks have dependencies, acceptance criteria, and output artifacts "
+        "as requested by the critics. If they identified architectural bugs or URL inconsistencies, fix them.\n\n"
+        "Return valid JSON only with keys 'assistant_message' and 'draft_spec'.\n"
+        "'draft_spec' must be a complete AgentForce MissionSpec-shaped object.\n\n"
+        f"Goal:\n{goal}\n\n"
+        f"Technical Critic Findings:\n{json.dumps(technical, indent=2)}\n\n"
+        f"Practical Critic Findings:\n{json.dumps(practical, indent=2)}\n\n"
+        f"Original draft_spec JSON:\n{json.dumps(spec_dict, indent=2, sort_keys=True)}\n"
+    )
+
+
+def _resolve_findings(draft: MissionDraftV1, spec_dict: dict[str, Any], technical: dict[str, Any], practical: dict[str, Any]) -> tuple[dict[str, Any], str, TokenEvent]:
+    profile = _resolve_profile(draft, "resolver")
+    prompt = _resolver_prompt(draft.draft_spec.get("goal") or "", spec_dict, technical, practical)
+    output, usage = _invoke_profile(profile, prompt, draft.draft_spec.get("working_dir"))
+    try:
+        # Strip markdown fences if any
+        text = output.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(line for line in lines if not line.startswith("```")).strip()
+        payload = json.loads(text)
+        resolved_spec = payload.get("draft_spec")
+        message = payload.get("assistant_message") or "Resolved critic findings and updated the plan."
+        if not isinstance(resolved_spec, dict):
+            raise ValueError("resolver response missing draft_spec")
+        return resolved_spec, message, usage
+    except Exception as exc:
+        # Fallback to original spec if resolution fails
+        return spec_dict, f"Resolution failed: {str(exc)}. Using original plan.", usage
+
+
 def run_plan_run(run_id: str) -> None:
     store = _plan_store()
     run = store.load_run(run_id)
     if run is None:
         raise RuntimeError(f"Plan run {run_id!r} not found")
 
+    try:
+        _run_plan_run_internal(run)
+    except Exception as exc:
+        error_msg = str(exc)
+        # Reload to get latest step state
+        latest = store.load_run(run_id) or run
+        failed = latest.copy_with(
+            status="failed",
+            error_message=error_msg,
+            completed_at=_now_iso(),
+        )
+        store.save_run(failed)
+        _emit("plan_run_failed", {
+            "draft_id": failed.draft_id,
+            "plan_run_id": failed.id,
+            "error": error_msg,
+        })
+        raise
+
+
+def _run_plan_run_internal(run: PlanRunRecord) -> None:
+    store = _plan_store()
     draft = _draft_store().load(run.draft_id)
     if draft is None:
         raise RuntimeError(f"Draft {run.draft_id!r} not found")
@@ -336,6 +422,14 @@ def run_plan_run(run_id: str) -> None:
 
     run = _record_step(run, name="resolver", status="started", message="Resolving critic findings")
     changelog = _resolver_changelog(validation, technical, practical)
+    
+    # Resolve findings if any issues were reported
+    if technical.get("issues") or practical.get("issues") or validation.get("issues"):
+        spec_dict, assistant_message, resolver_usage = _resolve_findings(draft, spec_dict, technical, practical)
+    else:
+        assistant_message = "Initial planning pass completed without critic findings."
+        resolver_usage = TokenEvent(0, 0, 0.0)
+
     version = store.create_version(
         str(uuid.uuid4()),
         draft_id=draft.id,
@@ -355,6 +449,7 @@ def run_plan_run(run_id: str) -> None:
         status="completed",
         message="Reviewed version created",
         summary=" ".join(changelog),
+        token_event=resolver_usage,
         metadata={"version_id": version.id},
     )
     _emit(
@@ -384,7 +479,7 @@ def run_plan_run(run_id: str) -> None:
 
     promoted = latest_draft.copy_with(
         draft_spec=spec_dict,
-        turns=list(latest_draft.turns) + [{"role": "assistant", "content": turn.assistant_message}],
+        turns=list(latest_draft.turns) + [{"role": "assistant", "content": assistant_message}],
         validation={
             **latest_draft.validation,
             "latest_plan_run_id": run.id,
@@ -416,6 +511,9 @@ def run_plan_run(run_id: str) -> None:
         store.save_run(stale)
         _emit("plan_run_stale", {"draft_id": draft.id, "plan_run_id": stale.id, "plan_version_id": version.id})
         return
+
+    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+    state_io._broadcast_mission_list_refresh()
 
     completed = run.copy_with(
         status="completed",

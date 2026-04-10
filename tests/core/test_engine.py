@@ -309,6 +309,104 @@ class TestReviewerLifecycle:
         assert "Missing subscribe" in ts.human_intervention_message
 
 
+class TestDestructiveActionGate:
+    def test_worker_warning_pauses_without_consuming_retry_budget(self, tmp_path):
+        engine = make_engine(tmp_path)
+        engine.tick()
+
+        output = """
+```agentforce-warning
+{
+  "type": "destructive_action_request",
+  "summary": "Delete stale build output",
+  "risk": "Removes generated files from dist.",
+  "proposed_action": "rm -rf dist",
+  "targets": ["dist"],
+  "action_key": "delete:dist"
+}
+```
+"""
+
+        engine.apply_worker_result("01", True, output)
+
+        ts = engine.state.get_task("01")
+        assert ts.status == "needs_human"
+        assert ts.human_intervention_needed is True
+        assert ts.human_intervention_kind == "destructive_action"
+        assert ts.human_intervention_context["action_key"] == "delete:dist"
+        assert [option["id"] for option in ts.human_intervention_options] == [
+            "approve_once",
+            "always_allow",
+            "deny",
+            "revise",
+        ]
+        assert ts.retries == 0
+        assert engine.state.total_retries == 0
+        assert engine.state.total_human_interventions == 1
+        assert ts.attempt_history[-1]["intervention_kind"] == "destructive_action"
+
+    def test_always_allow_resolution_stores_rule_and_requeues(self, tmp_path):
+        engine = make_engine(tmp_path)
+        engine.request_destructive_action("01", {
+            "type": "destructive_action_request",
+            "summary": "Delete stale build output",
+            "risk": "Removes generated files from dist.",
+            "proposed_action": "rm -rf dist",
+            "targets": ["dist"],
+            "action_key": "delete:dist",
+        }, output="warning output")
+
+        engine.apply_human_resolution("01", "Allowed for generated output cleanup.", choice_id="always_allow")
+
+        ts = engine.state.get_task("01")
+        assert ts.status == "retry"
+        assert ts.human_intervention_needed is False
+        assert ts.human_intervention_kind == ""
+        assert ts.human_intervention_options == []
+        assert ts.human_intervention_context == {}
+        assert "delete:dist" in engine.state.destructive_action_allow_rules
+        assert "Always allow" in ts.review_feedback
+
+    def test_revise_resolution_requires_guidance(self, tmp_path):
+        engine = make_engine(tmp_path)
+        engine.request_destructive_action("01", {
+            "type": "destructive_action_request",
+            "summary": "Delete stale build output",
+            "risk": "Removes generated files from dist.",
+            "proposed_action": "rm -rf dist",
+            "targets": ["dist"],
+            "action_key": "delete:dist",
+        })
+
+        with pytest.raises(ValueError, match="message is required"):
+            engine.apply_human_resolution("01", "", choice_id="revise")
+
+    def test_matching_allow_rule_auto_requeues_without_new_intervention(self, tmp_path):
+        engine = make_engine(tmp_path)
+        engine.state.destructive_action_allow_rules["delete:dist"] = {
+            "action_key": "delete:dist",
+            "summary": "Delete stale build output",
+            "proposed_action": "rm -rf dist",
+            "guidance": "Previously allowed.",
+        }
+
+        required_human = engine.request_destructive_action("01", {
+            "type": "destructive_action_request",
+            "summary": "Delete stale build output",
+            "risk": "Removes generated files from dist.",
+            "proposed_action": "rm -rf dist",
+            "targets": ["dist"],
+            "action_key": "delete:dist",
+        }, output="warning output")
+
+        ts = engine.state.get_task("01")
+        assert required_human is False
+        assert ts.status == "retry"
+        assert ts.human_intervention_needed is False
+        assert engine.state.total_human_interventions == 0
+        assert "Previously approved destructive action" in ts.review_feedback
+
+
 class TestDependencyOrdering:
     def test_dependent_task_blocked(self, tmp_path):
         tasks = [
@@ -336,7 +434,7 @@ class TestCaps:
     def test_wall_time_exceeded(self, tmp_path):
         caps = Caps(max_wall_time_minutes=1)
         engine = make_engine(tmp_path, caps=caps)
-        engine.state.started_at = "2020-01-01T00:00:00+00:00"
+        engine.state.active_wall_time_seconds = 60
         engine._save()
 
         cap = engine._check_caps()

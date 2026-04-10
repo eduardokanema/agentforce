@@ -97,7 +97,7 @@ describe('Sidebar', () => {
     );
 
     expect(container.textContent).not.toContain('Mission Control');
-    expect(container.querySelectorAll('a').length).toBe(5);
+    expect(container.querySelectorAll('a').length).toBe(6);
 
     const button = container.querySelector('button');
     act(() => {

@@ -174,17 +174,42 @@ def _load_all_missions(state_dir: Path | None = None, include_archived: bool = F
     return missions
 
 
+def _all_mission_summaries() -> list[dict]:
+    from .plan_drafts import PlanDraftStore
+    drafts = PlanDraftStore().list_all(include_terminal=False)
+    draft_summaries = [
+        {
+            "mission_id": d.id,
+            "name": d.name,
+            "status": d.status,
+            "is_draft": True,
+            "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+        }
+        for d in drafts
+    ]
+
+    missions = _load_all_missions()
+    mission_summaries = []
+    for mission in missions:
+        summary = mission.to_summary_dict()
+        summary["is_draft"] = False
+        mission_summaries.append(summary)
+
+    return mission_summaries + draft_summaries
+
+
 def _broadcast_mission_refresh(state) -> None:
     """Broadcast mission state update to all connected WebSocket clients."""
     try:
         ws.broadcast_mission(state.mission_id, state.to_dict())
-        ws.broadcast_mission_list([mission.to_summary_dict() for mission in _load_all_missions()])
+        ws.broadcast_mission_list(_all_mission_summaries())
     except Exception:
         pass
 
 
 def _broadcast_mission_list_refresh() -> None:
     try:
-        ws.broadcast_mission_list([mission.to_summary_dict() for mission in _load_all_missions()])
+        ws.broadcast_mission_list(_all_mission_summaries())
     except Exception:
         pass

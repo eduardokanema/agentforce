@@ -82,6 +82,12 @@ export interface PlanningEvent {
   cost_usd?: number;
 }
 
+export interface DraftUpdatedEvent {
+  type: 'draft_updated';
+  draft_id: string;
+  status?: string;
+}
+
 type WsInboundEvent =
   | MissionListEvent
   | MissionListUpdateEvent
@@ -91,7 +97,8 @@ type WsInboundEvent =
   | StreamLineEvent
   | TaskStreamLineEvent
   | TaskStreamDoneEvent
-  | PlanningEvent;
+  | PlanningEvent
+  | DraftUpdatedEvent;
 
 type WsEventType = WsInboundEvent['type'];
 type WsEventHandler<K extends WsEventType> = (event: Extract<WsInboundEvent, { type: K }>) => void;
@@ -191,10 +198,13 @@ function isInboundEvent(value: unknown): value is WsInboundEvent {
     case 'plan_run_failed':
     case 'plan_cost_update':
       return isString(value.draft_id) && isString(value.plan_run_id);
+    case 'draft_updated':
+      return isString(value.draft_id);
     default:
       return false;
   }
 }
+
 
 export class AgentForceWs {
   private socket: WebSocket | null = null;

@@ -8,7 +8,7 @@ import uuid
 import yaml
 
 from agentforce.core.spec import Caps, MissionSpec
-from agentforce.server import state_io
+from agentforce.server import state_io, ws
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunStore
 from agentforce.server.planning_runtime import create_plan_run_for_draft, discover_preflight_questions
@@ -167,12 +167,16 @@ def _create_draft(body: dict) -> tuple[int, dict]:
         return 400, {"error": "prompt is required"}
 
     workspace_paths = list(body.get("workspace_paths") or body.get("workspaces") or [])
+    validation = body.get("validation")
+    if not isinstance(validation, dict):
+        validation = {}
+
     draft = _store().create(
         str(uuid.uuid4()),
         status="draft",
         draft_spec=_empty_draft_spec(prompt, workspace_paths),
         turns=[{"role": "assistant", "content": _DRAFT_INIT_MESSAGE}],
-        validation={},
+        validation=validation,
         activity_log=[{"type": "draft_created", "prompt": prompt}],
         approved_models=list(body.get("approved_models") or []),
         workspace_paths=workspace_paths,
@@ -200,6 +204,8 @@ def _create_draft(body: dict) -> tuple[int, dict]:
         _enqueue_plan_run(run.id)
         response["plan_run_id"] = run.id
     response["requires_preflight"] = draft.validation.get("preflight_status") == "pending"
+    ws.broadcast_draft_updated(draft.id, draft.status)
+    state_io._broadcast_mission_list_refresh()
     return 200, response
 
 
@@ -242,6 +248,8 @@ def _patch_spec(draft_id: str, body: dict) -> tuple[int, dict]:
             "error": "draft revision conflict",
             "revision": current.revision if current is not None else None,
         }
+    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+    state_io._broadcast_mission_list_refresh()
     return 200, {"id": save_result.draft.id, "revision": save_result.draft.revision}
 
 
@@ -278,6 +286,8 @@ def _import_yaml(draft_id: str, body: dict) -> tuple[int, dict]:
             "error": "draft revision conflict",
             "revision": current.revision if current is not None else None,
         }
+    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+    state_io._broadcast_mission_list_refresh()
     return 200, {
         "id": save_result.draft.id,
         "revision": save_result.draft.revision,
@@ -313,6 +323,8 @@ def _stream_turn(handler, draft_id: str, body: dict) -> tuple[int, dict]:
         trigger_message=user_message,
     )
     _enqueue_plan_run(run.id)
+    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+    state_io._broadcast_mission_list_refresh()
     return 200, {"draft_id": draft.id, "plan_run_id": run.id, "status": "queued"}
 
 
@@ -378,6 +390,8 @@ def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
         trigger_message=_preflight_prompt(save_result.draft),
     )
     _enqueue_plan_run(run.id)
+    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+    state_io._broadcast_mission_list_refresh()
     return 200, {
         "draft_id": save_result.draft.id,
         "revision": save_result.draft.revision,
@@ -454,7 +468,10 @@ def _finalize_draft(draft: MissionDraftV1, mission_id: str) -> None:
         status="finalized",
         activity_log=list(draft.activity_log) + [{"type": "draft_finalized", "mission_id": mission_id}],
     )
-    _store().save(finalized, expected_revision=draft.revision)
+    save_result = _store().save(finalized, expected_revision=draft.revision)
+    if save_result.status == "saved" and save_result.draft is not None:
+        ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+        state_io._broadcast_mission_list_refresh()
 
 
 def _launch_mission(mission_id: str) -> None:
@@ -480,6 +497,20 @@ def _launch_mission(mission_id: str) -> None:
 
 
 def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
+    if len(parts) == 3 and parts[1] == "plan" and parts[2] == "drafts":
+        include_terminal = query.get("include_terminal", "false").lower() == "true"
+        drafts = _store().list_all(include_terminal=include_terminal)
+        return 200, [
+            {
+                "id": d.id,
+                "name": d.name,
+                "goal": d.goal,
+                "status": d.status,
+                "created_at": d.created_at.isoformat() if d.created_at else None,
+                "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+            }
+            for d in drafts
+        ]
     if len(parts) == 4 and parts[1] == "plan" and parts[2] == "drafts":
         draft, error = _load_draft_or_404(parts[3])
         if error is not None:

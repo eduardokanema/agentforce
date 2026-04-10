@@ -205,9 +205,29 @@ export interface TaskState {
   review_feedback?: string;
   blocking_issues?: string[];
   human_intervention_message?: string;
+  human_intervention_kind?: string;
+  human_intervention_options?: HumanInterventionOption[];
+  human_intervention_context?: HumanInterventionContext;
   error_message?: string;
   started_at?: string | null;
   completed_at?: string | null;
+}
+
+export interface HumanInterventionOption {
+  id: string;
+  label: string;
+  description?: string;
+  effect?: string;
+}
+
+export interface HumanInterventionContext {
+  type?: string;
+  summary?: string;
+  risk?: string;
+  proposed_action?: string;
+  targets?: string[];
+  action_key?: string;
+  [key: string]: unknown;
 }
 
 export interface EventLogEntry {
@@ -229,11 +249,13 @@ export interface MissionState {
   tokens_in?: number;
   tokens_out?: number;
   cost_usd?: number;
+  active_wall_time_seconds?: number;
   event_log?: EventLogEntry[];
   completed_at?: string | null;
   caps_hit?: Record<string, string>;
   execution_defaults?: ExecutionConfig | null;
   execution?: ExecutionMetadata | null;
+  destructive_action_allow_rules?: Record<string, HumanInterventionContext>;
   working_dir?: string;
   worker_agent?: string;
   worker_model?: string;
@@ -282,7 +304,16 @@ export interface TelemetryData {
   cost_over_time: TelemetryCostPoint[];
 }
 
-export type MissionSummaryStatus = 'active' | 'in_progress' | 'complete' | 'completed' | 'review_approved' | 'failed' | 'needs_human';
+export type MissionSummaryStatus = 'active' | 'in_progress' | 'complete' | 'completed' | 'review_approved' | 'failed' | 'needs_human' | 'draft';
+
+export interface DraftSummary {
+  id: string;
+  name: string;
+  goal: string;
+  status: 'draft';
+  created_at: string;
+  updated_at: string;
+}
 
 export interface MissionSummary {
   mission_id: string;
@@ -366,6 +397,7 @@ export interface Model {
   id: string;
   name: string;
   provider: string;
+  provider_id?: string;
   cost_per_1k_input: number;
   cost_per_1k_output: number;
   latency_label: string;
@@ -415,3 +447,18 @@ type SerializedMissionState = {
 
 type _taskStateMatchesSerializedShape = Assert<IsAssignable<SerializedTaskState, TaskState>>;
 type _missionStateMatchesSerializedShape = Assert<IsAssignable<SerializedMissionState, MissionState>>;
+
+export interface DaemonJobInfo {
+  job_id: string;
+  job_type: 'mission' | 'plan_run';
+  mission_id?: string;
+  state: 'queued' | 'running';
+  enqueued_at?: string;
+}
+
+export interface DaemonStatus {
+  running: boolean;
+  queue: DaemonJobInfo[];
+  active: DaemonJobInfo[];
+  last_heartbeat: string | null;
+}

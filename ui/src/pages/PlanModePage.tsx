@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import FileBrowser from '../components/FileBrowser';
-import ModelSelector from '../components/ModelSelector';
-import DraftSummaryPanel from '../components/planning/DraftSummaryPanel';
-import ExecutionProfileControls from '../components/planning/ExecutionProfileControls';
-import PlannerStreamPanel, { type PlannerStreamEventView } from '../components/planning/PlannerStreamPanel';
-import PlannerTranscriptPanel from '../components/planning/PlannerTranscriptPanel';
-import TaskTimelinePanel from '../components/planning/TaskTimelinePanel';
-import ValidationBoard from '../components/planning/ValidationBoard';
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import FileBrowser from "../components/FileBrowser";
+import ModelSelector from "../components/ModelSelector";
+import DraftSummaryPanel from "../components/planning/DraftSummaryPanel";
+import ExecutionProfileControls from "../components/planning/ExecutionProfileControls";
+import PlannerStreamPanel, {
+  type PlannerStreamEventView,
+} from "../components/planning/PlannerStreamPanel";
+import PlannerTranscriptPanel from "../components/planning/PlannerTranscriptPanel";
+import TaskTimelinePanel from "../components/planning/TaskTimelinePanel";
+import ValidationBoard from "../components/planning/ValidationBoard";
 import {
   createPlanDraft,
   getModels,
@@ -16,8 +18,8 @@ import {
   sendPlanDraftMessage,
   startPlanDraft,
   submitPlanDraftPreflight,
-} from '../lib/api';
-import { collectAdvisoryFlightChecks } from '../lib/planChecks';
+} from "../lib/api";
+import { collectAdvisoryFlightChecks } from "../lib/planChecks";
 import type {
   ExecutionProfile,
   MissionDraft,
@@ -26,31 +28,37 @@ import type {
   PlanRun,
   PlanVersion,
   PreflightAnswer,
-} from '../lib/types';
-import { wsClient, type PlanningEvent } from '../lib/ws';
+} from "../lib/types";
+import { wsClient, type PlanningEvent } from "../lib/ws";
 
 const PLANNING_PROFILE_KEYS = [
-  { key: 'planner', label: 'Planner' },
-  { key: 'critic_technical', label: 'Technical Critic' },
-  { key: 'critic_practical', label: 'Practical Critic' },
-  { key: 'resolver', label: 'Resolver' },
+  { key: "planner", label: "Planner" },
+  { key: "critic_technical", label: "Technical Critic" },
+  { key: "critic_practical", label: "Practical Critic" },
+  { key: "resolver", label: "Resolver" },
 ] as const;
 
-const PLANNING_AGENTS = ['codex', 'claude', 'opencode'] as const;
-const THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 
 function getConflictMessage(caught: unknown): string | null {
-  const error = caught as Error & { status?: number; payload?: { error?: string; revision?: number } };
+  const error = caught as Error & {
+    status?: number;
+    payload?: { error?: string; revision?: number };
+  };
   if (error.status !== 409) {
     return null;
   }
-  const revision = typeof error.payload?.revision === 'number'
-    ? ` Reload the latest draft revision ${error.payload.revision}.`
-    : '';
+  const revision =
+    typeof error.payload?.revision === "number"
+      ? ` Reload the latest draft revision ${error.payload.revision}.`
+      : "";
   return `Conflict detected while saving this draft.${revision}`;
 }
 
-function updateDraftSpec(draft: MissionDraft, draftSpec: MissionSpec): MissionDraft {
+function updateDraftSpec(
+  draft: MissionDraft,
+  draftSpec: MissionSpec,
+): MissionDraft {
   return {
     ...draft,
     draft_spec: draftSpec,
@@ -63,21 +71,23 @@ function draftValidationIssues(draft: MissionDraft | null): string[] {
   }
 
   const issues: string[] = [];
-  if (draft.draft_spec.name.trim() === '') {
-    issues.push('Mission name is required.');
+  if (draft.draft_spec.name.trim() === "") {
+    issues.push("Mission name is required.");
   }
-  if (draft.draft_spec.goal.trim() === '') {
-    issues.push('Mission goal is required.');
+  if (draft.draft_spec.goal.trim() === "") {
+    issues.push("Mission goal is required.");
   }
   if (draft.draft_spec.tasks.length === 0) {
-    issues.push('Add at least one task.');
+    issues.push("Add at least one task.");
   }
   return issues;
 }
 
-function getPlanningProfiles(draft: MissionDraft | null): Record<string, ExecutionProfile> {
+function getPlanningProfiles(
+  draft: MissionDraft | null,
+): Record<string, ExecutionProfile> {
   const raw = draft?.validation?.planning_profiles;
-  if (!raw || typeof raw !== 'object') {
+  if (!raw || typeof raw !== "object") {
     return {};
   }
   return raw as Record<string, ExecutionProfile>;
@@ -89,9 +99,13 @@ function getProfileValue(
 ): ExecutionProfile {
   const stored = getPlanningProfiles(draft)[key] ?? {};
   return {
-    agent: stored.agent ?? 'codex',
-    model: stored.model ?? 'gpt-5.4',
-    thinking: stored.thinking ?? (key === 'critic_technical' || key === 'critic_practical' ? 'xhigh' : 'high'),
+    agent: stored.agent ?? "codex",
+    model: stored.model ?? "",
+    thinking:
+      stored.thinking ??
+      (key === "critic_technical" || key === "critic_practical"
+        ? "xhigh"
+        : "high"),
   };
 }
 
@@ -101,7 +115,7 @@ function formatCurrency(value: number | undefined): string {
 
 function formatDateTime(value: string | null | undefined): string {
   if (!value) {
-    return 'Pending';
+    return "Pending";
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -111,14 +125,15 @@ function formatDateTime(value: string | null | undefined): string {
 }
 
 function summarizeStep(stepName: string): string {
-  return stepName.replace(/_/g, ' ');
+  return stepName.replace(/_/g, " ");
 }
 
 function toPlannerEventView(event: PlanningEvent): PlannerStreamEventView {
   return {
     type: event.type,
-    phase: event.step ?? event.plan_version_id ?? 'runtime',
-    status: event.status ?? (event.type.includes('started') ? 'started' : 'updated'),
+    phase: event.step ?? event.plan_version_id ?? "runtime",
+    status:
+      event.status ?? (event.type.includes("started") ? "started" : "updated"),
     content: event.summary ?? event.message,
   };
 }
@@ -144,7 +159,7 @@ function buildRunEvents(run: PlanRun | null): PlannerStreamEventView[] {
 }
 
 function planningBusy(run: PlanRun | null): boolean {
-  return run?.status === 'queued' || run?.status === 'running';
+  return run?.status === "queued" || run?.status === "running";
 }
 
 function PreflightQuestionsPanel({
@@ -169,7 +184,11 @@ function PreflightQuestionsPanel({
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="section-title">Preflight Questions</h2>
-          <p className="mt-1 text-xs text-dim">Answer the important clarifications before the first full planning run. Each question supports a custom reply when the listed options do not fit.</p>
+          <p className="mt-1 text-xs text-dim">
+            Answer the important clarifications before the first full planning
+            run. Each question supports a custom reply when the listed options
+            do not fit.
+          </p>
         </div>
         <div className="rounded-full border border-amber/30 bg-amber/10 px-3 py-1 font-mono text-[11px] text-amber">
           {questions.length} pending
@@ -180,11 +199,18 @@ function PreflightQuestionsPanel({
         {questions.map((question, index) => {
           const answer = answers[question.id] ?? {};
           return (
-            <article key={question.id} className="rounded-xl border border-border bg-surface p-3">
+            <article
+              key={question.id}
+              className="rounded-xl border border-border bg-surface p-3"
+            >
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Question {index + 1}</div>
-                  <div className="mt-1 text-sm font-semibold text-text">{question.prompt}</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+                    Question {index + 1}
+                  </div>
+                  <div className="mt-1 text-sm font-semibold text-text">
+                    {question.prompt}
+                  </div>
                   {question.reason ? (
                     <p className="mt-1 text-xs text-dim">{question.reason}</p>
                   ) : null}
@@ -192,12 +218,20 @@ function PreflightQuestionsPanel({
               </div>
               <div className="mt-3 grid gap-2">
                 {question.options.map((option) => (
-                  <label key={`${question.id}-${option}`} className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-text">
+                  <label
+                    key={`${question.id}-${option}`}
+                    className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-text"
+                  >
                     <input
                       type="radio"
                       name={`preflight-${question.id}`}
                       checked={answer.selected_option === option}
-                      onChange={() => onAnswerChange(question.id, { ...answer, selected_option: option })}
+                      onChange={() =>
+                        onAnswerChange(question.id, {
+                          ...answer,
+                          selected_option: option,
+                        })
+                      }
                     />
                     <span>{option}</span>
                   </label>
@@ -206,8 +240,13 @@ function PreflightQuestionsPanel({
                   <input
                     className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-text outline-none focus:border-cyan"
                     placeholder="Custom reply"
-                    value={answer.custom_answer ?? ''}
-                    onChange={(event) => onAnswerChange(question.id, { ...answer, custom_answer: event.currentTarget.value })}
+                    value={answer.custom_answer ?? ""}
+                    onChange={(event) =>
+                      onAnswerChange(question.id, {
+                        ...answer,
+                        custom_answer: event.currentTarget.value,
+                      })
+                    }
                   />
                 ) : null}
               </div>
@@ -238,65 +277,39 @@ function PreflightQuestionsPanel({
   );
 }
 
-function PlanningProfilesPanel({
+function PlanningProfilesSummary({
   draft,
   models,
-  onChange,
 }: {
   draft: MissionDraft;
   models: Model[];
-  onChange: (key: string, profile: ExecutionProfile) => void;
 }) {
   return (
     <section className="rounded-lg border border-border bg-card p-4">
       <div className="mb-3">
         <h2 className="section-title">Planning Stack</h2>
-        <p className="mt-1 text-xs text-dim">Planner, adversaries, and resolver use the current model interfaces and persist with the draft.</p>
+        <p className="mt-1 text-xs text-dim">
+          Models configured for this draft's planning runs.
+        </p>
       </div>
-      <div className="space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
           const profile = getProfileValue(draft, key);
+          const modelObj = models.find((m) => m.id === profile.model);
+          const modelName = modelObj ? `[${modelObj.provider}] ${modelObj.name}` : profile.model || "Default";
           return (
-            <div key={key} className="rounded-lg border border-border bg-surface p-3">
-              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">{label}</div>
-              <div className="grid gap-3 md:grid-cols-3">
-                <label className="text-xs text-dim">
-                  Agent
-                  <select
-                    className="mt-1 w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-text outline-none focus:border-cyan"
-                    value={profile.agent ?? 'codex'}
-                    onChange={(event) => onChange(key, { ...profile, agent: event.currentTarget.value })}
-                  >
-                    {PLANNING_AGENTS.map((agent) => (
-                      <option key={`${key}-${agent}`} value={agent}>{agent}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="text-xs text-dim">
-                  Model
-                  <select
-                    className="mt-1 w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-text outline-none focus:border-cyan"
-                    value={profile.model ?? ''}
-                    onChange={(event) => onChange(key, { ...profile, model: event.currentTarget.value })}
-                  >
-                    <option value="gpt-5.4">gpt-5.4</option>
-                    {models.map((model) => (
-                      <option key={`${key}-${model.id}`} value={model.id}>{model.name}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="text-xs text-dim">
-                  Thinking
-                  <select
-                    className="mt-1 w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-text outline-none focus:border-cyan"
-                    value={profile.thinking ?? 'high'}
-                    onChange={(event) => onChange(key, { ...profile, thinking: event.currentTarget.value })}
-                  >
-                    {THINKING_LEVELS.map((thinking) => (
-                      <option key={`${key}-${thinking}`} value={thinking}>{thinking}</option>
-                    ))}
-                  </select>
-                </label>
+            <div
+              key={key}
+              className="rounded-lg border border-border bg-surface p-3"
+            >
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+                {label}
+              </div>
+              <div className="truncate text-sm font-semibold text-text" title={modelName}>
+                {modelName}
+              </div>
+              <div className="mt-1 text-xs text-dim">
+                Thinking: <span className="font-medium text-text">{profile.thinking}</span>
               </div>
             </div>
           );
@@ -315,10 +328,15 @@ function PlanHistoryPanel({ draft }: { draft: MissionDraft }) {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="section-title">Planning History</h2>
-          <p className="mt-1 text-xs text-dim">Stored runs, versions, and changelog checkpoints for future reviews and metrics.</p>
+          <p className="mt-1 text-xs text-dim">
+            Stored runs, versions, and changelog checkpoints for future reviews
+            and metrics.
+          </p>
         </div>
         <div className="rounded-full border border-cyan/20 bg-cyan/10 px-3 py-1 text-[11px] font-mono text-cyan">
-          {currentRun ? `${formatCurrency(currentRun.cost_usd)} planning` : 'No runs yet'}
+          {currentRun
+            ? `${formatCurrency(currentRun.cost_usd)} planning`
+            : "No runs yet"}
         </div>
       </div>
 
@@ -328,22 +346,40 @@ function PlanHistoryPanel({ draft }: { draft: MissionDraft }) {
             <article
               key={run.id}
               className={`rounded-xl border px-3 py-3 transition-all ${
-                run.status === 'running'
-                  ? 'border-cyan/40 bg-cyan/10 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]'
-                  : 'border-border bg-surface'
+                run.status === "running"
+                  ? "border-cyan/40 bg-cyan/10 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]"
+                  : "border-border bg-surface"
               }`}
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-sm font-semibold text-text">{run.trigger_kind === 'follow_up' ? 'Follow-up run' : 'Initial run'}</div>
+                <div className="text-sm font-semibold text-text">
+                  {run.trigger_kind === "follow_up"
+                    ? "Follow-up run"
+                    : "Initial run"}
+                </div>
                 <div className="rounded-full border border-border bg-card px-2.5 py-1 font-mono text-[11px] text-dim">
                   {run.status}
                 </div>
               </div>
-              <p className="mt-2 text-sm text-text">{run.trigger_message || 'Automatic first-pass planning run.'}</p>
+              {run.status === "failed" && run.error_message ? (
+                <div className="mt-2 rounded-lg border border-red/20 bg-red/5 px-3 py-2 text-xs text-red/80">
+                  <span className="font-semibold">Error:</span> {run.error_message}
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-text">
+                  {run.trigger_message || "Automatic first-pass planning run."}
+                </p>
+              )}
               <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-dim">
-                <span className="rounded-full border border-border bg-card px-2.5 py-1">Revision {run.base_revision}</span>
-                <span className="rounded-full border border-border bg-card px-2.5 py-1">{run.steps.length} steps</span>
-                <span className="rounded-full border border-border bg-card px-2.5 py-1">{formatCurrency(run.cost_usd)}</span>
+                <span className="rounded-full border border-border bg-card px-2.5 py-1">
+                  Revision {run.base_revision}
+                </span>
+                <span className="rounded-full border border-border bg-card px-2.5 py-1">
+                  {run.steps.length} steps
+                </span>
+                <span className="rounded-full border border-border bg-card px-2.5 py-1">
+                  {formatCurrency(run.cost_usd)}
+                </span>
               </div>
             </article>
           ))}
@@ -355,22 +391,37 @@ function PlanHistoryPanel({ draft }: { draft: MissionDraft }) {
         </div>
 
         <div className="rounded-xl border border-border bg-surface p-3">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Latest Version</div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+            Latest Version
+          </div>
           <div className="mt-2 text-sm font-semibold text-text">
-            {currentVersion ? currentVersion.id : 'Pending'}
+            {currentVersion ? currentVersion.id : "Pending"}
           </div>
           <div className="mt-1 text-xs text-dim">
-            {currentVersion ? `Created ${formatDateTime(currentVersion.created_at)}` : 'No version checkpoint yet.'}
+            {currentVersion
+              ? `Created ${formatDateTime(currentVersion.created_at)}`
+              : "No version checkpoint yet."}
           </div>
           <div className="mt-3 space-y-2">
-            {(currentVersion?.changelog ?? draft.planning_summary?.changelog ?? []).map((entry, index) => (
-              <div key={`${entry}-${index}`} className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-text">
+            {(
+              currentVersion?.changelog ??
+              draft.planning_summary?.changelog ??
+              []
+            ).map((entry, index) => (
+              <div
+                key={`${entry}-${index}`}
+                className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-text"
+              >
                 {entry}
               </div>
             ))}
-            {!(currentVersion?.changelog?.length || draft.planning_summary?.changelog?.length) ? (
+            {!(
+              currentVersion?.changelog?.length ||
+              draft.planning_summary?.changelog?.length
+            ) ? (
               <div className="rounded-lg border border-dashed border-border px-3 py-3 text-sm text-dim">
-                The reviewed changelog will appear here after the resolver finishes.
+                The reviewed changelog will appear here after the resolver
+                finishes.
               </div>
             ) : null}
           </div>
@@ -382,16 +433,24 @@ function PlanHistoryPanel({ draft }: { draft: MissionDraft }) {
 
 export default function PlanModePage() {
   const navigate = useNavigate();
+  const { id } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const draftId = searchParams.get('draft');
+  const draftId = id || searchParams.get("draft");
 
-  const [prompt, setPrompt] = useState('');
+  const [prompt, setPrompt] = useState("");
   const [workspaces, setWorkspaces] = useState<string[]>([]);
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
-  const [companionModel, setCompanionModel] = useState('');
+  const [initialPlanningProfiles, setInitialPlanningProfiles] = useState<
+    Record<string, ExecutionProfile>
+  >({
+    planner: { agent: "claude", model: "", thinking: "high" },
+    critic_technical: { agent: "claude", model: "", thinking: "xhigh" },
+    critic_practical: { agent: "claude", model: "", thinking: "xhigh" },
+    resolver: { agent: "claude", model: "", thinking: "high" },
+  });
   const [draft, setDraft] = useState<MissionDraft | null>(null);
-  const [followUpMessage, setFollowUpMessage] = useState('');
+  const [followUpMessage, setFollowUpMessage] = useState("");
   const [liveEvents, setLiveEvents] = useState<PlannerStreamEventView[]>([]);
   const [loadingModels, setLoadingModels] = useState(true);
   const [loadingDraft, setLoadingDraft] = useState(false);
@@ -400,12 +459,17 @@ export default function PlanModePage() {
   const [streaming, setStreaming] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [submittingPreflight, setSubmittingPreflight] = useState(false);
-  const [preflightAnswers, setPreflightAnswers] = useState<Record<string, PreflightAnswer>>({});
+  const [preflightAnswers, setPreflightAnswers] = useState<
+    Record<string, PreflightAnswer>
+  >({});
   const [pageError, setPageError] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
   const effectiveSelectedModels = useMemo(
-    () => (selectedModels.length > 0 ? selectedModels : models.map((model) => model.id)),
+    () =>
+      selectedModels.length > 0
+        ? selectedModels
+        : models.map((model) => model.id),
     [models, selectedModels],
   );
 
@@ -418,7 +482,9 @@ export default function PlanModePage() {
       setStreaming(planningBusy(latestRun(loaded)));
       setPreflightAnswers(loaded.preflight_answers ?? {});
     } catch (caught) {
-      setPageError(caught instanceof Error ? caught.message : 'Failed to load draft.');
+      setPageError(
+        caught instanceof Error ? caught.message : "Failed to load draft.",
+      );
     } finally {
       setLoadingDraft(false);
     }
@@ -435,11 +501,26 @@ export default function PlanModePage() {
           return;
         }
         setModels(loadedModels);
-        setSelectedModels((current) => (current.length > 0 ? current : loadedModels.map((model) => model.id)));
-        setCompanionModel((current) => current || loadedModels[0]?.id || 'gpt-5.4');
+        setSelectedModels((current) =>
+          current.length > 0 ? current : loadedModels.map((model) => model.id),
+        );
+
+        setInitialPlanningProfiles((current) => {
+          const defaultModel = loadedModels[0]?.id || "";
+          const defaultAgent = loadedModels[0]?.provider_id || "codex";
+          const next = { ...current };
+          (Object.keys(next) as Array<keyof typeof next>).forEach((k) => {
+            if (next[k].model === "") {
+              next[k] = { ...next[k], model: defaultModel, agent: defaultAgent };
+            }
+          });
+          return next;
+        });
       } catch (caught) {
         if (!cancelled) {
-          setPageError(caught instanceof Error ? caught.message : 'Failed to load models.');
+          setPageError(
+            caught instanceof Error ? caught.message : "Failed to load models.",
+          );
         }
       } finally {
         if (!cancelled) {
@@ -472,8 +553,14 @@ export default function PlanModePage() {
       if (event.draft_id !== draftId) {
         return;
       }
-      setLiveEvents((current) => current.concat(toPlannerEventView(event)).slice(-20));
-      if (event.type === 'plan_run_failed' || event.type === 'plan_run_stale' || event.type === 'plan_head_promoted') {
+      setLiveEvents((current) =>
+        current.concat(toPlannerEventView(event)).slice(-20),
+      );
+      if (
+        event.type === "plan_run_failed" ||
+        event.type === "plan_run_stale" ||
+        event.type === "plan_head_promoted"
+      ) {
         setStreaming(false);
       } else {
         setStreaming(true);
@@ -481,35 +568,38 @@ export default function PlanModePage() {
       void loadDraft(draftId);
     };
 
-    wsClient.on('plan_run_queued', handler);
-    wsClient.on('plan_run_started', handler);
-    wsClient.on('plan_step_started', handler);
-    wsClient.on('plan_step_completed', handler);
-    wsClient.on('plan_version_created', handler);
-    wsClient.on('plan_head_promoted', handler);
-    wsClient.on('plan_run_stale', handler);
-    wsClient.on('plan_run_failed', handler);
-    wsClient.on('plan_cost_update', handler);
+    wsClient.on("plan_run_queued", handler);
+    wsClient.on("plan_run_started", handler);
+    wsClient.on("plan_step_started", handler);
+    wsClient.on("plan_step_completed", handler);
+    wsClient.on("plan_version_created", handler);
+    wsClient.on("plan_head_promoted", handler);
+    wsClient.on("plan_run_stale", handler);
+    wsClient.on("plan_run_failed", handler);
+    wsClient.on("plan_cost_update", handler);
 
     return () => {
-      wsClient.off('plan_run_queued', handler);
-      wsClient.off('plan_run_started', handler);
-      wsClient.off('plan_step_started', handler);
-      wsClient.off('plan_step_completed', handler);
-      wsClient.off('plan_version_created', handler);
-      wsClient.off('plan_head_promoted', handler);
-      wsClient.off('plan_run_stale', handler);
-      wsClient.off('plan_run_failed', handler);
-      wsClient.off('plan_cost_update', handler);
+      wsClient.off("plan_run_queued", handler);
+      wsClient.off("plan_run_started", handler);
+      wsClient.off("plan_step_started", handler);
+      wsClient.off("plan_step_completed", handler);
+      wsClient.off("plan_version_created", handler);
+      wsClient.off("plan_head_promoted", handler);
+      wsClient.off("plan_run_stale", handler);
+      wsClient.off("plan_run_failed", handler);
+      wsClient.off("plan_cost_update", handler);
     };
   }, [draftId]);
 
-  const canCreateDraft = prompt.trim() !== ''
-    && workspaces.length > 0
-    && effectiveSelectedModels.length > 0
-    && companionModel.trim() !== '';
+  const canCreateDraft =
+    prompt.trim() !== "" &&
+    workspaces.length > 0 &&
+    effectiveSelectedModels.length > 0 &&
+    (initialPlanningProfiles.planner.model ?? "").trim() !== "";
 
-  const updateCurrentDraft = (updater: (current: MissionDraft) => MissionDraft): void => {
+  const updateCurrentDraft = (
+    updater: (current: MissionDraft) => MissionDraft,
+  ): void => {
     setDraft((current) => (current ? updater(current) : current));
   };
 
@@ -521,7 +611,12 @@ export default function PlanModePage() {
     setConflictMessage(null);
     setPageError(null);
     try {
-      const response = await patchPlanDraftSpec(draft.id, draft.revision, draft.draft_spec, draft.validation);
+      const response = await patchPlanDraftSpec(
+        draft.id,
+        draft.revision,
+        draft.draft_spec,
+        draft.validation,
+      );
       await loadDraft(response.id);
     } catch (caught) {
       const conflict = getConflictMessage(caught);
@@ -529,7 +624,9 @@ export default function PlanModePage() {
         setConflictMessage(conflict);
         await loadDraft(draft.id);
       } else {
-        setPageError(caught instanceof Error ? caught.message : 'Failed to save draft.');
+        setPageError(
+          caught instanceof Error ? caught.message : "Failed to save draft.",
+        );
       }
     } finally {
       setSavingDraft(false);
@@ -549,21 +646,28 @@ export default function PlanModePage() {
         approved_models: effectiveSelectedModels,
         workspace_paths: workspaces,
         companion_profile: {
-          id: 'planner',
-          label: 'Planner',
-          model: companionModel,
+          id: "planner",
+          label: "Planner",
+          ...initialPlanningProfiles.planner,
+        },
+        validation: {
+          planning_profiles: initialPlanningProfiles,
         },
       });
-      setSearchParams({ draft: created.id });
+      navigate(`/plan/${created.id}`);
     } catch (caught) {
-      setPageError(caught instanceof Error ? caught.message : 'Failed to create planning draft.');
+      setPageError(
+        caught instanceof Error
+          ? caught.message
+          : "Failed to create planning draft.",
+      );
     } finally {
       setCreatingDraft(false);
     }
   };
 
   const handleFollowUp = async (): Promise<void> => {
-    if (!draft || followUpMessage.trim() === '') {
+    if (!draft || followUpMessage.trim() === "") {
       return;
     }
 
@@ -572,11 +676,13 @@ export default function PlanModePage() {
     setPageError(null);
     try {
       await sendPlanDraftMessage(draft.id, followUpMessage);
-      setFollowUpMessage('');
+      setFollowUpMessage("");
       await loadDraft(draft.id);
     } catch (caught) {
       setStreaming(false);
-      setPageError(caught instanceof Error ? caught.message : 'Planner turn failed.');
+      setPageError(
+        caught instanceof Error ? caught.message : "Planner turn failed.",
+      );
     }
   };
 
@@ -590,7 +696,9 @@ export default function PlanModePage() {
       const response = await startPlanDraft(draft.id);
       navigate(`/mission/${response.mission_id}`);
     } catch (caught) {
-      setPageError(caught instanceof Error ? caught.message : 'Failed to launch mission.');
+      setPageError(
+        caught instanceof Error ? caught.message : "Failed to launch mission.",
+      );
     } finally {
       setLaunching(false);
     }
@@ -608,13 +716,20 @@ export default function PlanModePage() {
       await loadDraft(draft.id);
     } catch (caught) {
       setStreaming(false);
-      setPageError(caught instanceof Error ? caught.message : 'Failed to submit preflight answers.');
+      setPageError(
+        caught instanceof Error
+          ? caught.message
+          : "Failed to submit preflight answers.",
+      );
     } finally {
       setSubmittingPreflight(false);
     }
   };
 
-  const handlePlanningProfileChange = (key: string, profile: ExecutionProfile): void => {
+  const handlePlanningProfileChange = (
+    key: string,
+    profile: ExecutionProfile,
+  ): void => {
     updateCurrentDraft((current) => ({
       ...current,
       validation: {
@@ -629,11 +744,19 @@ export default function PlanModePage() {
 
   const validationIssues = draftValidationIssues(draft);
   const advisoryIssues = useMemo(
-    () => (loadingModels ? [] : collectAdvisoryFlightChecks(draft, models.map((model) => model.id))),
+    () =>
+      loadingModels
+        ? []
+        : collectAdvisoryFlightChecks(
+            draft,
+            models.map((model) => model.id),
+          ),
     [draft, loadingModels, models],
   );
   const currentRun = latestRun(draft);
-  const preflightPending = draft?.preflight_status === 'pending' && (draft.preflight_questions?.length ?? 0) > 0;
+  const preflightPending =
+    draft?.preflight_status === "pending" &&
+    (draft.preflight_questions?.length ?? 0) > 0;
   const streamEvents = useMemo(
     () => [...buildRunEvents(currentRun), ...liveEvents].slice(-20),
     [currentRun, liveEvents],
@@ -643,8 +766,13 @@ export default function PlanModePage() {
     return (
       <div className="flex flex-col gap-5">
         <header className="page-head">
-          <h1 className="text-3xl font-semibold tracking-tight">Flight Director Cockpit</h1>
-          <p className="mt-1 text-sm text-dim">Create a planning draft, auto-start the first run, and keep the reviewed version ready for launch.</p>
+          <h1 className="text-3xl font-semibold tracking-tight">
+            Flight Director Cockpit
+          </h1>
+          <p className="mt-1 text-sm text-dim">
+            Create a planning draft, auto-start the first run, and keep the
+            reviewed version ready for launch.
+          </p>
         </header>
 
         {pageError ? (
@@ -654,7 +782,10 @@ export default function PlanModePage() {
         ) : null}
 
         <section className="rounded-lg border border-border bg-card p-4">
-          <label className="block text-sm font-medium text-text" htmlFor="plan-prompt">
+          <label
+            className="block text-sm font-medium text-text"
+            htmlFor="plan-prompt"
+          >
             Mission prompt
           </label>
           <textarea
@@ -667,12 +798,16 @@ export default function PlanModePage() {
           />
 
           <div className="mt-4">
-            <div className="mb-2 text-sm font-medium text-text">Working directories</div>
+            <div className="mb-2 text-sm font-medium text-text">
+              Working directories
+            </div>
             <FileBrowser selected={workspaces} onSelect={setWorkspaces} />
           </div>
 
           <div className="mt-4">
-            <div className="mb-2 text-sm font-medium text-text">Approved models</div>
+            <div className="mb-2 text-sm font-medium text-text">
+              Approved models
+            </div>
             <ModelSelector
               models={models}
               selected={effectiveSelectedModels}
@@ -680,23 +815,63 @@ export default function PlanModePage() {
             />
           </div>
 
-          <label className="mt-4 block text-sm font-medium text-text">
-            Companion model
-            <select
-              className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text outline-none focus:border-cyan"
-              value={companionModel}
-              onChange={(event) => setCompanionModel(event.currentTarget.value)}
-            >
-              <option value="gpt-5.4">gpt-5.4</option>
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>{model.name}</option>
-              ))}
-            </select>
-          </label>
+          <div className="mt-6">
+            <div className="mb-3 text-sm font-medium text-text">
+              Planning Stack
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
+                const profile = initialPlanningProfiles[key];
+                return (
+                  <div key={key} className="rounded-xl border border-border bg-surface p-3">
+                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+                    <div className="grid gap-2">
+                      <select
+                        className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
+                        value={profile.model ?? ""}
+                        onChange={(e) => {
+                          const mid = e.target.value;
+                          const m = models.find(mod => mod.id === mid);
+                          setInitialPlanningProfiles(p => ({
+                            ...p,
+                            [key]: { ...profile, model: mid, agent: m?.provider_id || profile.agent }
+                          }))
+                        }}
+                      >
+                        {models.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            [{m.provider}] {m.name}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
+                        value={profile.thinking ?? ""}
+                        onChange={(e) =>
+                          setInitialPlanningProfiles((p) => ({
+                            ...p,
+                            [key]: { ...profile, thinking: e.target.value },
+                          }))
+                        }
+                      >
+                        {THINKING_LEVELS.map((t) => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
           <div className="mt-5 flex items-center justify-between gap-3">
             <span className="text-[11px] text-dim">
-              {loadingModels ? 'Loading models...' : `${effectiveSelectedModels.length} approved model(s) armed`}
+              {loadingModels
+                ? "Loading models..."
+                : `${effectiveSelectedModels.length} approved model(s) armed`}
             </span>
             <button
               type="button"
@@ -717,16 +892,49 @@ export default function PlanModePage() {
   if (loadingDraft || !draft) {
     return (
       <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-dim">
-        {pageError ?? 'Loading planning draft...'}
+        {pageError ?? "Loading planning draft..."}
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-5">
-      <header className="page-head">
-        <h1 className="text-3xl font-semibold tracking-tight">Flight Director Cockpit</h1>
-        <p className="mt-1 text-sm text-dim">Flight Director conversation on the left, engineering controls on the right.</p>
+      <header className="page-head flex items-start justify-between">
+        <div>
+          <h1 className="text-3xl font-semibold tracking-tight">
+            Flight Director Cockpit
+          </h1>
+          <p className="mt-1 text-sm text-dim">
+            Flight Director conversation on the left, engineering controls on the
+            right.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="rounded-full border border-red/30 bg-red/10 px-4 py-2 text-sm font-semibold text-red transition-colors hover:bg-red/15 disabled:opacity-50"
+            disabled={true}
+            title="Not implemented for drafts yet"
+          >
+            Stop
+          </button>
+          <button
+            type="button"
+            className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-semibold text-text transition-colors hover:bg-card disabled:opacity-50"
+            disabled={true}
+            title="Not implemented for drafts yet"
+          >
+            Restart
+          </button>
+          <button
+            type="button"
+            className="rounded-full border border-red/30 bg-red/10 px-4 py-2 text-sm font-semibold text-red transition-colors hover:bg-red/15 disabled:opacity-50"
+            disabled={true}
+            title="Not implemented for drafts yet"
+          >
+            Delete
+          </button>
+        </div>
       </header>
 
       {pageError ? (
@@ -735,55 +943,76 @@ export default function PlanModePage() {
         </div>
       ) : null}
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(24rem,0.8fr)]">
+      <div className="grid gap-5 md:grid-cols-[1fr_350px] lg:grid-cols-[1fr_400px]">
         <div className="space-y-5">
-          <PlannerTranscriptPanel
-            turns={draft.turns}
-            message={followUpMessage}
-            busy={streaming || preflightPending}
-            onMessageChange={setFollowUpMessage}
-            onSend={() => {
-              void handleFollowUp();
-            }}
-          />
-          {preflightPending ? (
-            <PreflightQuestionsPanel
-              draft={draft}
-              answers={preflightAnswers}
-              submitting={submittingPreflight}
-              onAnswerChange={(questionId, answer) => {
-                setPreflightAnswers((current) => ({
-                  ...current,
-                  [questionId]: answer,
-                }));
-              }}
-              onSubmit={() => {
-                void handleSubmitPreflight(false);
-              }}
-              onSkip={() => {
-                void handleSubmitPreflight(true);
+          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '100ms', animationFillMode: 'forwards' }}>
+            <PlannerTranscriptPanel
+              turns={draft.turns}
+              message={followUpMessage}
+              busy={streaming || preflightPending}
+              onMessageChange={setFollowUpMessage}
+              onSend={() => {
+                void handleFollowUp();
               }}
             />
+          </div>
+          {preflightPending ? (
+            <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '150ms', animationFillMode: 'forwards' }}>
+              <PreflightQuestionsPanel
+                draft={draft}
+                answers={preflightAnswers}
+                submitting={submittingPreflight}
+                onAnswerChange={(questionId, answer) => {
+                  setPreflightAnswers((current) => ({
+                    ...current,
+                    [questionId]: answer,
+                  }));
+                }}
+                onSubmit={() => {
+                  void handleSubmitPreflight(false);
+                }}
+                onSkip={() => {
+                  void handleSubmitPreflight(true);
+                }}
+              />
+            </div>
           ) : null}
-          <PlannerStreamPanel events={streamEvents} busy={streaming} />
-          <PlanHistoryPanel draft={draft} />
+          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '200ms', animationFillMode: 'forwards' }}>
+            <PlannerStreamPanel events={streamEvents} busy={streaming} />
+          </div>
+          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '250ms', animationFillMode: 'forwards' }}>
+            <PlanHistoryPanel draft={draft} />
+          </div>
         </div>
 
         <aside className="space-y-5">
-          <section className="rounded-lg border border-border bg-card p-4">
+          <section className="rounded-lg border border-border bg-card p-4 animate-fade-in-up opacity-0" style={{ animationDelay: '150ms', animationFillMode: 'forwards' }}>
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="section-title">Engineering Controls</h2>
-                <p className="mt-1 text-xs text-dim">Mission summary, task timeline, validation, execution, and launch.</p>
-                <p className="mt-2 text-sm font-semibold text-text">{draft.draft_spec.name || 'Untitled mission draft'}</p>
+                <p className="mt-1 text-xs text-dim">
+                  Mission summary, task timeline, validation, execution, and
+                  launch.
+                </p>
+                <p className="mt-2 text-sm font-semibold text-text">
+                  {draft.draft_spec.name || "Untitled mission draft"}
+                </p>
                 {preflightPending ? (
-                  <p className="mt-2 text-xs text-amber">Preflight answers are required before the first planning run and launch.</p>
+                  <p className="mt-2 text-xs text-amber">
+                    Preflight answers are required before the first planning run
+                    and launch.
+                  </p>
                 ) : null}
               </div>
               <button
                 type="button"
-                className="rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={launching || validationIssues.length > 0 || streaming || preflightPending}
+                className={`rounded-full border border-cyan/30 px-4 py-2 text-sm font-semibold text-cyan transition-all disabled:cursor-not-allowed disabled:opacity-50 ${!(launching || validationIssues.length > 0 || streaming || preflightPending) ? 'bg-cyan/20 animate-pulse-glow shadow-[0_0_15px_rgba(34,211,238,0.4)]' : 'bg-cyan/10 hover:bg-cyan/15'}`}
+                disabled={
+                  launching ||
+                  validationIssues.length > 0 ||
+                  streaming ||
+                  preflightPending
+                }
                 onClick={() => {
                   void handleLaunch();
                 }}
@@ -791,114 +1020,150 @@ export default function PlanModePage() {
                 Launch Mission
               </button>
             </div>
+
             <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-dim">
               <span className="rounded-full border border-border bg-surface px-3 py-1">
-                Run {currentRun?.status ?? 'idle'}
+                Run {currentRun?.status ?? "idle"}
               </span>
               <span className="rounded-full border border-border bg-surface px-3 py-1">
                 Cost {formatCurrency(currentRun?.cost_usd)}
               </span>
               <span className="rounded-full border border-border bg-surface px-3 py-1">
-                Tokens {(currentRun?.tokens_in ?? 0) + (currentRun?.tokens_out ?? 0)}
+                Tokens{" "}
+                {(currentRun?.tokens_in ?? 0) + (currentRun?.tokens_out ?? 0)}
               </span>
             </div>
           </section>
 
-          <DraftSummaryPanel
-            draft={draft}
-            saving={savingDraft}
-            onNameChange={(value) => {
-              updateCurrentDraft((current) => updateDraftSpec(current, {
-                ...current.draft_spec,
-                name: value,
-              }));
-            }}
-            onGoalChange={(value) => {
-              updateCurrentDraft((current) => updateDraftSpec(current, {
-                ...current.draft_spec,
-                goal: value,
-              }));
-            }}
-            onDodChange={(value) => {
-              updateCurrentDraft((current) => updateDraftSpec(current, {
-                ...current.draft_spec,
-                definition_of_done: value,
-              }));
-            }}
-            onSave={() => {
-              void persistDraftSpec();
-            }}
-          />
+          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '200ms', animationFillMode: 'forwards' }}>
+            <DraftSummaryPanel
+              draft={draft}
+              saving={savingDraft}
+              onNameChange={(value) => {
+                updateCurrentDraft((current) =>
+                  updateDraftSpec(current, {
+                    ...current.draft_spec,
+                    name: value,
+                  }),
+                );
+              }}
+              onGoalChange={(value) => {
+                updateCurrentDraft((current) =>
+                  updateDraftSpec(current, {
+                    ...current.draft_spec,
+                    goal: value,
+                  }),
+                );
+              }}
+              onDodChange={(value) => {
+                updateCurrentDraft((current) =>
+                  updateDraftSpec(current, {
+                    ...current.draft_spec,
+                    definition_of_done: value,
+                  }),
+                );
+              }}
+              onSave={() => {
+                void persistDraftSpec();
+              }}
+            />
+          </div>
 
-          <TaskTimelinePanel
-            draft={draft}
-            saving={savingDraft}
-            models={models}
-            onTaskChange={(taskId, patch) => {
-              updateCurrentDraft((current) => updateDraftSpec(current, {
-                ...current.draft_spec,
-                tasks: current.draft_spec.tasks.map((task) => (
-                  task.id === taskId ? { ...task, ...patch } : task
-                )),
-              }));
-            }}
-            onSave={() => {
-              void persistDraftSpec();
-            }}
-          />
+          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '250ms', animationFillMode: 'forwards' }}>
+            <TaskTimelinePanel
+              draft={draft}
+              saving={savingDraft}
+              models={models}
+              onTaskChange={(taskId, patch) => {
+                updateCurrentDraft((current) =>
+                  updateDraftSpec(current, {
+                    ...current.draft_spec,
+                    tasks: current.draft_spec.tasks.map((task) =>
+                      task.id === taskId ? { ...task, ...patch } : task,
+                    ),
+                  }),
+                );
+              }}
+              onSave={() => {
+                void persistDraftSpec();
+              }}
+            />
+          </div>
 
-          <ExecutionProfileControls
-            draft={draft}
-            models={models}
-            onWorkerModelChange={(value) => {
-              updateCurrentDraft((current) => updateDraftSpec(current, {
-                ...current.draft_spec,
-                execution_defaults: {
-                  ...current.draft_spec.execution_defaults,
-                  worker: {
-                    agent: current.draft_spec.execution_defaults?.worker?.agent ?? 'codex',
-                    thinking: current.draft_spec.execution_defaults?.worker?.thinking ?? 'medium',
-                    model: value,
-                  },
-                  reviewer: current.draft_spec.execution_defaults?.reviewer ?? {
-                    agent: 'codex',
-                    thinking: 'low',
-                    model: current.draft_spec.execution_defaults?.reviewer?.model ?? models[0]?.id ?? '',
-                  },
-                },
-              }));
-            }}
-            onReviewerModelChange={(value) => {
-              updateCurrentDraft((current) => updateDraftSpec(current, {
-                ...current.draft_spec,
-                execution_defaults: {
-                  ...current.draft_spec.execution_defaults,
-                  worker: current.draft_spec.execution_defaults?.worker ?? {
-                    agent: 'codex',
-                    thinking: 'medium',
-                    model: current.draft_spec.execution_defaults?.worker?.model ?? models[0]?.id ?? '',
-                  },
-                  reviewer: {
-                    agent: current.draft_spec.execution_defaults?.reviewer?.agent ?? 'codex',
-                    thinking: current.draft_spec.execution_defaults?.reviewer?.thinking ?? 'low',
-                    model: value,
-                  },
-                },
-              }));
-            }}
-          />
+          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '300ms', animationFillMode: 'forwards' }}>
+            <ExecutionProfileControls
+              draft={draft}
+              models={models}
+              onWorkerModelChange={(value) => {
+                updateCurrentDraft((current) =>
+                  updateDraftSpec(current, {
+                    ...current.draft_spec,
+                    execution_defaults: {
+                      ...current.draft_spec.execution_defaults,
+                      worker: {
+                        agent:
+                          current.draft_spec.execution_defaults?.worker?.agent ??
+                          "codex",
+                        thinking:
+                          current.draft_spec.execution_defaults?.worker
+                            ?.thinking ?? "medium",
+                        model: value,
+                      },
+                      reviewer: current.draft_spec.execution_defaults
+                        ?.reviewer ?? {
+                        agent: "codex",
+                        thinking: "low",
+                        model:
+                          current.draft_spec.execution_defaults?.reviewer
+                            ?.model ??
+                          models[0]?.id ??
+                          "",
+                      },
+                    },
+                  }),
+                );
+              }}
+              onReviewerModelChange={(value) => {
+                updateCurrentDraft((current) =>
+                  updateDraftSpec(current, {
+                    ...current.draft_spec,
+                    execution_defaults: {
+                      ...current.draft_spec.execution_defaults,
+                      worker: current.draft_spec.execution_defaults?.worker ?? {
+                        agent: "codex",
+                        thinking: "medium",
+                        model:
+                          current.draft_spec.execution_defaults?.worker?.model ??
+                          models[0]?.id ??
+                          "",
+                      },
+                      reviewer: {
+                        agent:
+                          current.draft_spec.execution_defaults?.reviewer
+                            ?.agent ?? "codex",
+                        thinking:
+                          current.draft_spec.execution_defaults?.reviewer
+                            ?.thinking ?? "low",
+                        model: value,
+                      },
+                    },
+                  }),
+                );
+              }}
+            />
+          </div>
 
-          <PlanningProfilesPanel
-            draft={draft}
-            models={models}
-            onChange={handlePlanningProfileChange}
-          />
+          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '350ms', animationFillMode: 'forwards' }}>
+            <PlanningProfilesSummary draft={draft} models={models} />
+          </div>
 
-          <ValidationBoard
-            conflictMessage={conflictMessage}
-            summaryIssues={validationIssues}
-            advisoryIssues={advisoryIssues}
-          />
+          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '400ms', animationFillMode: 'forwards' }}>
+            <ValidationBoard
+              conflictMessage={conflictMessage}
+              summaryIssues={validationIssues}
+              advisoryIssues={advisoryIssues}
+            />
+          </div>
         </aside>
       </div>
     </div>

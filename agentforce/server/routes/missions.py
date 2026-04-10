@@ -9,6 +9,9 @@ from pathlib import Path
 
 import yaml
 
+from agentforce.core.engine import MissionEngine
+from agentforce.memory import Memory
+
 from .. import state_io, ws
 from ..plan_drafts import PlanDraftStore
 from ..plan_runs import PlanRunStore
@@ -57,6 +60,13 @@ def _load_state(mission_id: str):
 
 def _state_path(mission_id: str) -> Path:
     return state_io._state_path(mission_id)
+
+
+def _load_engine(mission_id: str) -> MissionEngine | None:
+    state_path = _state_path(mission_id)
+    if not state_path.exists():
+        return None
+    return MissionEngine.load(state_path, Memory(state_io.get_agentforce_home() / "memory"))
 
 
 def _archive_mission(mission_id: str) -> tuple[int, dict]:
@@ -119,13 +129,38 @@ def _post_mission_restart(mission_id: str) -> tuple[int, dict]:
     if not state:
         return 404, {"error": f"Mission {mission_id!r} not found"}
     requeued = 0
-    restartable = {"failed", "blocked", "review_rejected", "completed"}
+    restartable = {
+        "failed",
+        "blocked",
+        "review_rejected",
+        "in_progress",
+        "reviewing",
+        "retry",
+        "needs_human",
+        "spec_writing",
+        "tests_written",
+    }
     for task_state in state.task_states.values():
         if state_io._task_status_value(task_state) in restartable:
-            task_state.status = "pending"
-            task_state.worker_output = ""
+            task_state.status = "retry"
+            task_state.retries = 0  # Reset individual task budget
+            task_state.retry_not_before = 0.0
+            task_state.human_intervention_needed = False
+            task_state.human_intervention_message = ""
+            task_state.human_intervention_kind = ""
+            task_state.human_intervention_options = []
+            task_state.human_intervention_context = {}
+            task_state.bump()
             requeued += 1
+    state.active_wall_time_seconds = 0.0
+    state.reset_active_tick_clock()
+    state.total_retries = 0  # Reset global mission retry budget
+    state.total_human_interventions = 0 # Reset global mission intervention budget
+    state.caps_hit = {}
+    state.completed_at = None
+    state.log_event("mission_restarted", details=f"Restarted mission; requeued {requeued} active task(s)")
     state.save(_state_path(mission_id))
+    _broadcast_mission_refresh(state)
     _broadcast_mission_list_refresh()
 
     from agentforce.server import handler as _handler
@@ -134,6 +169,30 @@ def _post_mission_restart(mission_id: str) -> tuple[int, dict]:
         active_daemon.enqueue(mission_id)
 
     return 200, {"requeued": requeued}
+
+
+def _post_mission_default_models(mission_id: str, body: dict) -> tuple[int, dict]:
+    engine = _load_engine(mission_id)
+    if not engine:
+        return 404, {"error": f"Mission {mission_id!r} not found"}
+
+    worker_model = body.get("worker_model")
+    reviewer_model = body.get("reviewer_model")
+    worker_agent = body.get("worker_agent")
+    reviewer_agent = body.get("reviewer_agent")
+    try:
+        result = engine.change_default_models(
+            worker_model=worker_model if isinstance(worker_model, str) else None,
+            reviewer_model=reviewer_model if isinstance(reviewer_model, str) else None,
+            worker_agent=worker_agent if isinstance(worker_agent, str) else None,
+            reviewer_agent=reviewer_agent if isinstance(reviewer_agent, str) else None,
+        )
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+
+    _broadcast_mission_refresh(engine.state)
+    _broadcast_mission_list_refresh()
+    return 200, result
 
 
 def _post_mission_review(mission_id: str, body: dict) -> tuple[int, dict]:
@@ -335,6 +394,8 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
         return _post_mission_stop(parts[2])
     if len(parts) == 4 and parts[1] == "mission" and parts[3] == "restart":
         return _post_mission_restart(parts[2])
+    if len(parts) == 4 and parts[1] == "mission" and parts[3] == "default_models":
+        return _post_mission_default_models(parts[2], handler._read_json_body())
     if len(parts) == 4 and parts[1] == "mission" and parts[3] == "archive":
         return _archive_mission(parts[2])
     if len(parts) == 4 and parts[1] == "mission" and parts[3] == "unarchive":

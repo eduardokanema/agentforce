@@ -1,10 +1,129 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import threading
+from datetime import datetime, timedelta, timezone
 
 from agentforce.server import plan_drafts
+
+
+def _draft_payload_with_meta(name, goal):
+    return {
+        "status": "draft",
+        "draft_spec": {
+            "name": name,
+            "goal": goal,
+        },
+        "turns": [],
+        "validation": {},
+        "activity_log": [],
+        "approved_models": [],
+        "workspace_paths": [],
+        "companion_profile": {},
+        "draft_notes": [],
+    }
+
+
+def test_list_all_empty(tmp_path):
+    store = plan_drafts.PlanDraftStore(tmp_path / "drafts")
+    assert store.list_all() == []
+
+
+def test_list_all_filtering_and_sorting(tmp_path):
+    store = plan_drafts.PlanDraftStore(tmp_path / "drafts")
+
+    store.create("d1", **_draft_payload_with_meta("Draft 1", "Goal 1"))
+    store.create("d2", **_draft_payload_with_meta("Draft 2", "Goal 2"))
+
+    payload3 = _draft_payload_with_meta("Draft 3", "Goal 3")
+    payload3["status"] = "finalized"
+    store.create("d3", **payload3)
+
+    payload4 = _draft_payload_with_meta("Draft 4", "Goal 4")
+    payload4["status"] = "cancelled"
+    store.create("d4", **payload4)
+
+    drafts = store.list_all()
+    assert len(drafts) == 2
+    assert {d.id for d in drafts} == {"d1", "d2"}
+
+    drafts_all = store.list_all(include_terminal=True)
+    assert len(drafts_all) == 4
+
+    for d in drafts_all:
+        assert hasattr(d, "name")
+        assert hasattr(d, "goal")
+        assert d.name == f"Draft {d.id[1:]}"
+        assert d.goal == f"Goal {d.id[1:]}"
+        assert hasattr(d, "updated_at")
+        assert d.updated_at is not None
+        assert isinstance(d.updated_at, datetime)
+
+
+def test_list_all_sorting_by_activity_log(tmp_path):
+    store = plan_drafts.PlanDraftStore(tmp_path / "drafts")
+
+    d1 = store.create("d1", **_draft_payload_with_meta("D1", "G1"))
+    store.create("d2", **_draft_payload_with_meta("D2", "G2"))
+
+    now = plan_drafts._utc_now()
+    newer_ts = (now + timedelta(minutes=10)).isoformat()
+    d1_updated = d1.copy_with(activity_log=[{"timestamp": newer_ts}])
+    store.save(d1_updated, expected_revision=1)
+
+    drafts = store.list_all()
+    assert len(drafts) == 2
+    assert drafts[0].id == "d1"
+    assert drafts[1].id == "d2"
+    assert drafts[0].updated_at > drafts[1].updated_at
+
+
+def test_list_all_uses_nested_spec_last_activity_and_mtime_fallback(tmp_path):
+    drafts_dir = tmp_path / "drafts"
+    drafts_dir.mkdir()
+    store = plan_drafts.PlanDraftStore(drafts_dir)
+
+    old_timestamp = "2026-01-03T00:00:00+00:00"
+    last_timestamp = "2026-01-01T00:00:00+00:00"
+    stale_top_level_payload = {
+        **_draft_payload_with_meta("Nested name", "Nested goal"),
+        "id": "stale-top-level",
+        "revision": 1,
+        "name": "Stale top-level name",
+        "goal": "Stale top-level goal",
+        "updated_at": "2025-01-01T00:00:00+00:00",
+        "activity_log": [
+            {"timestamp": old_timestamp},
+            {"timestamp": last_timestamp},
+        ],
+    }
+
+    fallback_payload = {
+        **_draft_payload_with_meta("Mtime name", "Mtime goal"),
+        "id": "mtime-fallback",
+        "revision": 1,
+        "updated_at": "2025-01-01T00:00:00+00:00",
+        "activity_log": [],
+    }
+
+    stale_path = drafts_dir / "stale-top-level.json"
+    fallback_path = drafts_dir / "mtime-fallback.json"
+    stale_path.write_text(json.dumps(stale_top_level_payload), encoding="utf-8")
+    fallback_path.write_text(json.dumps(fallback_payload), encoding="utf-8")
+    fallback_mtime = datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp()
+    os.utime(fallback_path, (fallback_mtime, fallback_mtime))
+
+    drafts = store.list_all(include_terminal=True)
+
+    assert [draft.id for draft in drafts] == ["mtime-fallback", "stale-top-level"]
+    stale_draft = next(draft for draft in drafts if draft.id == "stale-top-level")
+    fallback_draft = next(draft for draft in drafts if draft.id == "mtime-fallback")
+    assert stale_draft.name == "Nested name"
+    assert stale_draft.goal == "Nested goal"
+    assert stale_draft.updated_at == datetime.fromisoformat(last_timestamp)
+    assert fallback_draft.updated_at == datetime.fromtimestamp(fallback_mtime, tz=timezone.utc)
 
 
 def _draft_payload() -> dict:
@@ -58,6 +177,10 @@ def test_plan_draft_store_save_load_conflict_and_redaction(tmp_path, monkeypatch
         "id",
         "revision",
         "status",
+        "name",
+        "goal",
+        "created_at",
+        "updated_at",
         "draft_spec",
         "turns",
         "validation",

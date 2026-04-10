@@ -1,15 +1,15 @@
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Breadcrumb from "../components/Breadcrumb";
 import EventLogTable from "../components/EventLogTable";
 import StatusBadge from "../components/StatusBadge";
 import TokenMeter from "../components/TokenMeter";
-import { createReadjustedDraft, restartMission, stopMission } from "../lib/api";
-import { useElapsedTime } from "../hooks/useElapsedTime";
+import { createReadjustedDraft, getModels, restartMission, stopMission, updateMissionDefaultModels } from "../lib/api";
 import { useMission } from "../hooks/useMission";
 import { useToast } from "../hooks/useToast";
-import type { EventLogEntry, TaskState, TaskStatus } from "../lib/types";
+import SpaceProgress from "../components/SpaceProgress";
+import type { EventLogEntry, Model, TaskSpec, TaskState, TaskStatus } from "../lib/types";
 
 type MissionBadgeStatus =
   | "active"
@@ -92,6 +92,36 @@ function formatExecutionProfile(profile?: {
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
+function formatActiveDuration(seconds?: number | null): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds ?? 0));
+  if (safeSeconds < 60) {
+    return `${safeSeconds}s`;
+  }
+  if (safeSeconds < 3600) {
+    return `${Math.floor(safeSeconds / 60)}m ${safeSeconds % 60}s`;
+  }
+  return `${Math.floor(safeSeconds / 3600)}h ${Math.floor((safeSeconds % 3600) / 60)}m`;
+}
+
+function resolvedTaskWorkerModel(
+  mission: {
+    execution?: {
+      tasks?: Record<string, { worker?: { model?: string | null } | null }> | null;
+      defaults?: { worker?: { model?: string | null } | null };
+    } | null;
+    worker_model?: string;
+  },
+  taskSpec: TaskSpec,
+): string | null {
+  return (
+    taskSpec.execution?.worker?.model
+    ?? mission.execution?.tasks?.[taskSpec.id]?.worker?.model
+    ?? mission.execution?.defaults?.worker?.model
+    ?? mission.worker_model
+    ?? null
+  );
+}
+
 function getTaskState(
   taskState: TaskState | undefined,
   taskSpec: { id: string },
@@ -152,8 +182,11 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   const navigate = useNavigate();
   const { mission, loading, error } = useMission(missionId);
   const { addToast } = useToast();
-  const elapsedWallTime = useElapsedTime(mission?.started_at);
   const [eventTypeFilter, setEventTypeFilter] = useState("");
+  const [showDefaultModels, setShowDefaultModels] = useState(false);
+  const [models, setModels] = useState<Model[]>([]);
+  const [defaultWorkerModel, setDefaultWorkerModel] = useState("");
+  const [defaultReviewerModel, setDefaultReviewerModel] = useState("");
   const [pendingAction, setPendingAction] = useState<null | {
     title: string;
     message: string;
@@ -161,6 +194,10 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
     variant: "danger" | "warning";
     action: () => Promise<void>;
   }>(null);
+
+  useEffect(() => {
+    getModels().then(setModels).catch(() => { /* best-effort */ });
+  }, []);
   const eventLog: EventLogEntry[] = useMemo(
     () => [...(mission?.event_log ?? [])].slice(-50).reverse(),
     [mission],
@@ -224,6 +261,35 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
     }
   };
 
+  const openDefaultModelControls = (): void => {
+    setDefaultWorkerModel(mission.execution?.defaults.worker?.model ?? mission.worker_model ?? "");
+    setDefaultReviewerModel(mission.execution?.defaults.reviewer?.model ?? "");
+    setShowDefaultModels((current) => !current);
+  };
+
+  const saveDefaultModels = async (): Promise<void> => {
+    const workerModel = defaultWorkerModel.trim();
+    const reviewerModel = defaultReviewerModel.trim();
+    const workerAgent = models.find((model) => model.id === workerModel)?.provider_id ?? null;
+    const reviewerAgent = models.find((model) => model.id === reviewerModel)?.provider_id ?? null;
+
+    try {
+      const result = await updateMissionDefaultModels(missionId, {
+        worker_agent: workerAgent,
+        worker_model: workerModel || null,
+        reviewer_agent: reviewerAgent,
+        reviewer_model: reviewerModel || null,
+      });
+      addToast(
+        `Default models updated for not-started tasks; pinned ${result.pinned_tasks} started task${result.pinned_tasks === 1 ? "" : "s"}`,
+        "success",
+      );
+      setShowDefaultModels(false);
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : "Failed to update default models", "error");
+    }
+  };
+
   return (
     <div>
       <Breadcrumb
@@ -247,7 +313,7 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
 
         <div className="flex flex-wrap items-center gap-2 text-[11px] text-dim">
           <span className="inline-flex rounded-full border border-border bg-surface px-3 py-0.5 font-mono text-[11px] text-dim">
-            Wall time {elapsedWallTime}
+            Wall time {formatActiveDuration(mission.active_wall_time_seconds)}
           </span>
           <span className="text-[10px] uppercase tracking-[0.08em] text-muted">
             Workspace path
@@ -286,11 +352,24 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
           costUsd={mission.cost_usd ?? mission.estimated_cost_usd ?? 0}
           label="mission tokens"
         />
+
+        <SpaceProgress 
+          className="mt-6"
+          pct={totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0} 
+          isRunning={missionStatus === "in_progress" || missionStatus === "active"}
+        />
       </div>
 
       <div className="mb-6">
         <div className="section-title mb-2">Mission Control</div>
         <div className="flex gap-2">
+          <button
+            type="button"
+            className="rounded border border-cyan/30 px-3 py-1 text-[12px] text-cyan transition-colors hover:bg-cyan/10"
+            onClick={openDefaultModelControls}
+          >
+            Change Default Models
+          </button>
           <button
             type="button"
             className="rounded border border-cyan/30 px-3 py-1 text-[12px] text-cyan transition-colors hover:bg-cyan/10"
@@ -348,6 +427,54 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
           </button>
         </div>
       </div>
+
+      {showDefaultModels ? (
+        <div className="mb-4 grid gap-3 rounded-lg border border-border bg-surface p-3 md:grid-cols-[1fr_1fr_auto]">
+          <label className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+            Worker
+            <select
+              className="mt-1 w-full rounded border border-border bg-card px-3 py-2 font-mono text-[12px] normal-case tracking-normal text-text outline-none focus:border-cyan"
+              value={defaultWorkerModel}
+              onChange={(event) => setDefaultWorkerModel(event.currentTarget.value)}
+            >
+              <option value="">{models.length === 0 ? "Loading models..." : "Keep current worker default"}</option>
+              {models.map((model) => (
+                <option key={`worker-${model.id}`} value={model.id}>{model.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+            Reviewer
+            <select
+              className="mt-1 w-full rounded border border-border bg-card px-3 py-2 font-mono text-[12px] normal-case tracking-normal text-text outline-none focus:border-cyan"
+              value={defaultReviewerModel}
+              onChange={(event) => setDefaultReviewerModel(event.currentTarget.value)}
+            >
+              <option value="">{models.length === 0 ? "Loading models..." : "Keep current reviewer default"}</option>
+              {models.map((model) => (
+                <option key={`reviewer-${model.id}`} value={model.id}>{model.name}</option>
+              ))}
+            </select>
+          </label>
+          <div className="flex items-end gap-2">
+            <button
+              type="button"
+              className="rounded border border-cyan/30 px-3 py-2 text-[12px] text-cyan transition-colors hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!defaultWorkerModel.trim() && !defaultReviewerModel.trim()}
+              onClick={() => { void saveDefaultModels(); }}
+            >
+              Save Models
+            </button>
+            <button
+              type="button"
+              className="rounded border border-border px-3 py-2 text-[12px] text-dim transition-colors hover:bg-card-hover"
+              onClick={() => setShowDefaultModels(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <section className="sec">
         {planning ? (
@@ -456,7 +583,7 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
                       </span>
                     ) : null}
                     <span className="inline-flex rounded-full border border-border bg-card px-2 py-0.5 font-mono text-[11px] text-dim">
-                      {mission.worker_model ?? "—"}
+                      {resolvedTaskWorkerModel(mission, taskSpec) ?? "—"}
                     </span>
                     {score > 0 ? (
                       <span

@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agentforce.core.engine import MissionEngine, ReviewerDelegation, WorkerDelegation
-from agentforce.core.spec import ExecutionConfig, ExecutionProfile, MissionSpec, TaskSpec
+from agentforce.core.spec import Caps, ExecutionConfig, ExecutionProfile, MissionSpec, TaskSpec
 from agentforce.memory import Memory
 
 
@@ -238,3 +238,66 @@ def test_launch_defaults_fill_explicit_worker_runtime_fallback_fields(tmp_path):
     assert worker.agent == "opencode"
     assert worker.model == "cli-worker-model"
     assert worker.thinking == "high"
+
+
+def test_change_default_models_pins_started_tasks_and_updates_pending_defaults(tmp_path):
+    spec = MissionSpec(
+        name="Default model update",
+        goal="Update pending task defaults",
+        definition_of_done=["All tasks pass"],
+        caps=Caps(max_concurrent_workers=1),
+        tasks=[
+            TaskSpec(id="01", title="Started", description="Already started", acceptance_criteria=["done"]),
+            TaskSpec(id="02", title="Pending", description="Not started", acceptance_criteria=["done"]),
+        ],
+    )
+    state_dir = tmp_path / "state"
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    engine = MissionEngine(
+        spec=spec,
+        state_dir=state_dir,
+        memory=Memory(memory_dir),
+        worker_model="old-worker",
+        reviewer_model="old-reviewer",
+    )
+
+    engine.tick()
+    engine.state.get_task("02").status = "pending"
+    engine.state.get_task("02").started_at = None
+    engine._save()
+
+    result = engine.change_default_models(
+        worker_agent="codex",
+        worker_model="new-worker",
+        reviewer_agent="claude",
+        reviewer_model="new-reviewer",
+    )
+
+    assert result["pinned_tasks"] == 1
+    assert engine.state.execution_defaults.worker.agent == "codex"
+    assert engine.state.execution_defaults.worker.model == "new-worker"
+    assert engine.state.execution_defaults.reviewer.agent == "claude"
+    assert engine.state.execution_defaults.reviewer.model == "new-reviewer"
+    started_task = engine.spec.tasks[0]
+    pending_task = engine.spec.tasks[1]
+    assert started_task.execution.worker.model == "old-worker"
+    assert started_task.execution.reviewer.model == "old-reviewer"
+    assert pending_task.execution.worker is None
+    assert pending_task.execution.reviewer is None
+
+
+def test_change_models_updates_worker_agent_with_model_for_started_task(tmp_path):
+    task = TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["done"])
+    engine = make_engine(tmp_path, task, worker_model="old-worker", reviewer_model="old-reviewer")
+    engine.state.execution_defaults.worker.agent = "gemini"
+    engine.spec.execution_defaults.worker.agent = "gemini"
+
+    engine.tick()
+
+    retried = engine.change_models("01", worker_agent="codex", worker_model="gpt-5.4")
+
+    assert retried is True
+    assert task.execution.worker.agent == "codex"
+    assert task.execution.worker.model == "gpt-5.4"
+    assert engine.state.get_task("01").status.value == "pending"

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import ConfirmDialog from '../components/ConfirmDialog';
 import Breadcrumb from '../components/Breadcrumb';
@@ -8,11 +8,11 @@ import StatusBadge from '../components/StatusBadge';
 import StatsBar from '../components/StatsBar';
 import TokenMeter from '../components/TokenMeter';
 import Terminal from '../components/Terminal';
-import { injectPrompt, markTaskFailed, resolveHumanBlock, retryTask, stopTask } from '../lib/api';
+import { changeTaskModel, getModels, injectPrompt, markTaskFailed, resolveHumanBlock, retryTask, stopTask } from '../lib/api';
 import { useMission } from '../hooks/useMission';
 import { useTaskStream } from '../hooks/useTaskStream';
 import { useToast } from '../hooks/useToast';
-import type { TaskSpec, TaskState, TaskStatus } from '../lib/types';
+import type { Model, TaskSpec, TaskState, TaskStatus } from '../lib/types';
 
 function formatDuration(startedAt?: string | null, completedAt?: string | null): string {
   if (!startedAt) {
@@ -155,6 +155,16 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
   const { addToast } = useToast();
   const { lines, done } = useTaskStream(missionId, taskId);
   const [injectMsg, setInjectMsg] = useState('');
+  const [changeModelInput, setChangeModelInput] = useState('');
+  const [changeReviewerModelInput, setChangeReviewerModelInput] = useState('');
+  const [showChangeModel, setShowChangeModel] = useState(false);
+  const [models, setModels] = useState<Model[]>([]);
+  const [destructiveChoiceId, setDestructiveChoiceId] = useState('approve_once');
+  const [destructiveMessage, setDestructiveMessage] = useState('');
+
+  useEffect(() => {
+    getModels().then(setModels).catch(() => { /* best-effort */ });
+  }, []);
   const [pendingAction, setPendingAction] = useState<null | {
     title: string;
     message: string;
@@ -176,8 +186,22 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
   const retryCount = taskState ? getRetryCount(taskState) : 0;
   const duration = formatDuration(taskState?.started_at ?? mission?.started_at, taskState?.completed_at);
   const humanInterventionMessage = (taskState?.human_intervention_message ?? '').trim();
+  const destructiveContext = taskState?.human_intervention_context ?? {};
+  const destructiveOptions = taskState?.human_intervention_options ?? [];
+  const destructiveActionKey = typeof destructiveContext.action_key === 'string' ? destructiveContext.action_key : '';
+  const isDestructiveIntervention = taskState?.status === 'needs_human'
+    && taskState?.human_intervention_kind === 'destructive_action';
   const errorMessage = (taskState?.error_message ?? '').trim();
   const injectEnabled = taskState?.status === 'in_progress';
+  const currentModel = taskSpec?.execution?.worker?.model
+    ?? mission?.execution?.tasks?.[taskId]?.worker?.model
+    ?? mission?.execution?.defaults.worker?.model
+    ?? mission?.worker_model
+    ?? null;
+  const currentReviewerModel = taskSpec?.execution?.reviewer?.model
+    ?? mission?.execution?.tasks?.[taskId]?.reviewer?.model
+    ?? mission?.execution?.defaults.reviewer?.model
+    ?? null;
   const hasReviewPanel = Boolean(
     reviewFeedback.trim()
       || reviewScore > 0
@@ -185,6 +209,14 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
       || blockingIssues.length > 0
       || (suggestions && suggestions.length > 0),
   );
+
+  useEffect(() => {
+    if (!isDestructiveIntervention) {
+      return;
+    }
+    setDestructiveChoiceId(destructiveOptions[0]?.id ?? 'approve_once');
+    setDestructiveMessage('');
+  }, [destructiveActionKey, destructiveOptions, isDestructiveIntervention]);
 
   if (loading && !mission) {
     return <LoadingState message="Loading task..." />;
@@ -225,6 +257,52 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
             : 'Failed to deliver instruction',
         error instanceof Error && error.message.includes('409') ? 'info' : 'error',
       );
+    }
+  };
+
+  const handleChangeModel = async (): Promise<void> => {
+    const workerModel = changeModelInput.trim();
+    const reviewerModel = changeReviewerModelInput.trim();
+    if (!workerModel && !reviewerModel) {
+      return;
+    }
+
+    const workerAgent = models.find((model) => model.id === workerModel)?.provider_id ?? null;
+    const reviewerAgent = models.find((model) => model.id === reviewerModel)?.provider_id ?? null;
+
+    try {
+      const result = await changeTaskModel(missionId, taskId, {
+        worker_agent: workerAgent,
+        worker_model: workerModel || null,
+        reviewer_agent: reviewerAgent,
+        reviewer_model: reviewerModel || null,
+      });
+      addToast(result.retried ? 'Models changed — task re-queued' : 'Models updated', 'success');
+      setChangeModelInput('');
+      setChangeReviewerModelInput('');
+      setShowChangeModel(false);
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : 'Failed to change model', 'error');
+    }
+  };
+
+  const handleResolveDestructiveAction = async (): Promise<void> => {
+    const choiceId = destructiveChoiceId || destructiveOptions[0]?.id || 'approve_once';
+    const message = destructiveMessage.trim();
+    if (choiceId === 'revise' && message.length === 0) {
+      addToast('Add instructions before revising the action', 'error');
+      return;
+    }
+
+    try {
+      await resolveHumanBlock(missionId, taskId, {
+        choice_id: choiceId,
+        message,
+      });
+      addToast('Destructive action decision saved', 'success');
+      setDestructiveMessage('');
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : 'Failed to resolve destructive action', 'error');
     }
   };
 
@@ -338,12 +416,87 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
         >
           Resolve Block
         </button>
+        <button
+          type="button"
+          className="rounded border border-cyan/30 px-3 py-1 text-[12px] text-cyan transition-colors hover:bg-cyan/10"
+          onClick={() => {
+            setShowChangeModel((v) => !v);
+            setChangeModelInput(currentModel ?? '');
+            setChangeReviewerModelInput(currentReviewerModel ?? '');
+          }}
+        >
+          Change Model
+        </button>
       </div>
+
+      {showChangeModel ? (
+        <div className="mb-4 grid gap-2 md:grid-cols-[1fr_1fr_auto_auto]">
+          <select
+            className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan disabled:opacity-50"
+            value={changeModelInput}
+            disabled={models.length === 0}
+            onChange={(event) => { setChangeModelInput(event.target.value); }}
+            aria-label="Worker model"
+          >
+            <option value="">{models.length === 0 ? 'Loading models…' : 'Worker model…'}</option>
+            {Object.entries(
+              models.reduce<Record<string, Model[]>>((acc, m) => {
+                (acc[m.provider] ??= []).push(m);
+                return acc;
+              }, {}),
+            ).map(([provider, providerModels]) => (
+              <optgroup key={provider} label={provider}>
+                {providerModels.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <select
+            className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan disabled:opacity-50"
+            value={changeReviewerModelInput}
+            disabled={models.length === 0}
+            onChange={(event) => { setChangeReviewerModelInput(event.target.value); }}
+            aria-label="Reviewer model"
+          >
+            <option value="">{models.length === 0 ? 'Loading models…' : 'Reviewer model…'}</option>
+            {Object.entries(
+              models.reduce<Record<string, Model[]>>((acc, m) => {
+                (acc[m.provider] ??= []).push(m);
+                return acc;
+              }, {}),
+            ).map(([provider, providerModels]) => (
+              <optgroup key={provider} label={provider}>
+                {providerModels.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="rounded border border-cyan/30 px-3 py-1 text-[12px] text-cyan transition-colors hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={changeModelInput.trim().length === 0 && changeReviewerModelInput.trim().length === 0}
+            onClick={() => { void handleChangeModel(); }}
+          >
+            {taskState.status === 'pending' ? 'Save' : 'Change & Retry'}
+          </button>
+          <button
+            type="button"
+            className="rounded border border-border px-3 py-1 text-[12px] text-dim transition-colors hover:bg-surface"
+            onClick={() => { setShowChangeModel(false); setChangeModelInput(''); setChangeReviewerModelInput(''); }}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : null}
 
       <StatsBar
         className="mb-7"
         stats={[
           { label: 'Status', value: <StatusBadge status={taskState.status} /> },
+          { label: 'Model', value: <span className="block truncate font-mono text-sm font-normal">{currentModel ?? <span className="text-dim/60">default</span>}</span> },
+          { label: 'Reviewer', value: <span className="block truncate font-mono text-sm font-normal">{currentReviewerModel ?? <span className="text-dim/60">default</span>}</span> },
           { label: 'Review Score', value: reviewScore > 0 ? formatScore(reviewScore) : '—' },
           { label: 'Retries', value: retryCount },
           { label: 'Duration', value: duration },
@@ -404,7 +557,63 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
         </section>
       ) : null}
 
-      {humanInterventionMessage ? (
+      {isDestructiveIntervention ? (
+        <section className="sec">
+          <h2 className="section-title">Destructive Action Requires Approval</h2>
+          <div className="rounded-lg border border-red/30 bg-red-bg p-4 text-sm">
+            <div className="space-y-2">
+              <p className="font-semibold text-red">{typeof destructiveContext.summary === 'string' ? destructiveContext.summary : 'Potential destructive action requested'}</p>
+              <p className="whitespace-pre-wrap leading-6 text-text">{typeof destructiveContext.risk === 'string' ? destructiveContext.risk : humanInterventionMessage}</p>
+              {typeof destructiveContext.proposed_action === 'string' ? (
+                <p className="rounded border border-red/20 bg-surface px-3 py-2 font-mono text-[12px] text-text">{destructiveContext.proposed_action}</p>
+              ) : null}
+              {Array.isArray(destructiveContext.targets) && destructiveContext.targets.length > 0 ? (
+                <p className="text-[12px] text-dim">Targets: {destructiveContext.targets.join(', ')}</p>
+              ) : null}
+            </div>
+
+            <div className="mt-4 grid gap-2 md:grid-cols-2">
+              {destructiveOptions.map((option) => (
+                <label
+                  key={option.id}
+                  className={`rounded border px-3 py-2 transition-colors ${
+                    destructiveChoiceId === option.id
+                      ? 'border-red/50 bg-red/10'
+                      : 'border-border bg-surface hover:border-red/30'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    className="mr-2"
+                    name="destructive-action-choice"
+                    value={option.id}
+                    checked={destructiveChoiceId === option.id}
+                    onChange={() => { setDestructiveChoiceId(option.id); }}
+                  />
+                  <span className="font-semibold text-text">{option.label}</span>
+                  {option.description ? <span className="mt-1 block text-[12px] leading-5 text-dim">{option.description}</span> : null}
+                </label>
+              ))}
+            </div>
+
+            <textarea
+              rows={3}
+              className="mt-3 w-full rounded border border-border bg-surface px-3 py-2 font-mono text-[12px] text-text outline-none transition-colors focus:border-red"
+              placeholder={destructiveChoiceId === 'revise' ? 'Required alternate instructions...' : 'Optional operator note...'}
+              value={destructiveMessage}
+              onChange={(event) => { setDestructiveMessage(event.target.value); }}
+            />
+            <button
+              type="button"
+              className="mt-3 rounded border border-red/30 bg-red-bg px-3 py-1 text-[12px] font-semibold text-red transition-colors hover:bg-red/10 disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={destructiveChoiceId === 'revise' && destructiveMessage.trim().length === 0}
+              onClick={() => { void handleResolveDestructiveAction(); }}
+            >
+              Submit Decision
+            </button>
+          </div>
+        </section>
+      ) : humanInterventionMessage ? (
         <section className="sec">
           <h2 className="section-title">Human Intervention</h2>
           <div className="rounded-lg border border-amber/20 bg-amber-bg p-4 text-sm text-amber">

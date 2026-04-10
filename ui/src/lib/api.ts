@@ -1,7 +1,9 @@
 import type {
   AppConfig,
   Connector,
+  DaemonStatus,
   DefaultCaps,
+  DraftSummary,
   FilesystemListing,
   Model,
   MissionDraft,
@@ -52,6 +54,10 @@ export function getMissions(): Promise<MissionSummary[]> {
   return requestJson<MissionSummary[]>('/api/missions');
 }
 
+export function getDrafts(): Promise<DraftSummary[]> {
+  return requestJson<DraftSummary[]>('/api/plan/drafts');
+}
+
 export function getMission(id: string): Promise<MissionState> {
   return requestJson<MissionState>(`/api/mission/${encodeURIComponent(id)}`);
 }
@@ -80,6 +86,37 @@ export function stopMission(id: string): Promise<void> {
 
 export function restartMission(id: string): Promise<void> {
   return requestVoid(`/api/mission/${encodeURIComponent(id)}/restart`);
+}
+
+export function updateMissionDefaultModels(
+  id: string,
+  models: {
+    worker_agent?: string | null;
+    worker_model?: string | null;
+    reviewer_agent?: string | null;
+    reviewer_model?: string | null;
+  },
+): Promise<{
+  worker_agent: string | null;
+  worker_model: string | null;
+  reviewer_agent: string | null;
+  reviewer_model: string | null;
+  pinned_tasks: number;
+}> {
+  return requestJson<{
+    worker_agent: string | null;
+    worker_model: string | null;
+    reviewer_agent: string | null;
+    reviewer_model: string | null;
+    pinned_tasks: number;
+  }>(
+    `/api/mission/${encodeURIComponent(id)}/default_models`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(models),
+    },
+  );
 }
 
 export function archiveMission(id: string): Promise<void> {
@@ -111,13 +148,51 @@ export function injectPrompt(missionId: string, taskId: string, message: string)
   });
 }
 
-export function resolveHumanBlock(missionId: string, taskId: string, message: string): Promise<void> {
+export function resolveHumanBlock(
+  missionId: string,
+  taskId: string,
+  resolution: string | { message?: string; choice_id?: string },
+): Promise<void> {
+  const body = typeof resolution === 'string' ? { message: resolution } : resolution;
   return requestVoid(`/api/mission/${encodeURIComponent(missionId)}/task/${encodeURIComponent(taskId)}/resolve`, {
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(body),
   });
+}
+
+export function changeTaskModel(
+  missionId: string,
+  taskId: string,
+  modelOrModels: string | {
+    worker_agent?: string | null;
+    worker_model?: string | null;
+    reviewer_agent?: string | null;
+    reviewer_model?: string | null;
+  },
+): Promise<{
+  worker_agent: string | null;
+  worker_model: string | null;
+  reviewer_agent: string | null;
+  reviewer_model: string | null;
+  retried: boolean;
+}> {
+  const body = typeof modelOrModels === 'string' ? { worker_model: modelOrModels } : modelOrModels;
+  return requestJson<{
+    worker_agent: string | null;
+    worker_model: string | null;
+    reviewer_agent: string | null;
+    reviewer_model: string | null;
+    retried: boolean;
+  }>(
+    `/api/mission/${encodeURIComponent(missionId)}/task/${encodeURIComponent(taskId)}/change_model`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 export function markTaskFailed(missionId: string, taskId: string): Promise<void> {
@@ -178,6 +253,7 @@ export function createPlanDraft(payload: {
   approved_models: string[];
   workspace_paths: string[];
   companion_profile: Record<string, unknown>;
+  validation?: Record<string, unknown>;
 }): Promise<{ id: string; revision: number; plan_run_id?: string; requires_preflight?: boolean }> {
   return requestJson<{ id: string; revision: number; plan_run_id?: string; requires_preflight?: boolean }>('/api/plan/drafts', {
     method: 'POST',
@@ -393,4 +469,28 @@ export function updateDefaultCaps(caps: DefaultCaps): Promise<{ default_caps: De
 
 export function getFilesystemListing(path: string): Promise<FilesystemListing> {
   return requestJson<FilesystemListing>(`/api/filesystem?path=${encodeURIComponent(path)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Daemon control
+// ---------------------------------------------------------------------------
+
+export function getDaemonStatus(): Promise<DaemonStatus> {
+  return requestJson<DaemonStatus>('/api/daemon');
+}
+
+export function daemonStop(): Promise<void> {
+  return requestVoid('/api/daemon/stop');
+}
+
+export function daemonRestart(): Promise<void> {
+  return requestVoid('/api/daemon/restart');
+}
+
+export function daemonDequeue(jobId: string): Promise<void> {
+  return requestVoid('/api/daemon/dequeue', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mission_id: jobId }),
+  });
 }

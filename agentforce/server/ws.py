@@ -271,6 +271,13 @@ def broadcast(payload: dict) -> None:
     _broadcast_to_subscribers("*", message)
 
 
+def broadcast_draft_updated(draft_id: str, status: str | None = None) -> None:
+    payload = {"type": "draft_updated", "draft_id": draft_id}
+    if status:
+        payload["status"] = status
+    broadcast(payload)
+
+
 def broadcast_task_attempt_start(mission_id: str, task_id: str, attempt_number: int) -> None:
     message = json.dumps(
         {
