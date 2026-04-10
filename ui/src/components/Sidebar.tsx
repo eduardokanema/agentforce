@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, useInRouterContext } from 'react-router-dom';
 import { wsClient } from '../lib/ws';
+import { useTheme, type ThemeMode } from '../context/ThemeContext';
 
 type WsConnectionState = 'connecting' | 'open' | 'closed';
 
@@ -13,6 +14,9 @@ const NAV_ITEMS = [
 ] as const;
 
 const APP_VERSION = 'v0.0.0';
+
+const THEME_ICONS: Record<ThemeMode, string> = { dark: '☽', light: '☀', system: '⊙' };
+const THEME_LABELS: Record<ThemeMode, string> = { dark: 'Dark', light: 'Light', system: 'System' };
 
 function readCollapsedState(): boolean {
   if (typeof window === 'undefined') {
@@ -65,7 +69,7 @@ function SidebarNavLink({
       className={({ isActive }) => [
         className,
         isActive
-          ? 'border-cyan bg-[#061a1f] text-cyan'
+          ? 'border-cyan bg-cyan-bg text-cyan'
           : 'border-transparent text-dim hover:bg-card hover:text-text',
       ].join(' ')}
       title={item.label}
@@ -81,6 +85,7 @@ function SidebarNavLink({
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(readCollapsedState);
   const [connectionState, setConnectionState] = useState<WsConnectionState>(() => wsClient.connectionState);
+  const { mode, cycleTheme } = useTheme();
 
   useEffect(() => {
     window.localStorage.setItem('sidebar-collapsed', collapsed ? '1' : '0');
@@ -100,7 +105,7 @@ export default function Sidebar() {
   return (
     <aside
       className={[
-        'shrink-0 border-r border-border bg-[#0b1322]/95 backdrop-blur-sm transition-all duration-200',
+        'shrink-0 border-r border-border bg-surface/95 backdrop-blur-sm transition-all duration-200',
         collapsed ? 'w-14' : 'w-48',
       ].join(' ')}
     >
@@ -122,8 +127,22 @@ export default function Sidebar() {
           ))}
         </nav>
 
-        <div className="border-t border-border px-3 py-3">
-          <div className="flex items-center gap-2">
+        <div className="border-t border-border px-2 py-2 space-y-1">
+          <button
+            type="button"
+            data-testid="theme-toggle"
+            data-mode={mode}
+            aria-label={`Theme: ${THEME_LABELS[mode]}`}
+            onClick={cycleTheme}
+            className={[
+              'flex min-h-10 w-full items-center rounded-none border-l-2 border-transparent px-3 py-2 text-[12px] text-dim transition-colors hover:bg-card hover:text-text',
+              collapsed ? 'justify-center px-0' : 'justify-start gap-3',
+            ].join(' ')}
+          >
+            <span aria-hidden="true" className="text-[13px] leading-none">{THEME_ICONS[mode]}</span>
+            {!collapsed ? <span className="truncate">{THEME_LABELS[mode]}</span> : null}
+          </button>
+          <div className="flex items-center gap-2 px-3 py-1">
             <span aria-hidden="true" className={connectionDotClassName(connectionState)} />
             {!collapsed ? <span className="text-[10px] text-muted">{APP_VERSION}</span> : null}
           </div>

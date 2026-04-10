@@ -265,6 +265,12 @@ def broadcast_task_cost_update(
     _broadcast_to_subscribers(mission_id, message)
 
 
+def broadcast(payload: dict) -> None:
+    """Broadcast a daemon lifecycle event to all '*' subscribers."""
+    message = json.dumps(payload)
+    _broadcast_to_subscribers("*", message)
+
+
 def broadcast_task_attempt_start(mission_id: str, task_id: str, attempt_number: int) -> None:
     message = json.dumps(
         {

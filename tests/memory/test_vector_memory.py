@@ -6,6 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+pytest.importorskip("lancedb", reason="lancedb not installed; install agentforce[vector]")
 from agentforce.memory.vector_memory import VectorMemory
 
 

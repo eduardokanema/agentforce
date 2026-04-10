@@ -47,7 +47,7 @@ def test_task_model_from_dict_defaults_to_none():
 def test_per_task_model_overrides_worker_model(tmp_path):
     engine = make_engine(
         tmp_path,
-        TaskSpec(id="01", title="Task", description="Do it", model="claude-haiku-4-5"),
+        TaskSpec(id="01", title="Task", description="Do it", model="claude-haiku-4-5", acceptance_criteria=["assert result == 'ok'"]),
     )
 
     actions = engine.tick()
@@ -60,7 +60,7 @@ def test_per_task_model_overrides_worker_model(tmp_path):
 def test_task_model_uses_mission_default_when_not_set(tmp_path):
     engine = make_engine(
         tmp_path,
-        TaskSpec(id="01", title="Task", description="Do it"),
+        TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["assert result == 'ok'"]),
         worker_model="mission-default-model",
     )
 
@@ -74,7 +74,7 @@ def test_task_model_uses_mission_default_when_not_set(tmp_path):
 def test_per_task_model_does_not_override_reviewer_model(tmp_path):
     engine = make_engine(
         tmp_path,
-        TaskSpec(id="01", title="Task", description="Do it", model="claude-haiku-4-5"),
+        TaskSpec(id="01", title="Task", description="Do it", model="claude-haiku-4-5", acceptance_criteria=["assert result == 'ok'"]),
         reviewer_model="mission-reviewer-default",
     )
 
@@ -90,7 +90,7 @@ def test_per_task_model_does_not_override_reviewer_model(tmp_path):
 def test_outcome_memory_truncation_uses_2000_chars(tmp_path):
     engine = make_engine(
         tmp_path,
-        TaskSpec(id="01", title="Task", description="Do it"),
+        TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["assert result == 'ok'"]),
     )
 
     engine.tick()

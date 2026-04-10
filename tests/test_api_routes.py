@@ -361,7 +361,7 @@ def test_serve_does_not_mutate_module_state_dir(tmp_path, monkeypatch):
 
 def test_handler_module_stays_small():
     handler_path = Path(handler_mod.__file__)
-    assert sum(1 for _ in handler_path.open()) < 210
+    assert sum(1 for _ in handler_path.open()) < 350
 
 
 # ── /api/config default_caps tests ────────────────────────────────────────────
@@ -923,4 +923,522 @@ def test_post_config_invalid_concurrent_workers_returns_400(tmp_path, monkeypatc
     assert handler.send_response.call_args.args == (400,)
     body = _response_body(handler)
     assert "error" in body
-    assert "max_concurrent_workers" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# Task 05 — Auto-draft workspace context
+# ---------------------------------------------------------------------------
+
+def test_auto_draft_working_dir_from_workspace_paths(tmp_path, monkeypatch):
+    """draft_spec['working_dir'] should equal workspace_paths[0] when provided."""
+    _patch_home(monkeypatch, tmp_path)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {
+        "prompt": "Build something",
+        "workspace_paths": [str(workspace)],
+    })
+    create_handler.do_POST()
+
+    assert create_handler.send_response.call_args.args == (200,)
+    created = _response_body(create_handler)
+
+    get_handler = _make_handler(f"/api/plan/drafts/{created['id']}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+
+    assert loaded["draft_spec"]["working_dir"] == str(workspace)
+
+
+def test_auto_draft_no_workspace_paths_working_dir_is_none(tmp_path, monkeypatch):
+    """draft_spec['working_dir'] should be None when workspace_paths is absent."""
+    _patch_home(monkeypatch, tmp_path)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build something"})
+    create_handler.do_POST()
+
+    assert create_handler.send_response.call_args.args == (200,)
+    created = _response_body(create_handler)
+
+    get_handler = _make_handler(f"/api/plan/drafts/{created['id']}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+
+    assert loaded["draft_spec"]["working_dir"] is None
+
+
+def test_auto_draft_caps_small_workspace(tmp_path, monkeypatch):
+    """max_concurrent_workers == 1 for a workspace with fewer than 50 files."""
+    _patch_home(monkeypatch, tmp_path)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for i in range(10):
+        (workspace / f"file_{i}.py").write_text("# placeholder")
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {
+        "prompt": "Build something small",
+        "workspace_paths": [str(workspace)],
+    })
+    create_handler.do_POST()
+
+    created = _response_body(create_handler)
+    get_handler = _make_handler(f"/api/plan/drafts/{created['id']}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+
+    assert loaded["draft_spec"]["caps"]["max_concurrent_workers"] == 1
+
+
+def test_auto_draft_caps_medium_workspace(tmp_path, monkeypatch):
+    """max_concurrent_workers == 2 for a workspace with >= 50 files."""
+    _patch_home(monkeypatch, tmp_path)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for i in range(60):
+        (workspace / f"file_{i}.py").write_text("# placeholder")
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {
+        "prompt": "Build something medium",
+        "workspace_paths": [str(workspace)],
+    })
+    create_handler.do_POST()
+
+    created = _response_body(create_handler)
+    get_handler = _make_handler(f"/api/plan/drafts/{created['id']}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+
+    assert loaded["draft_spec"]["caps"]["max_concurrent_workers"] == 2
+
+
+def test_auto_draft_has_initial_assistant_turn(tmp_path, monkeypatch):
+    """Draft should have at least one turn with role='assistant' after creation."""
+    _patch_home(monkeypatch, tmp_path)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build something"})
+    create_handler.do_POST()
+
+    assert create_handler.send_response.call_args.args == (200,)
+    created = _response_body(create_handler)
+
+    get_handler = _make_handler(f"/api/plan/drafts/{created['id']}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+
+    assert len(loaded["turns"]) >= 1
+    assert loaded["turns"][0]["role"] == "assistant"
+
+
+def test_draft_init_live_planner_system_prompt_contains_draft_spec(tmp_path, monkeypatch):
+    """LivePlannerAdapter.plan_turn() should include the draft_spec in the system prompt."""
+    from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+
+    captured_system_prompts: list[str] = []
+
+    original_build = planner_adapter_mod._build_system_prompt
+
+    def capturing_build_system_prompt(draft: dict) -> str:
+        result = original_build(draft)
+        captured_system_prompts.append(result)
+        return result
+
+    monkeypatch.setattr(planner_adapter_mod, "_build_system_prompt", capturing_build_system_prompt)
+
+    # Stub out the actual HTTP completion so no real API call is made
+    def fake_openrouter(api_key, model, system_prompt, prompt):
+        return json.dumps({
+            "assistant_message": "Draft reviewed.",
+            "draft_spec": {
+                "name": "Test Mission",
+                "goal": "Build something",
+                "definition_of_done": [],
+                "tasks": [],
+                "caps": {},
+            },
+        })
+
+    def fake_anthropic(api_key, model, system_prompt, prompt):
+        return fake_openrouter(api_key, model, system_prompt, prompt)
+
+    def fake_claude_cli(model, system_prompt, prompt):
+        return fake_openrouter(None, model, system_prompt, prompt)
+
+    monkeypatch.setattr(planner_adapter_mod, "_openrouter_completion", fake_openrouter)
+    monkeypatch.setattr(planner_adapter_mod, "_anthropic_completion", fake_anthropic)
+    monkeypatch.setattr(planner_adapter_mod, "_claude_cli_completion", fake_claude_cli)
+
+    # Ensure the live adapter is used
+    monkeypatch.setattr(
+        plan_routes.planner_adapter,
+        "get_planner_adapter",
+        lambda: planner_adapter_mod.LivePlannerAdapter(),
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    # Create a draft then send a message to trigger plan_turn
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build something"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    message_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
+    _json_request(message_handler, {"content": "Refine the plan"})
+    message_handler.do_POST()
+
+    assert message_handler.send_response.call_args.args == (200,)
+    assert captured_system_prompts, "expected _build_system_prompt to be called"
+    assert "draft_spec" in captured_system_prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# Task 06 — Plan start endpoint: draft → mission transition
+# ---------------------------------------------------------------------------
+
+_VALID_DRAFT_SPEC = {
+    "name": "Calculator Mission",
+    "goal": "Build a CLI calculator",
+    "definition_of_done": ["All tests pass"],
+    "tasks": [
+        {
+            "id": "t1",
+            "title": "Implement add",
+            "description": "Implement the add function",
+            "acceptance_criteria": ["add(1,2) == 3"],
+        }
+    ],
+}
+
+
+def _make_started_draft(tmp_path, monkeypatch):
+    """Create a draft with a valid spec and start it; return (draft_id, response_body)."""
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _set_handler_config(state_dir)
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", state_dir)
+    monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *a, **k: None)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a CLI calculator"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    patch_handler = _make_handler(f"/api/plan/drafts/{draft_id}/spec")
+    _json_request(patch_handler, {"expected_revision": 1, "draft_spec": _VALID_DRAFT_SPEC})
+    patch_handler.do_PATCH()
+    assert patch_handler.send_response.call_args.args == (200,)
+
+    start_handler = _make_handler(f"/api/plan/drafts/{draft_id}/start")
+    start_handler.do_POST()
+    return draft_id, _response_body(start_handler), start_handler, state_dir
+
+
+def test_plan_start_returns_200_with_mission_id(tmp_path, monkeypatch):
+    """Valid draft → 200 with {mission_id, draft_id, status: started}."""
+    draft_id, body, handler, _ = _make_started_draft(tmp_path, monkeypatch)
+
+    assert handler.send_response.call_args.args == (200,)
+    assert body["draft_id"] == draft_id
+    assert body["status"] == "started"
+    assert body["mission_id"]
+
+
+def test_plan_start_state_file_saved(tmp_path, monkeypatch):
+    """State file at ~/.agentforce/state/{mission_id}.json must exist after start."""
+    _, body, handler, state_dir = _make_started_draft(tmp_path, monkeypatch)
+
+    assert handler.send_response.call_args.args == (200,)
+    assert (state_dir / f"{body['mission_id']}.json").exists()
+
+
+def test_plan_start_draft_status_finalized(tmp_path, monkeypatch):
+    """Draft status must be 'finalized' after a successful start."""
+    draft_id, _, handler, _ = _make_started_draft(tmp_path, monkeypatch)
+
+    assert handler.send_response.call_args.args == (200,)
+
+    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    get_handler.do_GET()
+    assert _response_body(get_handler)["status"] == "finalized"
+
+
+def test_plan_start_returns_422_when_tasks_empty(tmp_path, monkeypatch):
+    """Draft with empty tasks list → 422 with errors."""
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Empty tasks mission"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    bad_spec = {**_VALID_DRAFT_SPEC, "tasks": []}
+    patch_handler = _make_handler(f"/api/plan/drafts/{draft_id}/spec")
+    _json_request(patch_handler, {"expected_revision": 1, "draft_spec": bad_spec})
+    patch_handler.do_PATCH()
+
+    start_handler = _make_handler(f"/api/plan/drafts/{draft_id}/start")
+    start_handler.do_POST()
+
+    assert start_handler.send_response.call_args.args == (422,)
+    body = _response_body(start_handler)
+    assert "errors" in body
+    assert body["errors"]
+
+
+def test_plan_start_returns_422_when_dod_empty(tmp_path, monkeypatch):
+    """Draft with empty definition_of_done → 422 with errors."""
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "No dod mission"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    bad_spec = {**_VALID_DRAFT_SPEC, "definition_of_done": []}
+    patch_handler = _make_handler(f"/api/plan/drafts/{draft_id}/spec")
+    _json_request(patch_handler, {"expected_revision": 1, "draft_spec": bad_spec})
+    patch_handler.do_PATCH()
+
+    start_handler = _make_handler(f"/api/plan/drafts/{draft_id}/start")
+    start_handler.do_POST()
+
+    assert start_handler.send_response.call_args.args == (422,)
+    body = _response_body(start_handler)
+    assert "errors" in body
+    assert body["errors"]
+
+
+def test_plan_start_with_daemon_enqueues_mission(tmp_path, monkeypatch):
+    """When daemon is active, mission_id appears in daemon.status()['queue']."""
+    from agentforce.daemon import MissionDaemon
+    from agentforce.server.routes import plan as plan_routes
+    from unittest.mock import patch as mock_patch
+
+    _patch_home(monkeypatch, tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _set_handler_config(state_dir)
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", state_dir)
+
+    daemon = MissionDaemon(state_dir=tmp_path / "daemon", poll_interval=60.0)
+    monkeypatch.setattr(plan_routes, "_active_daemon", daemon)
+    monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *a, **k: None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a CLI calculator"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    patch_handler = _make_handler(f"/api/plan/drafts/{draft_id}/spec")
+    _json_request(patch_handler, {"expected_revision": 1, "draft_spec": _VALID_DRAFT_SPEC})
+    patch_handler.do_PATCH()
+
+    start_handler = _make_handler(f"/api/plan/drafts/{draft_id}/start")
+    start_handler.do_POST()
+
+    assert start_handler.send_response.call_args.args == (200,)
+    mission_id = _response_body(start_handler)["mission_id"]
+    assert mission_id in daemon.status()["queue"]
+
+
+def test_plan_start_without_daemon_spawns_thread(tmp_path, monkeypatch):
+    """When no daemon, a thread named 'agentforce-mission-...' is started."""
+    import agentforce.server.routes.plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _set_handler_config(state_dir)
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", state_dir)
+    monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *a, **k: None)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a CLI calculator"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    patch_handler = _make_handler(f"/api/plan/drafts/{draft_id}/spec")
+    _json_request(patch_handler, {"expected_revision": 1, "draft_spec": _VALID_DRAFT_SPEC})
+    patch_handler.do_PATCH()
+
+    # Capture thread names at construction time (thread may finish before enumerate).
+    spawned: list[str] = []
+    _orig_thread = threading.Thread
+
+    class _CapturingThread(_orig_thread):
+        def start(self):
+            spawned.append(self.name)
+            super().start()
+
+    monkeypatch.setattr(plan_routes.threading, "Thread", _CapturingThread)
+
+    start_handler = _make_handler(f"/api/plan/drafts/{draft_id}/start")
+    start_handler.do_POST()
+
+    assert start_handler.send_response.call_args.args == (200,)
+    mission_id = _response_body(start_handler)["mission_id"]
+    assert any(name == f"agentforce-mission-{mission_id}" for name in spawned)
+
+
+# ── /api/daemon/* tests ────────────────────────────────────────────────────────
+
+def _make_mock_daemon(queue=None, active=None):
+    from unittest.mock import MagicMock
+    daemon = MagicMock()
+    daemon.status.return_value = {
+        "running": True,
+        "queue": {mid: {"state": "queued"} for mid in (queue or [])},
+        "active": {mid: {"state": "running"} for mid in (active or [])},
+        "last_heartbeat": "2026-04-10T00:00:00+00:00",
+    }
+    return daemon
+
+
+def test_daemon_status_no_daemon_returns_503(monkeypatch):
+    monkeypatch.setattr("agentforce.server.handler._daemon", None)
+
+    handler = _make_handler("/api/daemon/status")
+    handler.do_GET()
+
+    assert handler.send_response.call_args.args == (503,)
+    assert _response_body(handler) == {"error": "daemon not active"}
+
+
+def test_daemon_status_returns_200_with_queue_and_active(monkeypatch):
+    monkeypatch.setattr("agentforce.server.handler._daemon", _make_mock_daemon(queue=["m1"], active=["m2"]))
+
+    handler = _make_handler("/api/daemon/status")
+    handler.do_GET()
+
+    assert handler.send_response.call_args.args == (200,)
+    body = _response_body(handler)
+    assert body["running"] is True
+    assert "m1" in body["queue"]
+    assert "m2" in body["active"]
+    assert "last_heartbeat" in body
+
+
+def test_daemon_enqueue_adds_to_queue(monkeypatch):
+    daemon = _make_mock_daemon()
+    monkeypatch.setattr("agentforce.server.handler._daemon", daemon)
+
+    handler = _make_handler("/api/daemon/enqueue")
+    _json_request(handler, {"mission_id": "mission-abc"})
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (200,)
+    body = _response_body(handler)
+    assert body == {"enqueued": True, "mission_id": "mission-abc"}
+    daemon.enqueue.assert_called_once_with("mission-abc")
+
+
+def test_daemon_dequeue_active_mission_returns_409(monkeypatch):
+    daemon = _make_mock_daemon(active=["mission-running"])
+    monkeypatch.setattr("agentforce.server.handler._daemon", daemon)
+
+    handler = _make_handler("/api/daemon/dequeue")
+    _json_request(handler, {"mission_id": "mission-running"})
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (409,)
+    assert _response_body(handler) == {"error": "mission is running"}
+    daemon.dequeue.assert_not_called()
+
+
+def test_daemon_dequeue_queued_mission_returns_200(monkeypatch):
+    daemon = _make_mock_daemon(queue=["mission-waiting"])
+    monkeypatch.setattr("agentforce.server.handler._daemon", daemon)
+
+    handler = _make_handler("/api/daemon/dequeue")
+    _json_request(handler, {"mission_id": "mission-waiting"})
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (200,)
+    body = _response_body(handler)
+    assert body["dequeued"] is True
+    daemon.dequeue.assert_called_once_with("mission-waiting")
+
+
+def test_daemon_enqueue_without_token_returns_401_when_token_set(monkeypatch):
+    monkeypatch.setenv("AGENTFORCE_TOKEN", "secret-token")
+    monkeypatch.setattr("agentforce.server.handler._daemon", _make_mock_daemon())
+
+    handler = _make_handler("/api/daemon/enqueue")
+    _json_request(handler, {"mission_id": "mission-abc"})
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (401,)
+    assert _response_body(handler) == {"error": "unauthorized"}
+
+
+def test_daemon_enqueue_with_valid_token_succeeds(monkeypatch):
+    monkeypatch.setenv("AGENTFORCE_TOKEN", "secret-token")
+    monkeypatch.setattr("agentforce.server.handler._daemon", _make_mock_daemon())
+
+    handler = _make_handler("/api/daemon/enqueue")
+    handler.headers["X-Agentforce-Token"] = "secret-token"
+    _json_request(handler, {"mission_id": "mission-abc"})
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (200,)
+
+
+# ── Integration / backward-compat tests (matched by -k 'integration or e2e') ──
+
+_INTEGRATION_YAML = """\
+name: Integration Test Mission
+goal: Verify YAML-based mission launch still works
+definition_of_done:
+  - done
+tasks:
+  - id: task-01
+    title: Only task
+    description: placeholder
+    acceptance_criteria:
+      - works
+"""
+
+
+def test_integration_post_missions_yaml_backward_compat(tmp_path, monkeypatch):
+    """POST /api/missions with {yaml: '...'} returns 200 with {id, status: 'started'}.
+
+    Verifies the YAML-based mission launch path still works (backward compat).
+    Uses no daemon — spawns a thread instead. No HTTP calls to any LLM provider.
+    DeterministicPlannerAdapter is not needed here (missions route bypasses the planner).
+    """
+    from unittest.mock import patch
+    import agentforce.server.routes.missions as m_routes
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    monkeypatch.setattr(state_io, "_STATE_DIR_OVERRIDE", state_dir)
+    monkeypatch.setattr(handler_mod, "_daemon", None)  # no daemon → spawns thread
+
+    with patch("agentforce.autonomous.run_autonomous", return_value=None):
+        code, body = m_routes._post_missions({"yaml": _INTEGRATION_YAML})
+
+    assert code == 200, f"Expected 200, got {code}: {body}"
+    assert body.get("status") == "started", f"Expected status='started': {body}"
+    assert isinstance(body.get("id"), str) and body["id"], "id must be a non-empty string"

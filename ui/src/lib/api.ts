@@ -271,6 +271,13 @@ export async function sendPlanDraftMessage(
   return response;
 }
 
+export function startPlanDraft(id: string): Promise<{ mission_id: string; draft_id: string; status: string }> {
+  return requestJson<{ mission_id: string; draft_id: string; status: string }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/start`,
+    { method: 'POST' },
+  );
+}
+
 export function createReadjustedDraft(missionId: string): Promise<{ id: string; revision: number }> {
   return requestJson<{ id: string; revision: number }>(`/api/mission/${encodeURIComponent(missionId)}/readjust-trajectory`, {
     method: 'POST',

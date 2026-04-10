@@ -10,8 +10,8 @@ import TaskTimelinePanel from '../components/planning/TaskTimelinePanel';
 import ValidationBoard from '../components/planning/ValidationBoard';
 import YamlDrawer from '../components/planning/YamlDrawer';
 import {
-  createMission,
   createPlanDraft,
+  startPlanDraft,
   getModels,
   getPlanDraft,
   importPlanDraftYaml,
@@ -127,9 +127,9 @@ export default function PlanModePage() {
   const [loadingDraft, setLoadingDraft] = useState(false);
   const [creatingDraft, setCreatingDraft] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
-  const [importingYaml, setImportingYaml] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [launching, setLaunching] = useState(false);
+  const [importingYaml, setImportingYaml] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
@@ -272,6 +272,21 @@ export default function PlanModePage() {
     }
   };
 
+  const handleImportYaml = async (yaml: string): Promise<void> => {
+    if (!draft) return;
+    setImportingYaml(true);
+    try {
+      const result = await importPlanDraftYaml(draft.id, draft.revision, yaml);
+      setDraft((current) => current ? {
+        ...current,
+        revision: result.revision,
+        draft_spec: result.draft_spec,
+      } : current);
+    } finally {
+      setImportingYaml(false);
+    }
+  };
+
   const handleLaunch = async (): Promise<void> => {
     if (!draft) {
       return;
@@ -279,8 +294,8 @@ export default function PlanModePage() {
     setLaunching(true);
     setPageError(null);
     try {
-      const response = await createMission(serializeMissionPlanYaml(draft.draft_spec));
-      navigate(`/mission/${response.id}`);
+      const response = await startPlanDraft(draft.id);
+      navigate(`/mission/${response.mission_id}`);
     } catch (caught) {
       setPageError(caught instanceof Error ? caught.message : 'Failed to launch mission.');
     } finally {
@@ -293,20 +308,6 @@ export default function PlanModePage() {
     () => (loadingModels ? [] : collectAdvisoryFlightChecks(draft, models.map((model) => model.id))),
     [draft, loadingModels, models],
   );
-
-  const handleImportYaml = async (yamlText: string): Promise<void> => {
-    if (!draft) {
-      return;
-    }
-    setImportingYaml(true);
-    setPageError(null);
-    try {
-      const response = await importPlanDraftYaml(draft.id, draft.revision, yamlText);
-      await loadDraft(response.id);
-    } finally {
-      setImportingYaml(false);
-    }
-  };
 
   if (!draftId) {
     return (
@@ -452,6 +453,12 @@ export default function PlanModePage() {
                 goal: value,
               }));
             }}
+            onDodChange={(value) => {
+              updateCurrentDraft((current) => updateDraftSpec(current, {
+                ...current.draft_spec,
+                definition_of_done: value,
+              }));
+            }}
             onSave={() => {
               void persistDraftSpec();
             }}
@@ -460,6 +467,7 @@ export default function PlanModePage() {
           <TaskTimelinePanel
             draft={draft}
             saving={savingDraft}
+            models={models}
             onTaskChange={(taskId, patch) => {
               updateCurrentDraft((current) => updateDraftSpec(current, {
                 ...current.draft_spec,
@@ -525,6 +533,7 @@ export default function PlanModePage() {
             importing={importingYaml}
             onApplyImport={handleImportYaml}
           />
+
         </aside>
       </div>
     </div>

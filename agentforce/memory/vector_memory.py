@@ -9,8 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import lancedb
-import pyarrow as pa
+try:
+    import lancedb
+    import pyarrow as pa
+except ImportError as _e:  # noqa: F841
+    raise ImportError(
+        "VectorMemory requires the 'vector' extras: pip install 'agentforce[vector]'"
+    ) from _e
 
 if TYPE_CHECKING:
     from fastembed import TextEmbedding

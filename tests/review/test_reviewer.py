@@ -251,7 +251,7 @@ def test_resolve_model_ignores_inactive_anthropic_connector(tmp_path: Path, monk
 
     monkeypatch.setattr("agentforce.review.reviewer.AGENTFORCE_HOME", connectors_dir)
 
-    assert _resolve_model(None) == "claude-sonnet-4-5"
+    assert _resolve_model(None) == "claude-sonnet-4-6"
 
 
 def test_review_respects_global_opt_out(tmp_path: Path, mission_state: MissionState):

@@ -1,210 +1,325 @@
 # AgentForce
 
-Multi-agent mission orchestrator with spec-driven development, TDD enforcement, external review, and retry loops.
+Multi-agent mission orchestrator with spec-driven development, AI review gates, a persistent execution daemon, and a web dashboard.
 
 ## Overview
 
-AgentForce breaks complex software projects into discrete tasks defined in YAML/JSON spec files, then orchestrates AI agents to execute them with built-in quality gates:
+AgentForce breaks complex software projects into discrete tasks defined in YAML spec files, then orchestrates AI agents to execute them autonomously:
 
-- **Spec-driven** — Missions are defined as structured specs with goals, acceptance criteria, TDD requirements, and dependencies
-- **TDD enforcement** — Every task can require tests to pass before moving forward
-- **External review** — Completed tasks are reviewed by independent agents before approval
-- **Retry loops** — Failed tasks automatically retry with feedback context
-- **Human intervention** — Blocking issues escalate to humans when agents can't resolve them
-- **State persistence** — Missions survive crashes and can be resumed from any point
-- **Telemetry** — Cross-mission metrics track performance, quality, and efficiency
+- **Spec-driven** — Missions are YAML documents with goals, acceptance criteria, TDD requirements, dependencies, and execution caps
+- **External review** — Every task is reviewed by an independent agent before approval; scores below 8/10 are automatically rejected
+- **Retry loops** — Rejected tasks retry with reviewer feedback; security/TDD hard blocks escalate to human intervention
+- **Persistent state** — Missions survive crashes and resume from any point via file-backed state in `~/.agentforce/`
+- **Execution daemon** — A queue-based supervisor runs missions in the background, supporting concurrent workers and graceful drain on shutdown
+- **Flight Director Cockpit** — Browser UI for planning, editing, and launching missions via a conversational AI planner
+- **Telemetry** — Cross-mission metrics track cost, token usage, review scores, and retry rates
 
 ## Installation
-
-Install directly from GitHub:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eduardokanema/agentforce/main/scripts/install.sh | bash
-```
-
-Install from a local checkout:
 
 ```bash
 pip install -e .
 ```
 
-For local development and test runs:
+For development and tests:
 
 ```bash
-python3.11 -m pip install -e ".[dev]"
-python3.11 -m pytest -q
+pip install -e ".[dev]"
+pytest -q
 ```
-
-## Building
-
-Builds are supported natively on both macOS and Linux with Python 3.11+.
-PyInstaller does not cross-compile, so build on the target OS you want to ship.
-
-Install build tooling:
-
-```bash
-python3.11 -m pip install -e ".[build]"
-```
-
-Build an sdist and wheel:
-
-```bash
-python3.11 -m build
-```
-
-Build a standalone binary with PyInstaller:
-
-```bash
-pyinstaller mission.spec
-```
-
-The GitHub Actions workflow in [`.github/workflows/build.yml`](.github/workflows/build.yml)
-verifies tests, packaging, and the PyInstaller build on both `ubuntu-latest` and
-`macos-latest`.
 
 ## Quick Start
 
-### 1. Write a mission spec
+### 1. Start the dashboard
 
-Create a YAML file defining your mission:
+```bash
+mission serve --daemon
+```
+
+Open `http://localhost:8080`. The `--daemon` flag enables the embedded execution daemon so missions launched from the UI execute immediately without a separate process.
+
+### 2. Create a mission via the Flight Director Cockpit
+
+Navigate to **Flight Director** in the sidebar. Enter a prompt describing what you want to build, select a workspace directory and approved models, then click **Open Flight Plan**. The AI planner auto-generates a draft mission spec. Refine it through conversation, adjust tasks in the engineering controls panel, and click **Launch Mission**.
+
+### 3. Or start a mission from a YAML spec
+
+```bash
+mission start my-mission.yaml
+```
+
+If the daemon is running (started with `--daemon`), the mission is queued immediately. Without the daemon, a one-shot `run_autonomous` subprocess is spawned per mission.
+
+---
+
+## The Execution Daemon
+
+The daemon is a persistent supervisor that manages a queue of missions and executes them concurrently via `run_autonomous()`.
+
+### Enabling the daemon
+
+**Embedded mode** (recommended) — starts inside the dashboard server process:
+
+```bash
+mission serve --daemon
+```
+
+**Programmatic** — for embedding in other processes:
+
+```python
+from agentforce.server import serve
+serve(port=8080, daemon=True)
+```
+
+### Daemon REST API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/daemon/status` | GET | Daemon state, queue, active missions, last heartbeat |
+| `/api/daemon/enqueue` | POST | Queue a mission by `mission_id` |
+| `/api/daemon/dequeue` | POST | Remove a pending mission from the queue |
+| `/api/daemon/stop` | POST | Graceful drain — finish in-flight missions, accept no new work |
+
+Mutating endpoints (`enqueue`, `dequeue`, `stop`) require the `X-Agentforce-Token` header when the `AGENTFORCE_TOKEN` environment variable is set.
+
+```bash
+# Check daemon status
+curl http://localhost:8080/api/daemon/status
+
+# Manually enqueue a mission
+curl -X POST http://localhost:8080/api/daemon/enqueue \
+  -H "Content-Type: application/json" \
+  -d '{"mission_id": "abc123"}'
+```
+
+### How it works
+
+- Each mission runs `run_autonomous()` in a dedicated thread
+- The queue is persisted as JSONL at `~/.agentforce/daemon_queue.jsonl`; it survives server restarts
+- A `fcntl` file lock (`~/.agentforce/daemon.lock`) prevents duplicate daemon instances in the same process
+- `sys.exit()` calls inside `run_autonomous()` are caught so one mission cannot kill the daemon
+- Graceful drain waits up to `max_drain_seconds` for in-flight missions to complete before stopping
+- Mission caps (`max_concurrent_workers`, `max_wall_time_minutes`, `max_cost_usd`) are enforced per-mission as before
+
+---
+
+## CLI Commands
+
+```
+mission start <spec.yaml>          Start a mission from a YAML spec file
+mission serve [--port N] [--daemon] Start the web dashboard (default port: 8080)
+mission status <id>                 Show mission progress and task states
+mission list                        List all missions
+mission report <id>                 Detailed mission report with event log
+mission pause <id>                  Pause a running mission
+mission resume <id>                 Resume a paused mission
+mission kill <id>                   Stop a mission (marks in-progress tasks blocked)
+mission resolve <id> <task> <msg>   Resolve a human-blocked task with guidance
+mission fail <id> <task>            Mark a human-blocked task as permanently failed
+mission review <id>                 Run a retrospective AI review of a completed mission
+mission metrics [--mission <id>]    Show aggregated telemetry across missions
+```
+
+Additional options for `mission start`:
+
+```
+--id <id>                 Override the generated mission ID
+--workdir <path>          Override the working directory
+--worker-model <model>    Override the worker model
+--reviewer-model <model>  Override the reviewer model
+```
+
+---
+
+## Running Missions Autonomously (without the daemon)
+
+```bash
+python3 -m agentforce.autonomous <mission-id>
+```
+
+Options:
+
+```
+--agent auto|claude|opencode   Agent connector (default: auto)
+--model <model-id>             Model override
+--variant low|medium|high      Reasoning effort (default: medium)
+--extend-caps                  Ignore wall-time and retry limits for this run
+--max-ticks N                  Supervisor loop tick limit (default: 2000)
+```
+
+Example — resume a mission that hit a wall-time cap:
+
+```bash
+python3 -m agentforce.autonomous --extend-caps abc123
+```
+
+---
+
+## Mission Spec Format
 
 ```yaml
 mission:
   name: "Build HTTP API Server"
   goal: "Create a FastAPI server with health checks and metrics"
   definition_of_done:
-    - "All endpoints return correct responses"
-    - "Tests pass with 80%+ coverage"
+    - "All endpoints return HTTP 200 with correct JSON shapes"
+    - "pytest tests/ passes with >= 80% coverage"
   caps:
     max_concurrent_workers: 2
     max_retries_per_task: 3
+    max_retries_global: 10
     max_wall_time_minutes: 120
+    max_cost_usd: 2.00
+    review: enabled          # or "disabled" to skip the review gate
+  execution_defaults:
+    worker:
+      agent: claude          # connector: claude or opencode
+      model: claude-sonnet-4-6
+      thinking: medium       # low | medium | high
+    reviewer:
+      agent: claude
+      model: claude-sonnet-4-6
+      thinking: low
 
 tasks:
   - id: "01"
     title: "Project scaffolding"
-    description: "Create FastAPI app with /health endpoint"
+    description: "Create FastAPI app structure with /health endpoint"
     acceptance_criteria:
-      - "GET /health returns 200 with {status: ok}"
+      - "GET /health returns HTTP 200 with {\"status\": \"ok\"}"
+      - "pytest tests/test_health.py passes"
+    dependencies: []
+    max_retries: 3
+    output_artifacts:
+      - "app/main.py"
+      - "tests/test_health.py"
     tdd:
       test_file: "tests/test_health.py"
       test_command: "pytest tests/test_health.py -v"
       tests_must_pass: true
+    execution:                     # optional per-task override of execution_defaults
+      worker:
+        model: claude-sonnet-4-6
+        thinking: high
+
+  - id: "02"
+    title: "Add metrics endpoint"
+    description: "Implement /metrics returning request counts"
+    acceptance_criteria:
+      - "GET /metrics returns HTTP 200 with JSON containing request_count > 0"
+    dependencies: ["01"]
+    max_retries: 2
+    output_artifacts:
+      - "app/metrics.py"
 ```
 
-### 2. Start the mission
+See `missions/` for real examples.
 
-```bash
-mission start my-mission.yaml
+---
+
+## Task Lifecycle
+
+```
+PENDING ──► IN_PROGRESS ──► COMPLETED ──► REVIEWING ──► REVIEW_APPROVED
+                                │               │
+                           (worker fail)   (score < 8)
+                                │               │
+                                └──────► RETRY ◄┘
+                                            │
+                                     (retries exhausted)
+                                            │
+                                     NEEDS_HUMAN ──► RETRY (after resolution)
+                                            │
+                                          FAILED
 ```
 
-### 3. Run autonomously
+- `COMPLETED` — worker finished, awaiting reviewer dispatch
+- `REVIEWING` — reviewer agent running
+- `REVIEW_APPROVED` — score ≥ 8 and all criteria met; task is done
+- `NEEDS_HUMAN` — security or TDD hard block, or retries exhausted with blocking issues
+- The **Retry** button and **Restart Mission** work on `failed`, `blocked`, `review_rejected`, and `completed` (stuck) tasks, and re-enqueue to the daemon automatically
 
-```bash
-python3 -m agentforce.autonomous <mission-id>
-```
-
-Or drive manually tick-by-tick using the engine API.
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `mission start <spec>` | Start a new mission from a spec file |
-| `mission status <id>` | Show mission progress and state |
-| `mission list` | List all missions |
-| `mission report <id>` | Detailed mission report |
-| `mission resolve <id> <task> <msg>` | Resolve a human-blocked task |
-| `mission fail <id> <task>` | Mark a task as permanently failed |
-| `mission kill <id>` | Stop a mission |
-| `mission metrics` | Show aggregated telemetry across missions |
-| `mission serve [--port PORT]` | Start the web dashboard (default: http://localhost:8080) |
+---
 
 ## Architecture
 
 ```
-MissionSpec (YAML/JSON)
-    |
-    v
-MissionEngine ──tick()──> [WorkerDelegation, ReviewerDelegation, HumanIntervention]
-    |                           |                    |                    |
-    v                           v                    v                    v
-MissionState              Worker Agent          Reviewer Agent       Human User
-(persistence)             (implements)          (validates)          (resolves)
+MissionSpec (YAML)
+      │
+      ▼
+MissionEngine ──tick()──► [WorkerDelegation | ReviewerDelegation | HumanIntervention]
+      │                          │                    │                    │
+      ▼                          ▼                    ▼                    ▼
+MissionState              Worker Agent          Reviewer Agent       Human (UI/CLI)
+(~/.agentforce/state/)    (implements task)     (validates output)   (resolves block)
+
+MissionDaemon
+  ├── JSONL queue (~/.agentforce/daemon_queue.jsonl)
+  ├── One thread per active mission
+  └── REST API  /api/daemon/*
+
+Dashboard (http://localhost:8080)
+  ├── Mission list & detail pages
+  ├── Task stream viewer (live agent output)
+  ├── Flight Director Cockpit (plan mode)
+  └── WebSocket live updates
 ```
 
-### Core Components
+### Core modules
 
-- **`MissionEngine`** — State machine that drives missions via `tick()` cycles, returning delegation actions
-- **`MissionSpec`** — Parses and validates mission definitions (YAML/JSON)
-- **`MissionState`** — Persistent state tracking task progress, retries, caps, and events
-- **`Memory`** — Cross-task context and lesson storage
-- **`Telemetry`** — Aggregated metrics across missions
+| Module | Purpose |
+|--------|---------|
+| `agentforce.core.engine` | State-machine tick loop, action dispatch |
+| `agentforce.core.spec` | MissionSpec / TaskSpec parsing and validation |
+| `agentforce.core.state` | MissionState persistence and status queries |
+| `agentforce.daemon` | MissionDaemon queue supervisor |
+| `agentforce.autonomous` | `run_autonomous()` — supervisor loop that drives one mission end-to-end |
+| `agentforce.server` | ThreadingHTTPServer dashboard + WebSocket |
+| `agentforce.connectors` | Agent CLI adapters (claude, opencode) |
+| `agentforce.memory` | Cross-task context and lessons storage |
+| `agentforce.review` | Post-mission retrospective reviewer |
+| `agentforce.telemetry` | Aggregated metrics store |
 
-### Task Lifecycle
+---
 
-```
-PENDING → IN_PROGRESS → COMPLETED → REVIEWING → REVIEW_APPROVED
-                              ↓           ↓
-                          RETRY ←── REVIEW_REJECTED
-                              ↓
-                        NEEDS_HUMAN → RETRY (after resolution)
-                              ↓
-                            FAILED
-```
+## Flight Director Cockpit (Plan Mode)
 
-## Spec Format
+The Flight Director Cockpit is the browser UI for creating missions collaboratively with an AI planner.
 
-Missions are defined in YAML with the following structure:
+1. Navigate to `http://localhost:8080` → **Flight Director**
+2. Enter a mission prompt, select working directories, approved models, and a companion model
+3. Click **Open Flight Plan** — the planner auto-generates an initial draft spec
+4. Refine the plan by chatting with the planner on the left panel
+5. Edit tasks directly in the Engineering Controls rail on the right:
+   - Mission name, goal, and definition of done
+   - Task titles, descriptions, acceptance criteria
+   - Dependencies (checkbox grid — check which tasks must complete first)
+   - Per-task worker and reviewer model overrides
+   - Output artifacts
+6. Click **Launch Mission** — the draft is finalized and enqueued on the daemon
 
-- **mission** — Name, goal, definition of done, and execution caps
-- **tasks** — Individual work items with:
-  - `id`, `title`, `description`
-  - `acceptance_criteria` — Checklist for reviewers
-  - `dependencies` — Task IDs that must complete first
-  - `tdd` — Test file, command, and coverage thresholds
-  - `output_artifacts` — Expected deliverables
-
-See `missions/http-server.yaml` for a complete example.
-
-## Programmatic API
-
-```python
-from agentforce.core.engine import MissionEngine
-from agentforce.core.spec import MissionSpec
-
-spec = MissionSpec.load_yaml("mission.yaml")
-engine = MissionEngine.create(spec, state_dir="./state", memory=Memory("./memory"))
-
-while not engine.is_done():
-    actions = engine.tick()
-    for action in actions:
-        # Dispatch to agents, collect results
-        result = dispatch(action)
-        if isinstance(action, WorkerDelegation):
-            engine.apply_worker_result(action.task_id, result.success, result.output)
-        elif isinstance(action, ReviewerDelegation):
-            engine.apply_reviewer_result(action.task_id, result.approved, result.feedback)
-        elif isinstance(action, HumanIntervention):
-            resolution = get_human_input(action.message)
-            engine.apply_human_resolution(action.task_id, resolution)
-```
+---
 
 ## Data Storage
 
-AgentForce stores state and telemetry in `~/.agentforce/`:
-
 ```
 ~/.agentforce/
-├── state/          # Mission state files (JSON)
-├── memory/         # Cross-task context and lessons
-└── telemetry/      # Aggregated mission metrics
+├── state/                  # Mission state files (one JSON per mission)
+├── streams/                # Live agent output logs (one .log per task)
+├── memory/                 # Cross-task project memory
+├── telemetry/              # Aggregated mission metrics
+├── reviews/                # Post-mission retrospective reports
+├── daemon_queue.jsonl      # Persistent execution queue
+└── daemon.lock             # Exclusive daemon instance lock
 ```
+
+---
 
 ## Requirements
 
 - Python 3.11+
-- PyYAML (optional, for YAML spec support)
+- Claude Code CLI (`claude`) or OpenCode CLI (`opencode`) for agent execution
+- Optional: `keyring` for storing API keys (bundled as a dependency)
+- Optional: `anthropic` Python SDK for direct HTTP fallback in the planner
 
 ## License
 

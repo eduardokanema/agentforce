@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import json as _jsonlib
 import re
+import signal as _signal
 import threading
 import time as _time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from . import state_io, ws
-from .routes import caps_config, filesystem, missions, models, plan, providers, static, tasks
+from .routes import caps_config, daemon, filesystem, missions, models, plan, providers, static, tasks
+
+_daemon: Optional["MissionDaemon"] = None  # type: ignore[name-defined]  # noqa: F821
 
 _STREAMS_DIR = Path.home() / ".agentforce" / "streams"
 AGENTFORCE_HOME = state_io.AGENTFORCE_HOME
@@ -17,6 +21,8 @@ _UI_DIST = Path(__file__).parent.parent.parent / "ui" / "dist"
 _SSE_TERMINAL = {"review_approved", "review_rejected", "failed", "blocked"}
 
 _ROUTES: list[tuple[str, re.Pattern[str], object]] = [
+    ("GET", re.compile(r"^/api/daemon(?:/.*)?$"), daemon.get),
+    ("POST", re.compile(r"^/api/daemon(?:/.*)?$"), daemon.post),
     ("GET", re.compile(r"^/api/missions$"), missions.get),
     ("POST", re.compile(r"^/api/missions$"), missions.post),
     ("GET", re.compile(r"^/api/models(?:/default)?$"), models.get),
@@ -213,7 +219,9 @@ def _watch_stream_files(
                 positions[stem] = (new_pos, seq)
 
 
-def serve(port: int = 8080, state_dir: Path | None = None) -> None:
+def serve(port: int = 8080, state_dir: Path | None = None, daemon: bool = False) -> None:
+    global _daemon
+    _daemon = None
     previous_override = state_io._STATE_DIR_OVERRIDE
     try:
         resolved_state_dir = Path(state_dir) if state_dir is not None else state_io.STATE_DIR
@@ -239,11 +247,44 @@ def serve(port: int = 8080, state_dir: Path | None = None) -> None:
             name="agentforce-stream-watcher",
         )
         stream_watcher.start()
+
+        if daemon:
+            import queue as _queue
+            from agentforce.daemon import DaemonCallbacks, MissionDaemon
+            from agentforce.server.routes.daemon import (
+                _ws_on_complete,
+                _ws_on_enqueue,
+                _ws_on_fail,
+                _ws_on_start,
+                _ws_on_status_changed,
+            )
+            _daemon = MissionDaemon(
+                state_dir=resolved_state_dir,
+                notify_queue=_queue.Queue(),
+                callbacks=DaemonCallbacks(
+                    on_enqueue=_ws_on_enqueue,
+                    on_start=_ws_on_start,
+                    on_complete=_ws_on_complete,
+                    on_fail=_ws_on_fail,
+                    on_status_changed=_ws_on_status_changed,
+                ),
+            )
+
+            def _handle_stop(signum=None, frame=None):
+                _daemon.stop()
+                server.shutdown()
+
+            _signal.signal(_signal.SIGINT, _handle_stop)
+            _signal.signal(_signal.SIGTERM, _handle_stop)
+            _daemon.start()
+
         print(f"AgentForce Dashboard → http://{DashboardHandler.config.host}:{DashboardHandler.config.port}")
         print("Press Ctrl+C to stop.")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
+            if _daemon is not None:
+                _daemon.stop()
             print("\nDashboard stopped.")
     finally:
         state_io.set_state_dir(previous_override)

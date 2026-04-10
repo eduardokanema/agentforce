@@ -364,7 +364,7 @@ def cmd_resume(args):
 def cmd_serve(args):
     """Start the mission dashboard HTTP server."""
     from agentforce.server import serve
-    serve(port=args.port)
+    serve(port=args.port, daemon=args.daemon)
 
 
 def main():
@@ -382,7 +382,7 @@ def main():
     sub.add_parser("cat").add_argument("id")
     p = sub.add_parser("metrics"); p.add_argument("--mission", help="Show single mission metrics")
     p = sub.add_parser("review", help="run mission retrospective review"); p.add_argument("id", help="mission ID or partial name"); p.add_argument("--model", help="model to use (default: from connectors config)"); p.add_argument("--approve", action="store_true", help="approve and persist all action items"); p.add_argument("--skip", action="store_true", help="skip review for this mission")
-    p = sub.add_parser("serve", help="start mission dashboard web server"); p.add_argument("--port", type=int, default=8080, help="port to listen on (default: 8080)")
+    p = sub.add_parser("serve", help="start mission dashboard web server"); p.add_argument("--port", type=int, default=8080, help="port to listen on (default: 8080)"); p.add_argument("--daemon", action="store_true", default=False, help="enable embedded mission execution daemon")
     p = sub.add_parser("pause", help="pause a running mission"); p.add_argument("id")
     p = sub.add_parser("resume", help="resume a paused mission"); p.add_argument("id")
 

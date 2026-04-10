@@ -118,13 +118,20 @@ def _post_mission_restart(mission_id: str) -> tuple[int, dict]:
     if not state:
         return 404, {"error": f"Mission {mission_id!r} not found"}
     requeued = 0
+    restartable = {"failed", "blocked", "review_rejected", "completed"}
     for task_state in state.task_states.values():
-        if state_io._task_status_value(task_state) in {"failed", "blocked", "review_rejected"}:
+        if state_io._task_status_value(task_state) in restartable:
             task_state.status = "pending"
             task_state.worker_output = ""
             requeued += 1
     state.save(_state_path(mission_id))
     _broadcast_mission_list_refresh()
+
+    from agentforce.server import handler as _handler
+    active_daemon = getattr(_handler, "_daemon", None)
+    if active_daemon is not None:
+        active_daemon.enqueue(mission_id)
+
     return 200, {"requeued": requeued}
 
 
@@ -180,6 +187,14 @@ def _post_missions(body: dict) -> tuple[int, dict]:
     _state_path(state.mission_id).parent.mkdir(parents=True, exist_ok=True)
     state.save(_state_path(state.mission_id))
     _broadcast_mission_refresh(state)
+
+    # Late import avoids circular dependency (handler imports missions at module level).
+    from agentforce.server import handler as _handler
+    active_daemon = getattr(_handler, "_daemon", None)
+
+    if active_daemon is not None:
+        active_daemon.enqueue(state.mission_id)
+        return 200, {"id": state.mission_id, "status": "started"}
 
     def _runner():
         try:

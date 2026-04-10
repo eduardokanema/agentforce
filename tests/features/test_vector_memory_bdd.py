@@ -9,6 +9,7 @@ from pytest_bdd import given, scenarios, then, when
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+pytest.importorskip("lancedb", reason="lancedb not installed; install agentforce[vector]")
 from agentforce.memory.vector_memory import VectorMemory
 
 scenarios("vector_memory.feature")

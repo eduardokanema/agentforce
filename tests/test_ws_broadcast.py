@@ -18,7 +18,7 @@ def make_engine(tmp_path: Path) -> MissionEngine:
         name="Broadcast Mission",
         goal="Exercise websocket broadcasts",
         definition_of_done=["Done"],
-        tasks=[TaskSpec(id="task-1", title="Task 1", description="First task")],
+        tasks=[TaskSpec(id="task-1", title="Task 1", description="First task", acceptance_criteria=["assert output == 'ok'"])],
         caps=Caps(max_concurrent_workers=1, max_retries_global=3, max_wall_time_minutes=60),
     )
     state_dir = tmp_path / "state"
@@ -102,10 +102,11 @@ def test_serve_starts_daemon_watchdog_thread(monkeypatch):
 
     serve(port=8123)
 
-    thread_ctor.assert_called_once()
-    _, kwargs = thread_ctor.call_args
-    assert kwargs["daemon"] is True
-    thread_instance.start.assert_called_once()
+    assert thread_ctor.call_count >= 1
+    # Verify the state-watchdog thread was started with daemon=True
+    watchdog_calls = [c for c in thread_ctor.call_args_list if c.kwargs.get("name") == "agentforce-state-watchdog"]
+    assert len(watchdog_calls) == 1
+    assert watchdog_calls[0].kwargs["daemon"] is True
 
 
 def test_watchdog_broadcasts_mission_list_when_state_files_change(tmp_path, monkeypatch):
@@ -116,7 +117,7 @@ def test_watchdog_broadcasts_mission_list_when_state_files_change(tmp_path, monk
         name="Watchdog Mission",
         goal="Watch state dir",
         definition_of_done=["Done"],
-        tasks=[TaskSpec(id="task-1", title="Task 1", description="First task")],
+        tasks=[TaskSpec(id="task-1", title="Task 1", description="First task", acceptance_criteria=["assert output == 'ok'"])],
         caps=Caps(max_concurrent_workers=1, max_retries_global=3, max_wall_time_minutes=60),
     )
     memory_dir = tmp_path / "memory"

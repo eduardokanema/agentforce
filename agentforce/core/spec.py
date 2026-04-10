@@ -652,9 +652,7 @@ class MissionSpec:
         return QualityIssues(dod_errors=dod_errors, criteria_errors=criteria_errors)
 
     def short_id(self) -> str:
-        base = hashlib.md5(f"{self.name}-{self.goal}".encode()).hexdigest()[:4]
-        rand = os.urandom(2).hex()
-        return base + rand
+        return hashlib.md5(f"{self.name}-{self.goal}".encode()).hexdigest()[:8]
 
 
 def suggest_caps(spec: MissionSpec) -> list[CapsSuggestion]:

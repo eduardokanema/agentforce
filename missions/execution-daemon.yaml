@@ -1,0 +1,410 @@
+## Plan Review Changelog
+##
+## Changes from adversarial review
+## - Task 01: Added thread-per-mission model, sys.exit() catch, graceful drain with max_drain_seconds (Agreed by both critics)
+## - Task 02: Switched queue format from JSON to JSONL append-only with compaction on start (Practical critic)
+## - Task 04: Replaced os.fork() with subprocess.Popen for safe detached mode (Agreed by both critics — HIGH)
+## - Task 04: Added PID staleness check and log rotation (Practical critic)
+## - Task 05: Scoped to delta only — _empty_draft_spec() already exists (Technical critic)
+## - Task 07: Added token-based auth for mutating daemon endpoints (Practical critic — HIGH)
+## - Task 07: Added last_heartbeat field in status response (Practical critic)
+## - Raised max_cost_usd from 1.00 to 2.00 (Agreed by both critics — LOW)
+##
+## Remaining concerns (accepted as-is)
+## - MissionRunner protocol deferred — YAGNI with single execution backend
+## - asyncio supervisor deferred — threading is consistent with codebase
+## - Mission state file locking deferred — requires broader refactor beyond daemon scope
+
+mission:
+  name: "Execution Daemon"
+  goal: |
+    Build a persistent execution daemon that manages mission lifecycle beyond
+    the current one-shot `run_autonomous()` pattern. The daemon runs as either
+    an embedded thread inside the dashboard server or a detached OS process,
+    maintains an execution queue, and introduces a "start" concept for plans
+    so drafts can transition directly into queued execution. Plan mode must
+    also auto-generate an initial draft spec when entered, rather than waiting
+    for the first user message.
+  definition_of_done:
+    - "A MissionDaemon class exists that accepts missions into a queue, executes them via the existing engine, and exposes start/stop/status lifecycle"
+    - "The daemon can run embedded as a thread within the dashboard server (started on server boot) or as a detached process via CLI with PID-file tracking"
+    - "POST /api/daemon/enqueue accepts a mission_id and queues it for execution; GET /api/daemon/status returns daemon state, queue contents, and last_heartbeat"
+    - "POST /api/plan/drafts/:id/start finalizes a draft, creates mission state, and enqueues it on the daemon in one atomic operation"
+    - "Plan mode auto-generates an initial draft_spec from the user's prompt and workspace context on draft creation, before the first planner turn"
+    - "Daemon respects existing mission caps (max_concurrent_workers, wall_time, cost) and propagates pause/resume signals"
+    - "Daemon stop triggers graceful drain — stops accepting new work, in-flight missions drain within max_drain_seconds or are paused"
+    - "Mutating daemon endpoints require X-Agentforce-Token header when AGENTFORCE_TOKEN is set"
+    - "python3 -m pytest tests/test_daemon.py tests/test_api_routes.py -v passes"
+    - "Existing autonomous.py tests and engine tests remain green"
+  caps:
+    max_concurrent_workers: 5
+    max_retries_per_task: 5
+    max_retries_global: 20
+    max_wall_time_minutes: 240
+    max_human_interventions: 5
+    max_cost_usd: 20.00
+    review: enabled
+  working_dir: "/Users/rent/Projects/agentforce"
+  execution:
+    worker:
+      agent: "claude"
+      model: "claude-sonnet-4-6"
+      thinking: "medium"
+    reviewer:
+      agent: "claude-sonnet-4-6"
+      model: "claude-sonnet-4-6"
+      thinking: "high"
+
+tasks:
+  - id: "01"
+    title: "Implement MissionDaemon core with execution queue"
+    description: |
+      Create agentforce/daemon.py with a MissionDaemon class that:
+
+      - Maintains an ordered execution queue (list of mission_ids)
+      - Runs a supervisor loop on a background thread that polls the queue
+        every 2 seconds, dequeues missions respecting a configurable
+        max_concurrent limit (default 2)
+      - Each mission runs in its own thread. The daemon calls run_autonomous()
+        inside try/except SystemExit to prevent sys.exit() calls in
+        run_autonomous() (line 304) from killing the daemon process.
+      - Tracks per-mission execution state: queued / running / completed / failed
+      - Exposes start() / stop() / status() / enqueue(mission_id) / dequeue(mission_id)
+      - Uses threading.Event for clean shutdown
+      - Persists queue state to ~/.agentforce/daemon_queue.jsonl using
+        append-only JSONL format (one JSON object per line: {"action": "enqueue",
+        "mission_id": "...", "ts": "..."} or {"action": "complete", ...}).
+        On start(), compacts the JSONL into current state.
+      - On start(), resumes any missions that were "running" when the daemon
+        last stopped (treats them as interrupted, resets IN_PROGRESS tasks
+        to PENDING per existing autonomous.py pattern)
+      - stop() triggers graceful drain: sets a "stopping" flag, stops accepting
+        new missions, waits up to max_drain_seconds (default 30) for in-flight
+        missions to reach a task boundary, then pauses remaining missions via
+        the existing pause_mission() file flag.
+      - Writes a heartbeat timestamp to daemon_queue.jsonl every poll cycle
+        for health monitoring.
+
+      Do NOT rewrite run_autonomous — call it as-is, wrapped in exception
+      handling. The daemon is a supervisor that manages when and which
+      missions run, not how they run.
+    acceptance_criteria:
+      - "assert daemon.status()['queue'] contains mission_id after enqueue(); entry has state == 'queued'"
+      - "assert daemon.status()['active'] contains mission_id after start() processes it; state == 'running'"
+      - "assert daemon.stop() completes and daemon.status()['running'] == False; remaining missions have 'paused' flag at ~/.agentforce/state/{id}.pause"
+      - "assert ~/.agentforce/daemon_queue.jsonl exists after enqueue; new daemon.start() restores queue from compacted file"
+      - "pytest tests/test_daemon.py verifies that enqueueing 3 missions with max_concurrent == 2 results in len(status()['active']) <= 2"
+    dependencies: []
+    tdd:
+      test_file: "tests/test_daemon.py"
+      test_command: "python3 -m pytest tests/test_daemon.py -v -k 'core'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/daemon.py"
+      - "tests/test_daemon.py"
+
+  - id: "02"
+    title: "Add file-based locking and concurrent access safety"
+    description: |
+      Add file-based locking to the daemon to prevent multiple instances from
+      corrupting the queue. Use fcntl.flock() (same pattern as PlanDraftStore
+      in plan_drafts.py).
+
+      - Exclusive daemon lock: ~/.agentforce/daemon.lock — held for the
+        lifetime of the daemon process. Only one daemon instance (embedded
+        or detached) can hold this lock.
+      - Second daemon attempting to start exits with DaemonAlreadyRunning error
+      - Lock is released on daemon stop or process termination
+        (OS reclaims fcntl lock on process death)
+      - Queue JSONL writes are protected by a threading.Lock for in-process
+        safety (multiple mission threads may complete simultaneously)
+      - Add a DaemonLock context manager for clean acquisition/release
+
+      Note: the JSONL append-only format from task 01 eliminates the
+      read-modify-write race that plagues full-JSON rewrites.
+    acceptance_criteria:
+      - "pytest tests/test_daemon.py verifies second MissionDaemon.start() raises 'DaemonAlreadyRunning' when ~/.agentforce/daemon.lock is held"
+      - "assert ~/.agentforce/daemon.lock is not held (fcntl.flock succeeds with LOCK_EX|LOCK_NB) after daemon.stop() returns"
+      - "assert ~/.agentforce/daemon.lock is released after os.kill(daemon_pid, 9); fcntl.flock succeeds on the lock file"
+      - "pytest tests/test_daemon.py verifies 10 concurrent append writes to daemon_queue.jsonl produce exactly 10 valid JSON lines"
+    dependencies:
+      - "01"
+    tdd:
+      test_file: "tests/test_daemon.py"
+      test_command: "python3 -m pytest tests/test_daemon.py -v -k 'lock'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/daemon.py"
+      - "tests/test_daemon.py"
+
+  - id: "03"
+    title: "Add embedded thread mode to dashboard server"
+    description: |
+      Modify agentforce/server/handler.py serve() to optionally start a
+      MissionDaemon instance as an embedded thread when the dashboard boots.
+      Controlled by a --daemon flag on the serve CLI or an environment variable
+      AGENTFORCE_DAEMON=1.
+
+      When embedded:
+      - Daemon starts after the HTTP server binds its port
+      - Daemon stops when the server shuts down (SIGINT/SIGTERM)
+      - The daemon instance is accessible to route handlers via a module-level
+        reference (same pattern as the existing ws.broadcast infrastructure)
+      - POST /api/missions already spawns a thread per mission; when daemon
+        is active, it should enqueue instead of spawning ad-hoc threads
+      - In embedded mode, use an in-memory queue.Queue as the primary
+        notification channel (enqueue writes to both memory and JSONL).
+        The supervisor loop waits on the Queue with timeout instead of
+        polling the file, reducing latency to near-zero.
+
+      When not embedded (default): behavior is unchanged — missions still
+      spawn ad-hoc daemon threads as today.
+    acceptance_criteria:
+      - "pytest tests/test_daemon.py verifies serve(daemon=True) sets agentforce/server/handler.py module-level '_daemon' reference != None"
+      - "pytest tests/test_daemon.py verifies SIGINT handler calls daemon.stop() and server.shutdown(); assert daemon.status()['running'] == False"
+      - 'POST /api/missions returns 200 with {"id": ..., "status": "started"} and daemon.status()[''queue''] contains the mission_id when daemon is active'
+      - "POST /api/missions returns 200 and spawns a threading.Thread with name 'agentforce-mission-' prefix when daemon is None"
+    dependencies:
+      - "02"
+    tdd:
+      test_file: "tests/test_daemon.py"
+      test_command: "python3 -m pytest tests/test_daemon.py -v -k 'embedded'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/handler.py"
+      - "agentforce/server/routes/missions.py"
+      - "tests/test_daemon.py"
+
+  - id: "04"
+    title: "Add detached process mode via CLI"
+    description: |
+      Add a CLI entry point: python3 -m agentforce.daemon [start|stop|status]
+
+      - start: spawns a detached process using subprocess.Popen with
+        sys.executable (NOT os.fork — fork is unsafe with threads and
+        mutexes). The child runs python3 -m agentforce.daemon _run which
+        is the internal entry point that creates a MissionDaemon and calls
+        start(). Writes PID to ~/.agentforce/daemon.pid. Redirects
+        stdout/stderr to ~/.agentforce/daemon.log using
+        logging.handlers.RotatingFileHandler (max 10MB, 3 backups).
+        Parent process exits immediately after confirming child is alive.
+      - stop: reads PID file, verifies the PID is an agentforce process
+        (check cmdline on macOS via `ps -p {pid} -o command=`), sends
+        SIGTERM, waits up to 10s, removes PID file. If process doesn't
+        exit after 10s, sends SIGKILL as last resort.
+      - status: reads PID file, checks if process is alive (os.kill(pid, 0)),
+        prints daemon state and queue contents from daemon_queue.jsonl.
+
+      The detached daemon runs the same MissionDaemon.start() loop as the
+      embedded mode. It does NOT start the HTTP server — it only processes
+      the shared queue file (~/.agentforce/daemon_queue.jsonl).
+
+      The daemon lock from task 02 prevents embedded and detached daemons
+      from running simultaneously.
+    acceptance_criteria:
+      - "assert ~/.agentforce/daemon.pid exists after 'python3 -m agentforce.daemon start'; int(pid_file.read_text()) > 0 and os.kill(pid, 0) succeeds"
+      - "assert ~/.agentforce/daemon.pid does not exist after 'python3 -m agentforce.daemon stop'; os.kill(pid, 0) raises ProcessLookupError"
+      - 'python3 -m agentforce.daemon status prints "running" when ~/.agentforce/daemon.pid exists and process is alive; prints "stopped" otherwise'
+      - "pytest tests/test_daemon.py verifies starting embedded daemon then 'python3 -m agentforce.daemon start' exits with code != 0 and message contains 'already running'"
+      - "assert ~/.agentforce/daemon.log exists; logging.handlers.RotatingFileHandler configured with maxBytes == 10485760 and backupCount >= 3"
+    dependencies:
+      - "02"
+    tdd:
+      test_file: "tests/test_daemon.py"
+      test_command: "python3 -m pytest tests/test_daemon.py -v -k 'detached or cli'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/daemon.py"
+      - "tests/test_daemon.py"
+
+  - id: "05"
+    title: "Enhance draft auto-generation with workspace context"
+    description: |
+      The existing _empty_draft_spec() in plan.py already generates a skeleton
+      spec with name and goal. This task extends it with workspace-aware
+      context that was missing:
+
+      - Set working_dir from workspace_paths[0] when provided
+      - Add a workspace complexity heuristic: count files in the workspace
+        directory (<50 files = small caps, 50-200 = medium, >200 = large)
+        and set default caps accordingly
+      - Add a synthetic assistant turn to the draft: "Draft initialized from
+        your prompt. Here's the starting structure — tell me what to adjust."
+        This gives the Flight Director UI immediate content to render in the
+        Planner Stream panel.
+      - Update the planner adapter (LivePlannerAdapter) to include the
+        existing draft_spec as context in its system prompt, so the LLM
+        refines the skeleton rather than generating from scratch.
+
+      Do NOT duplicate the existing skeleton generation — extend it.
+    acceptance_criteria:
+      - "pytest tests/test_api_routes.py verifies draft_spec['working_dir'] == workspace_paths[0] when POST /api/plan/drafts includes workspace_paths"
+      - "pytest tests/test_api_routes.py verifies draft_spec['caps']['max_concurrent_workers'] == 1 for workspace with < 50 files and == 2 for >= 50 files"
+      - "assert len(draft['turns']) >= 1 and draft['turns'][0]['role'] == 'assistant' after POST /api/plan/drafts returns 200"
+      - "pytest tests/test_api_routes.py verifies LivePlannerAdapter.plan_turn() system prompt contains 'draft_spec' key from the existing draft"
+      - "pytest tests/test_api_routes.py verifies POST /api/plan/drafts without workspace_paths returns 200 with draft_spec['working_dir'] == None"
+    dependencies: []
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "python3 -m pytest tests/test_api_routes.py -v -k 'auto_draft or draft_init'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/routes/plan.py"
+      - "agentforce/server/planner_adapter.py"
+      - "tests/test_api_routes.py"
+
+  - id: "06"
+    title: "Add plan start endpoint to finalize and enqueue"
+    description: |
+      Add POST /api/plan/drafts/:id/start that performs a draft-to-mission
+      transition:
+
+      1. Load draft by id, verify status is "draft" (reject if finalized/cancelled)
+      2. Run launch-time validation on draft_spec (reuse existing spec validation
+         from plan.py — definition_of_done present, tasks non-empty, no dependency
+         cycles, execution settings valid)
+      3. If validation fails: return 422 with structured errors (do not modify draft)
+      4. If validation passes:
+         a. Build MissionSpec from draft_spec
+         b. Create MissionState via _make_mission_state_from_spec()
+         c. Save mission state to ~/.agentforce/state/
+         d. Update draft status to "finalized"
+         e. If daemon is active: enqueue mission_id on daemon
+         f. If daemon is not active: spawn ad-hoc thread (existing behavior)
+         g. Return 200 with {mission_id, draft_id, status: "started"}
+
+      Crash safety: if the process crashes between saving mission state and
+      finalizing the draft, the mission state exists but the draft remains
+      "draft". On the next start attempt, detect the existing mission state
+      and return it rather than creating a duplicate.
+
+      The existing POST /api/missions endpoint remains for backward compatibility
+      (direct YAML launch without planning).
+    acceptance_criteria:
+      - 'POST /api/plan/drafts/:id/start returns 200 with {"mission_id": "...", "draft_id": "...", "status": "started"} for a valid draft'
+      - "assert draft['status'] == 'finalized' after GET /api/plan/drafts/:id following a successful start"
+      - 'POST /api/plan/drafts/:id/start returns 422 with {"errors": [...]} when draft has tasks == [] or definition_of_done == []'
+      - "assert ~/.agentforce/state/{mission_id}.json exists after POST /api/plan/drafts/:id/start returns 200"
+      - "pytest tests/test_api_routes.py verifies daemon.status()['queue'] contains mission_id when daemon is active; assert 'agentforce-mission-' thread is spawned when daemon is None"
+    dependencies:
+      - "02"
+      - "05"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "python3 -m pytest tests/test_api_routes.py -v -k 'plan_start or draft_start'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/routes/plan.py"
+      - "agentforce/server/routes/missions.py"
+      - "tests/test_api_routes.py"
+
+  - id: "07"
+    title: "Add daemon REST API endpoints with auth guard"
+    description: |
+      Create agentforce/server/routes/daemon.py with daemon control endpoints:
+
+      - GET /api/daemon/status — returns {running: bool, queue: [...], active: [...],
+        completed_count: int, failed_count: int, uptime_seconds: float,
+        last_heartbeat: ISO timestamp}
+      - POST /api/daemon/enqueue — body {mission_id} — adds to queue
+      - POST /api/daemon/dequeue — body {mission_id} — removes from queue
+        (only if still queued, not running)
+      - POST /api/daemon/stop — graceful shutdown of daemon
+
+      Auth guard: when AGENTFORCE_TOKEN env var is set, all mutating daemon
+      endpoints (POST) require a matching X-Agentforce-Token header. GET
+      /api/daemon/status is unauthenticated for monitoring. Return 401 on
+      missing/invalid token. This prevents CSRF-based enqueue/stop from
+      browser scripts (the server has Access-Control-Allow-Origin: *).
+
+      Route registration follows existing pattern in handler.py _ROUTES list.
+      All daemon endpoints return 503 if daemon is not active.
+    acceptance_criteria:
+      - 'GET /api/daemon/status returns 200 with {"running": true, "queue": [...], "active": [...], "last_heartbeat": "..."}'
+      - 'POST /api/daemon/enqueue returns 200 with {"enqueued": true, "mission_id": "..."} and GET /api/daemon/status shows it in ''queue'''
+      - 'POST /api/daemon/dequeue returns 200 for queued missions; returns 409 with {"error": "mission is running"} for active missions'
+      - 'GET /api/daemon/status returns 503 with {"error": "daemon not active"} when daemon is None'
+      - 'POST /api/daemon/enqueue returns 401 with {"error": "unauthorized"} when AGENTFORCE_TOKEN is set and X-Agentforce-Token header is missing'
+    dependencies:
+      - "03"
+    tdd:
+      test_file: "tests/test_api_routes.py"
+      test_command: "python3 -m pytest tests/test_api_routes.py -v -k 'daemon'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/server/routes/daemon.py"
+      - "agentforce/server/handler.py"
+      - "tests/test_api_routes.py"
+
+  - id: "08"
+    title: "Add WebSocket daemon events"
+    description: |
+      Broadcast daemon lifecycle events over the existing WebSocket
+      infrastructure (ws.py) so the UI can react to queue changes in real time:
+
+      - "daemon:status_changed" {running: bool} — on start/stop
+      - "daemon:enqueued" {mission_id} — mission added to queue
+      - "daemon:started" {mission_id} — mission execution began
+      - "daemon:completed" {mission_id} — mission finished successfully
+      - "daemon:failed" {mission_id, error} — mission failed
+
+      Hook these broadcasts into the MissionDaemon supervisor loop via
+      an optional callback interface (on_enqueue, on_start, on_complete,
+      on_fail). The daemon core does not import ws — the callbacks are
+      wired in when the daemon is created by the server.
+
+      Use the existing ws.broadcast() function — no new WebSocket infrastructure.
+    acceptance_criteria:
+      - 'pytest tests/test_daemon.py verifies on_enqueue callback receives {"type": "daemon:enqueued", "mission_id": "..."} after enqueue()'
+      - 'pytest tests/test_daemon.py verifies on_start callback receives {"type": "daemon:started", "mission_id": "..."} when mission begins'
+      - 'pytest tests/test_daemon.py verifies on_complete callback receives {"type": "daemon:completed"} or on_fail receives {"type": "daemon:failed", "error": "..."}'
+      - "assert agentforce/server/routes/daemon.py calls ws.broadcast() with event payload; agentforce/daemon.py does not import ws directly"
+    dependencies:
+      - "07"
+    tdd:
+      test_file: "tests/test_daemon.py"
+      test_command: "python3 -m pytest tests/test_daemon.py -v -k 'websocket or broadcast'"
+      tests_must_pass: true
+    output_artifacts:
+      - "agentforce/daemon.py"
+      - "agentforce/server/routes/daemon.py"
+      - "tests/test_daemon.py"
+
+  - id: "09"
+    title: "Integration proof — draft to daemon execution"
+    description: |
+      Add an end-to-end integration test that exercises the full flow:
+
+      1. Create a draft via POST /api/plan/drafts with a prompt
+      2. Verify auto-generated draft_spec has name, goal, working_dir
+      3. Send one planner turn via POST /api/plan/drafts/:id/messages
+         (using the deterministic fake planner)
+      4. Start the plan via POST /api/plan/drafts/:id/start
+      5. Verify mission state exists and draft is finalized
+      6. Verify daemon enqueued the mission (or thread spawned if no daemon)
+      7. Check GET /api/daemon/status shows the mission
+
+      Also verify:
+      - Existing POST /api/missions YAML-based launch still works (backward compat)
+      - Detached daemon CLI start/status/stop cycle works
+      - Pause/resume signals propagate through daemon to running missions
+      - Daemon crash recovery: kill daemon mid-mission, restart, verify
+        interrupted missions resume correctly
+
+      Use the existing DeterministicPlannerAdapter so no live LLM is needed.
+    acceptance_criteria:
+      - "pytest tests/test_daemon.py e2e test: POST /api/plan/drafts returns 200, draft_spec['goal'] != ''; POST /api/plan/drafts/:id/start returns 200; assert ~/.agentforce/state/{mission_id}.json exists"
+      - "assert GET /api/plan/drafts/:id returns draft with status == 'finalized' after POST /api/plan/drafts/:id/start returns 200"
+      - 'pytest tests/test_api_routes.py verifies POST /api/missions with {"yaml": "..."} returns 200 with {"id": "...", "status": "started"}'
+      - "pytest tests/test_daemon.py verifies daemon.start() after kill restores missions from daemon_queue.jsonl; assert len(status()['queue']) >= 1"
+      - "pytest tests/test_daemon.py and tests/test_api_routes.py use DeterministicPlannerAdapter; assert no HTTP calls to 'openrouter.ai' or 'api.anthropic.com'"
+    dependencies:
+      - "06"
+      - "08"
+    tdd:
+      test_file: "tests/test_daemon.py"
+      test_command: "python3 -m pytest tests/test_daemon.py tests/test_api_routes.py -v -k 'integration or e2e'"
+      tests_must_pass: true
+    output_artifacts:
+      - "tests/test_daemon.py"
+      - "tests/test_api_routes.py"

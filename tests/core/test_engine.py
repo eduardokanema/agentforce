@@ -16,8 +16,8 @@ def make_engine(tmp_path, tasks=None, caps=None):
     """Helper to create an engine."""
     if tasks is None:
         tasks = [
-            TaskSpec(id="01", title="Task A", description="Do A", max_retries=2),
-            TaskSpec(id="02", title="Task B", description="Do B", max_retries=2),
+            TaskSpec(id="01", title="Task A", description="Do A", max_retries=2, acceptance_criteria=["assert result == 'ok'"]),
+            TaskSpec(id="02", title="Task B", description="Do B", max_retries=2, acceptance_criteria=["assert result == 'ok'"]),
         ]
     if caps is None:
         caps = Caps(max_retries_global=5, max_concurrent_workers=2, max_wall_time_minutes=60)
@@ -59,8 +59,8 @@ class TestEngineInitialization:
 
     def test_dispatchable_respects_deps(self, tmp_path):
         tasks = [
-            TaskSpec(id="01", title="Task A", description="A", max_retries=2),
-            TaskSpec(id="02", title="Task B", description="B", dependencies=["01"], max_retries=2),
+            TaskSpec(id="01", title="Task A", description="A", max_retries=2, acceptance_criteria=["assert result == 'ok'"]),
+            TaskSpec(id="02", title="Task B", description="B", dependencies=["01"], max_retries=2, acceptance_criteria=["assert result == 'ok'"]),
         ]
         engine = make_engine(tmp_path, tasks=tasks)
         dispatchable = engine.state.dispatchable_tasks()
@@ -77,7 +77,7 @@ class TestTick:
     def test_respects_worker_limit(self, tmp_path):
         caps = Caps(max_concurrent_workers=1, max_retries_global=10)
         tasks = [
-            TaskSpec(id=f"{i:02d}", title=f"Task {i}", description=f"Do {i}", max_retries=2)
+            TaskSpec(id=f"{i:02d}", title=f"Task {i}", description=f"Do {i}", max_retries=2, acceptance_criteria=["assert result == 'ok'"])
             for i in range(1, 6)
         ]
         engine = make_engine(tmp_path, tasks=tasks, caps=caps)
@@ -166,7 +166,7 @@ class TestWorkerLifecycle:
     def test_retry_backoff_grows_exponentially_across_failures(self, tmp_path):
         engine = make_engine(
             tmp_path,
-            tasks=[TaskSpec(id="01", title="Task A", description="Do A", max_retries=3)],
+            tasks=[TaskSpec(id="01", title="Task A", description="Do A", max_retries=3, acceptance_criteria=["assert result == 'ok'"])],
         )
 
         with patch("agentforce.core.engine.time.time", return_value=100.0):
@@ -312,8 +312,8 @@ class TestReviewerLifecycle:
 class TestDependencyOrdering:
     def test_dependent_task_blocked(self, tmp_path):
         tasks = [
-            TaskSpec(id="01", title="Base", description="Base", max_retries=2),
-            TaskSpec(id="02", title="Dependent", description="Dep", dependencies=["01"], max_retries=2),
+            TaskSpec(id="01", title="Base", description="Base", max_retries=2, acceptance_criteria=["assert result == 'ok'"]),
+            TaskSpec(id="02", title="Dependent", description="Dep", dependencies=["01"], max_retries=2, acceptance_criteria=["assert result == 'ok'"]),
         ]
         engine = make_engine(tmp_path, tasks=tasks)
         engine.tick()  # Dispatch task 01
@@ -398,7 +398,7 @@ class TestEventLog:
 
     def test_tail_limit(self, tmp_path):
         engine = make_engine(tmp_path, tasks=[
-            TaskSpec(id=f"task{i:02d}", title=f"T{i}", description=f"Do {i}", max_retries=2)
+            TaskSpec(id=f"task{i:02d}", title=f"T{i}", description=f"Do {i}", max_retries=2, acceptance_criteria=["assert result == 'ok'"])
             for i in range(30)
         ], caps=Caps(max_concurrent_workers=30))
         engine.tick()
@@ -445,11 +445,13 @@ class TestAgentContext:
                 id="01",
                 title="Task A",
                 description="Do A thoroughly",
-                acceptance_criteria=[],
+                acceptance_criteria=["assert result == 'ok'"],
                 max_retries=2,
             )
         ]
         engine = make_engine(tmp_path, tasks=tasks)
+        # Clear criteria after engine creation to exercise the fallback code path
+        engine.spec.tasks[0].acceptance_criteria = []
 
         captured = {}
 

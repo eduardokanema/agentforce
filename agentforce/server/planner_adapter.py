@@ -65,20 +65,33 @@ class DeterministicPlannerAdapter(PlannerAdapter):
 
 
 class LivePlannerAdapter(PlannerAdapter):
-    """Live provider-backed planner adapter."""
+    """Live provider-backed planner adapter.
+
+    Preferred path: claude Code CLI connector (no API key required).
+    Fallback: OpenRouter or Anthropic HTTP API.
+    """
 
     def plan_turn(self, draft: dict[str, Any], user_message: str) -> PlannerTurnResult:
-        openrouter_key, anthropic_key = _load_provider_keys()
-        if not openrouter_key and not anthropic_key:
-            raise RuntimeError("no AI provider configured — add an OpenRouter key in Models settings")
+        from agentforce.connectors import claude as _claude_connector
 
-        model = _select_model(draft, use_openrouter=bool(openrouter_key))
+        system_prompt = _build_system_prompt(draft)
         prompt = _build_user_prompt(draft, user_message)
-        response_text = (
-            _openrouter_completion(openrouter_key, model, prompt)
-            if openrouter_key
-            else _anthropic_completion(anthropic_key, model, prompt)
-        )
+        model = _select_model(draft, use_openrouter=False)
+
+        if _claude_connector.available():
+            response_text = _claude_cli_completion(model, system_prompt, prompt)
+        else:
+            openrouter_key, anthropic_key = _load_provider_keys()
+            if not openrouter_key and not anthropic_key:
+                raise RuntimeError(
+                    "no AI provider configured — install claude CLI or add an API key in Models settings"
+                )
+            if openrouter_key:
+                model = _select_model(draft, use_openrouter=True)
+                response_text = _openrouter_completion(openrouter_key, model, system_prompt, prompt)
+            else:
+                response_text = _anthropic_completion(anthropic_key, model, system_prompt, prompt)
+
         assistant_message, draft_spec = _parse_planner_response(response_text)
         return PlannerTurnResult(
             events=[
@@ -125,7 +138,7 @@ def _select_model(draft: dict[str, Any], *, use_openrouter: bool) -> str:
     approved_models = list(draft.get("approved_models") or [])
     if approved_models:
         return str(approved_models[0])
-    return "anthropic/claude-sonnet-4-6" if use_openrouter else "claude-sonnet-4-5"
+    return "anthropic/claude-sonnet-4-6" if use_openrouter else "claude-sonnet-4-6"
 
 
 def _build_user_prompt(draft: dict[str, Any], user_message: str) -> str:
@@ -142,21 +155,50 @@ def _build_user_prompt(draft: dict[str, Any], user_message: str) -> str:
     )
 
 
-def _system_prompt() -> str:
+def _build_system_prompt(draft: dict[str, Any]) -> str:
+    draft_spec_json = json.dumps(draft.get("draft_spec") or {}, indent=2, sort_keys=True)
     return (
         "You are AgentForce's mission planner. "
         "Return JSON only with keys 'assistant_message' and 'draft_spec'. "
-        "Do not wrap the JSON in markdown fences or add extra prose."
+        "Do not wrap the JSON in markdown fences or add extra prose.\n\n"
+        f"Current draft_spec:\n{draft_spec_json}"
     )
 
 
-def _openrouter_completion(api_key: str, model: str, prompt: str) -> str:
+def _claude_cli_completion(model: str, system_prompt: str, prompt: str) -> str:
+    """Run the planner turn via the Claude Code CLI connector."""
+    from agentforce.connectors import claude as _claude_connector
+    import tempfile, os
+
+    full_prompt = f"{system_prompt}\n\n{prompt}"
+    workdir = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        success, output, error, _, _ = _claude_connector.run(
+            prompt=full_prompt,
+            workdir=workdir,
+            timeout=120,
+            model=model,
+        )
+    if not success and not output:
+        raise RuntimeError(f"claude CLI planner failed: {error[:200]}")
+    # Strip markdown fences if claude wraps JSON in ```json ... ```
+    text = output.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(
+            line for line in lines
+            if not line.startswith("```")
+        ).strip()
+    return text
+
+
+def _openrouter_completion(api_key: str, model: str, system_prompt: str, prompt: str) -> str:
     payload = {
         "model": model,
         "stream": False,
         "max_tokens": 4096,
         "messages": [
-            {"role": "system", "content": _system_prompt()},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
     }
@@ -176,14 +218,14 @@ def _openrouter_completion(api_key: str, model: str, prompt: str) -> str:
     return str(raw["choices"][0]["message"]["content"])
 
 
-def _anthropic_completion(api_key: str, model: str, prompt: str) -> str:
+def _anthropic_completion(api_key: str, model: str, system_prompt: str, prompt: str) -> str:
     from anthropic import Anthropic
 
     client = Anthropic(api_key=api_key)
     response = client.messages.create(
         model=model,
         max_tokens=4096,
-        system=_system_prompt(),
+        system=system_prompt,
         messages=[{"role": "user", "content": prompt}],
     )
     text_parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]

@@ -22,7 +22,7 @@ from agentforce.review.personas import build_persona_prompt, parse_persona_respo
 
 
 AGENTFORCE_HOME = Path(os.path.expanduser("~/.agentforce"))
-_MODEL_FALLBACK = "claude-sonnet-4-5"
+_MODEL_FALLBACK = "claude-sonnet-4-6"
 _PERSONA_ORDER = (
     "quality_champion",
     "devils_advocate",
@@ -47,7 +47,7 @@ def _load_json_file(path: Path) -> dict[str, Any]:
 def _resolve_model(requested_model: str | None) -> str:
     """Resolve the model to use for review.
 
-    Order: requested_model > connectors config > fallback 'claude-sonnet-4-5'.
+    Order: requested_model > connectors config > fallback 'claude-sonnet-4-6'.
     """
 
     if requested_model:

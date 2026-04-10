@@ -66,23 +66,23 @@ class HumanIntervention:
 
 class MissionEngine:
     """Drives a mission from start to completion via state machine ticks.
-    
+
     Usage:
         engine = MissionEngine(spec, state_dir, memory)
-        
+
         # Each tick:
         actions = engine.tick()
-        
+
         # Engine returns actions the caller should execute:
         # - WorkerDelegations to dispatch as delegate_task
-        # - ReviewerDelegations to dispatch as delegate_task  
+        # - ReviewerDelegations to dispatch as delegate_task
         # - HumanInterventions if resolution is needed
-        
+
         # After workers/reviewers complete:
         engine.apply_worker_result(task_id, success, output)
         engine.apply_reviewer_result(task_id, approved, feedback)
         engine.apply_human_resolution(task_id, message)
-        
+
         # Check completion:
         if engine.is_done():
             print("MISSION ACCOMPLISHED")
@@ -113,24 +113,24 @@ class MissionEngine:
         self.memory = memory
         self.worker_model = worker_model
         self.reviewer_model = reviewer_model
-        
+
         mid = mission_id or spec.short_id()
         self.state = MissionState(mission_id=mid, spec=spec)
         self.state.working_dir = str(Path(spec.working_dir or f"./missions-{mid}").resolve())
         self.state.execution_defaults = self._normalized_execution_defaults()
         self._sync_execution_telemetry()
-        
+
         # Initialize task states
         for ts in spec.tasks:
             self.state.task_states[ts.id] = TaskState(
                 task_id=ts.id,
                 spec_summary=f"{ts.title}"[:200],
             )
-        
+
         self.state.log_event("mission_started", details=f"Started mission: {spec.name}")
         self._state_file = self.state_dir / f"{mid}.json"
         self._save()
-        
+
         logger.info("Engine initialized: %s [%s]", spec.name, mid)
 
     @classmethod
@@ -251,7 +251,7 @@ class MissionEngine:
 
     def tick(self) -> list:
         """One scheduler iteration. Returns list of actions to dispatch.
-        
+
         Returns:
             list of WorkerDelegation | ReviewerDelegation | HumanIntervention
         """
@@ -349,7 +349,7 @@ class MissionEngine:
         query_text = "\n".join(task_spec.acceptance_criteria) if task_spec.acceptance_criteria else task_spec.description
         logger.debug("agent_context query [%s]: %s", task_id, query_text)
         mem_context = self.memory.agent_context(self.state.mission_id, task_id, query=query_text)
-        
+
         prompt = task_spec.generate_worker_prompt()
         if mem_context:
             prompt += f"\n\nMEMORY CONTEXT:\n{mem_context}"
@@ -392,7 +392,7 @@ class MissionEngine:
         query_text = "\n".join(task_spec.acceptance_criteria) if task_spec.acceptance_criteria else task_spec.description
         logger.debug("agent_context query [%s]: %s", task_id, query_text)
         mem_context = self.memory.agent_context(self.state.mission_id, task_id, query=query_text)
-        
+
         prompt = task_spec.generate_reviewer_prompt(
             worker_output=ts.worker_output,
             mission_name=self.state.spec.name,
@@ -522,7 +522,7 @@ class MissionEngine:
         ts = self.state.get_task(task_id)
         if not ts:
             raise ValueError(f"Unknown task: {task_id}")
-        
+
         if not ts.needs_human_attention():
             raise ValueError(f"Task {task_id} doesn't need human attention")
 
@@ -536,7 +536,7 @@ class MissionEngine:
         if resolution:
             ts.review_feedback = ts.review_feedback + f"\n\nHuman guidance: {resolution}"
         ts.bump()
-        
+
         self.state.log_event("human_resolved", task_id, resolution)
         logger.info("Human resolved task: %s", task_id)
         self._save()
@@ -546,28 +546,31 @@ class MissionEngine:
         ts = self.state.get_task(task_id)
         if not ts:
             raise ValueError(f"Unknown task: {task_id}")
-        
+
         ts.status = TaskStatus.FAILED
         ts.human_intervention_needed = False
         ts.retry_not_before = 0.0
         ts.bump()
-        
+
         self.state.log_event("task_failed", task_id, "Marked as failed by human")
         self._save()
 
     def manual_retry(self, task_id: str) -> None:
-        """Reset a failed task back to retry without consuming retry budget."""
+        """Reset a failed or stuck task back to pending/retry without consuming retry budget."""
         ts = self.state.get_task(task_id)
         if not ts:
             raise ValueError(f"Unknown task: {task_id}")
 
         status = getattr(ts.status, "value", ts.status)
-        if status not in (TaskStatus.FAILED.value, TaskStatus.NEEDS_HUMAN.value):
+        retryable = {TaskStatus.FAILED.value, TaskStatus.NEEDS_HUMAN.value, TaskStatus.COMPLETED.value}
+        if status not in retryable:
             raise ValueError(f"Task {task_id} cannot be manually retried from status {status!r}")
 
         ts.human_intervention_needed = False
         ts.human_intervention_message = ""
-        ts.status = TaskStatus.RETRY
+        # COMPLETED means worker finished but reviewer never ran — reset fully to PENDING.
+        # FAILED/NEEDS_HUMAN use RETRY so the worker picks up existing feedback context.
+        ts.status = TaskStatus.PENDING if status == TaskStatus.COMPLETED.value else TaskStatus.RETRY
         ts.retry_not_before = 0.0
         ts.bump()
         self.state.log_event("task_retry", task_id, "Manually retried task")

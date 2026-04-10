@@ -46,6 +46,7 @@ const task: TaskState & TaskSpec = {
 
 vi.mock('../lib/api', () => ({
   getTask: vi.fn(async () => task),
+  getTaskOutput: vi.fn(async () => ({ lines: ['booting worker', 'ready'] })),
 }));
 
 vi.mock('../lib/ws', () => ({
@@ -68,7 +69,7 @@ vi.mock('../lib/ws', () => ({
 }));
 
 import { useTaskStream } from './useTaskStream';
-import { getTask } from '../lib/api';
+import { getTaskOutput } from '../lib/api';
 
 function TestHarness({ missionId, taskId }: { missionId: string; taskId: string }) {
   const { lines, done } = useTaskStream(missionId, taskId);
@@ -144,14 +145,14 @@ describe('useTaskStream', () => {
   });
 
   it('keeps live lines that arrive before the initial worker_output fetch resolves', async () => {
-    const taskResolver: { current: ((value: TaskState & TaskSpec) => void) | null } = {
+    const outputResolver: { current: ((value: { lines: string[] }) => void) | null } = {
       current: null,
     };
-    const pendingTask = new Promise<TaskState & TaskSpec>((resolve) => {
-      taskResolver.current = resolve;
+    const pendingOutput = new Promise<{ lines: string[] }>((resolve) => {
+      outputResolver.current = resolve;
     });
 
-    vi.mocked(getTask).mockImplementationOnce(async () => pendingTask);
+    vi.mocked(getTaskOutput).mockImplementationOnce(async () => pendingOutput);
 
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -181,11 +182,8 @@ describe('useTaskStream', () => {
 
     expect(container.querySelector('[data-testid="lines"]')?.textContent).toBe('early live line');
 
-    if (taskResolver.current) {
-      taskResolver.current({
-        ...task,
-        worker_output: 'booting worker\r\nready',
-      });
+    if (outputResolver.current) {
+      outputResolver.current({ lines: ['booting worker', 'ready'] });
     }
 
     await act(async () => {

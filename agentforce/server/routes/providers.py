@@ -65,16 +65,14 @@ _PROVIDER_CATALOGUE: dict[str, dict[str, Any]] = {
 }
 
 _CLAUDE_CODE_MODELS: list[dict[str, Any]] = [
-    {"id": "claude-opus-4-5", "name": "Claude Opus 4.5", "latency_label": "Powerful"},
-    {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "latency_label": "Standard"},
+    {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "latency_label": "Powerful"},
+    {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "latency_label": "Standard"},
     {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "latency_label": "Fast"},
 ]
 
 _CODEX_MODELS_STATIC_FALLBACK: list[dict[str, Any]] = [
     {"id": "gpt-5.4", "name": "GPT-5.4", "latency_label": "Standard"},
     {"id": "gpt-5.4-mini", "name": "GPT-5.4-Mini", "latency_label": "Fast"},
-    {"id": "gpt-5.3-codex", "name": "GPT-5.3-Codex", "latency_label": "Standard"},
-    {"id": "gpt-5.2", "name": "GPT-5.2", "latency_label": "Standard"},
 ]
 _PROVIDERS_FETCH_LOCK = threading.Lock()
 _PROVIDER_MODELS_CACHE_TTL = timedelta(hours=24)

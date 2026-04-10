@@ -68,7 +68,7 @@ export default function HudBar() {
   const dotClassName = stateDotClassName(connectionState);
 
   return (
-    <div className="fixed top-0 inset-x-0 h-10 z-30 flex items-center px-4 gap-6 border-b border-border bg-[#0d1525]/90 backdrop-blur-sm">
+    <div className="fixed top-0 inset-x-0 h-10 z-30 flex items-center px-4 gap-6 border-b border-border bg-surface/90 backdrop-blur-sm">
       <div className="flex items-center gap-3">
         <span className="font-bold tracking-[0.15em] text-[13px] text-cyan">AGENTFORCE</span>
         <span className="rounded border border-border px-1.5 text-[10px] text-muted">{APP_VERSION}</span>

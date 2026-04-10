@@ -277,20 +277,6 @@ def run_autonomous(
     The supervisor ticks on a short interval, dispatches every available
     action (workers *and* reviewers) as concurrent threads, collects results
     as they finish, and feeds them back to the engine — all without blocking.
-
-    Args:
-        mission_id:  The mission ID to run.
-        workdir:     Override the working directory from the mission spec.
-        agent:       ``"opencode"`` or ``"auto"`` (default).
-        model:       Model string passed to the agent CLI (default: opencode/nemotron-3-super-free).
-        variant:     Reasoning effort variant (default: high).
-        pool_size:   Max concurrent agent threads (default 8). Actual task
-                     parallelism is also governed by the mission's
-                     ``max_concurrent_workers`` cap.
-        extend_caps: Ignore cap limits for this run: disables wall-time and
-                     raises retry/intervention limits above current counters.
-                     The stored state is not modified. Use when resuming a
-                     mission blocked by wall_time, interventions, or retries.
     """
     _ensure_pkg()
     from agentforce.core.engine import MissionEngine

@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import HudBar from './components/HudBar';
 import Sidebar from './components/Sidebar';
 import { ToastProvider } from './components/Toast';
+import { ThemeProvider } from './context/ThemeContext';
 import MissionsPageScreen from './pages/MissionsPage';
 import MissionDetailPageScreen from './pages/MissionDetailPage';
 import PlanModePageScreen from './pages/PlanModePage';
@@ -29,6 +30,7 @@ type _telemetryRouteExists = Expect<'/telemetry' extends RoutePath ? true : fals
 
 function App() {
   return (
+    <ThemeProvider>
     <ToastProvider>
       <BrowserRouter>
         <div className="flex h-screen overflow-hidden bg-bg">
@@ -49,6 +51,7 @@ function App() {
         </div>
       </BrowserRouter>
     </ToastProvider>
+    </ThemeProvider>
   );
 }
 

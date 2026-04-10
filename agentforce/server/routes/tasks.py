@@ -129,6 +129,12 @@ def _post_task_retry(mission_id: str, task_id: str) -> tuple[int, dict]:
         engine.manual_retry(task_id)
     except ValueError as exc:
         return 409, {"error": str(exc)}
+
+    from agentforce.server import handler as _handler
+    active_daemon = getattr(_handler, "_daemon", None)
+    if active_daemon is not None:
+        active_daemon.enqueue(mission_id)
+
     return 200, {"retrying": True}
 
 

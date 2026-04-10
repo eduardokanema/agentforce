@@ -96,7 +96,7 @@ export default function Terminal({ lines, done, className = '' }: TerminalProps)
 
       <div
         ref={parentRef}
-        className="bg-[#050810] rounded-lg border border-border font-mono text-[12px] leading-5 overflow-auto"
+        className="bg-[#050810] text-[#dde6f0] rounded-lg border border-border font-mono text-[12px] leading-5 overflow-auto"
         style={{ height: '480px' }}
       >
         {searchQuery !== '' && filteredLines.length === 0 ? (

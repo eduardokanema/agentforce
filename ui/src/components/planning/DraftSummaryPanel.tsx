@@ -5,7 +5,19 @@ interface DraftSummaryPanelProps {
   saving: boolean;
   onNameChange: (value: string) => void;
   onGoalChange: (value: string) => void;
+  onDodChange: (value: string[]) => void;
   onSave: () => void;
+}
+
+function joinLines(values: string[]): string {
+  return values.join('\n');
+}
+
+function parseLines(value: string): string[] {
+  return value
+    .split('\n')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 export default function DraftSummaryPanel({
@@ -13,6 +25,7 @@ export default function DraftSummaryPanel({
   saving,
   onNameChange,
   onGoalChange,
+  onDodChange,
   onSave,
 }: DraftSummaryPanelProps) {
   return (
@@ -20,7 +33,7 @@ export default function DraftSummaryPanel({
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="section-title">Mission Summary</h2>
-          <p className="mt-1 text-xs text-dim">Revision {draft.revision} is the only live draft state.</p>
+          <p className="mt-1 text-xs text-dim">Revision {draft.revision} · edit inline, save to persist.</p>
         </div>
         <button
           type="button"
@@ -34,27 +47,41 @@ export default function DraftSummaryPanel({
 
       <div className="mt-4 space-y-4">
         <div>
-          <label className="block text-sm font-medium text-text" htmlFor="mission-name">
-            Mission name
-          </label>
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+            Mission Name
+          </div>
           <input
             id="mission-name"
             aria-label="Mission name"
-            className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text outline-none focus:border-cyan"
+            className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text outline-none focus:border-cyan"
             value={draft.draft_spec.name}
             onInput={(event) => onNameChange(event.currentTarget.value)}
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-text" htmlFor="mission-goal">
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
             Goal
-          </label>
+          </div>
           <textarea
             id="mission-goal"
             rows={3}
-            className="mt-2 w-full rounded-lg border border-border bg-surface p-3 text-sm text-text outline-none focus:border-cyan"
+            className="w-full rounded-lg border border-border bg-surface p-3 text-sm text-text outline-none focus:border-cyan"
             value={draft.draft_spec.goal}
             onInput={(event) => onGoalChange(event.currentTarget.value)}
+          />
+        </div>
+        <div>
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+            Definition of Done
+          </div>
+          <textarea
+            id="mission-dod"
+            aria-label="Definition of done"
+            rows={3}
+            className="w-full rounded-lg border border-border bg-surface p-3 text-sm text-text outline-none focus:border-cyan"
+            placeholder="One criterion per line…"
+            value={joinLines(draft.draft_spec.definition_of_done)}
+            onInput={(event) => onDodChange(parseLines(event.currentTarget.value))}
           />
         </div>
       </div>

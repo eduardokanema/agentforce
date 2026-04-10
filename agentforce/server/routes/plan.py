@@ -1,27 +1,55 @@
 """Draft-oriented mission planner routes."""
 from __future__ import annotations
 
+import os
+import threading
 import uuid
 
 import yaml
 
 from agentforce.core.spec import Caps, MissionSpec
-from agentforce.server import planner_adapter
+from agentforce.server import planner_adapter, state_io
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
+
+# Set by the server when a MissionDaemon is active; None means ad-hoc threads.
+_active_daemon = None
 
 
 def _store() -> PlanDraftStore:
     return PlanDraftStore()
 
 
-def _empty_draft_spec(prompt: str) -> dict:
+def _count_workspace_files(workspace_path: str) -> int:
+    """Count all files (non-directories) recursively under workspace_path."""
+    try:
+        count = 0
+        for _, _, files in os.walk(workspace_path):
+            count += len(files)
+        return count
+    except OSError:
+        return 0
+
+
+def _caps_for_workspace(workspace_path: str) -> Caps:
+    file_count = _count_workspace_files(workspace_path)
+    if file_count < 50:
+        return Caps(max_concurrent_workers=1)
+    if file_count <= 200:
+        return Caps(max_concurrent_workers=2)
+    return Caps(max_concurrent_workers=3)
+
+
+def _empty_draft_spec(prompt: str, workspace_paths: list[str] | None = None) -> dict:
     goal = prompt.strip()
+    working_dir = workspace_paths[0] if workspace_paths else None
+    caps = _caps_for_workspace(working_dir) if working_dir else Caps()
     return {
         "name": _title_from_prompt(goal),
         "goal": goal,
+        "working_dir": working_dir,
         "definition_of_done": [],
         "tasks": [],
-        "caps": Caps().to_dict(),
+        "caps": caps.to_dict(),
     }
 
 
@@ -32,20 +60,27 @@ def _title_from_prompt(prompt: str) -> str:
     return " ".join(words[:6]).strip().title()
 
 
+_DRAFT_INIT_MESSAGE = (
+    "Draft initialized from your prompt. "
+    "Here's the starting structure — tell me what to adjust."
+)
+
+
 def _create_draft(body: dict) -> tuple[int, dict]:
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
         return 400, {"error": "prompt is required"}
 
+    workspace_paths = list(body.get("workspace_paths") or body.get("workspaces") or [])
     draft = _store().create(
         str(uuid.uuid4()),
         status="draft",
-        draft_spec=_empty_draft_spec(prompt),
-        turns=[],
+        draft_spec=_empty_draft_spec(prompt, workspace_paths),
+        turns=[{"role": "assistant", "content": _DRAFT_INIT_MESSAGE}],
         validation={},
         activity_log=[{"type": "draft_created", "prompt": prompt}],
         approved_models=list(body.get("approved_models") or []),
-        workspace_paths=list(body.get("workspace_paths") or body.get("workspaces") or []),
+        workspace_paths=workspace_paths,
         companion_profile=dict(body.get("companion_profile") or {}),
         draft_notes=[],
     )
@@ -215,6 +250,87 @@ def _merge_draft_spec(base: dict, current: dict, planned: dict) -> dict:
     return merged
 
 
+def _start_draft(draft_id: str) -> tuple[int, dict]:
+    from agentforce.server.routes.missions import _make_mission_state_from_spec
+
+    draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
+
+    if draft.status != "draft":
+        return 409, {"error": f"Draft status is {draft.status!r}, expected 'draft'"}
+
+    try:
+        spec = MissionSpec.from_dict(draft.draft_spec)
+        issues = spec.validate(stage="launch")
+    except Exception as exc:
+        return 422, {"errors": [str(exc)]}
+
+    if issues:
+        return 422, {"errors": issues}
+
+    # Crash recovery: if mission_id was already assigned and state file exists, skip re-creation.
+    existing_mid = draft.validation.get("mission_id")
+    s_dir = state_io.get_state_dir()
+    if existing_mid and (s_dir / f"{existing_mid}.json").exists():
+        _finalize_draft(draft, existing_mid)
+        _launch_mission(existing_mid)
+        return 200, {"mission_id": existing_mid, "draft_id": draft_id, "status": "started"}
+
+    # Build mission state.
+    state = _make_mission_state_from_spec(spec)
+    mission_id = state.mission_id
+
+    # Checkpoint: record mission_id in draft before saving state (crash safety).
+    checkpoint = draft.copy_with(
+        validation={**draft.validation, "mission_id": mission_id},
+        activity_log=list(draft.activity_log) + [{"type": "start_initiated", "mission_id": mission_id}],
+    )
+    save1 = _store().save(checkpoint, expected_revision=draft.revision)
+    if save1.status != "saved" or save1.draft is None:
+        return 409, {"error": "draft conflict during start"}
+
+    # Save mission state to disk.
+    state.log_event("mission_started", details="Started via plan draft")
+    s_dir.mkdir(parents=True, exist_ok=True)
+    state.save(s_dir / f"{mission_id}.json")
+
+    # Finalize draft.
+    _finalize_draft(save1.draft, mission_id)
+
+    _launch_mission(mission_id)
+    return 200, {"mission_id": mission_id, "draft_id": draft_id, "status": "started"}
+
+
+def _finalize_draft(draft: MissionDraftV1, mission_id: str) -> None:
+    finalized = draft.copy_with(
+        status="finalized",
+        activity_log=list(draft.activity_log) + [{"type": "draft_finalized", "mission_id": mission_id}],
+    )
+    _store().save(finalized, expected_revision=draft.revision)
+
+
+def _launch_mission(mission_id: str) -> None:
+    if _active_daemon is not None:
+        _active_daemon.enqueue(mission_id)
+        return
+
+    def _runner():
+        try:
+            from agentforce.autonomous import run_autonomous
+            run_autonomous(mission_id)
+        except SystemExit:
+            pass
+        except Exception:
+            pass
+
+    threading.Thread(
+        target=_runner,
+        daemon=True,
+        name=f"agentforce-mission-{mission_id}",
+    ).start()
+
+
 def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
     if len(parts) == 4 and parts[1] == "plan" and parts[2] == "drafts":
         draft, error = _load_draft_or_404(parts[3])
@@ -233,6 +349,9 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
 
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "import-yaml":
         return _import_yaml(parts[3], handler._read_json_body())
+
+    if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "start":
+        return _start_draft(parts[3])
 
     return 404, {"error": "Not found"}
 

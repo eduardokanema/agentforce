@@ -98,8 +98,8 @@ def test_get_models_returns_three_claude_models(tmp_path, monkeypatch):
 
     body = _response_body(handler)
     assert [model["id"] for model in body] == [
-        "claude-opus-4-5",
-        "claude-sonnet-4-5",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
         "claude-haiku-4-5",
     ]
 
