@@ -67,12 +67,14 @@ _PROVIDER_CATALOGUE: dict[str, dict[str, Any]] = {
 _CLAUDE_CODE_MODELS: list[dict[str, Any]] = [
     {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "latency_label": "Powerful"},
     {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "latency_label": "Standard"},
-    {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "latency_label": "Fast"},
+    {"id": "claude-4-5-haiku", "name": "Claude Haiku 4.5", "latency_label": "Fast"},
 ]
 
 _CODEX_MODELS_STATIC_FALLBACK: list[dict[str, Any]] = [
     {"id": "gpt-5.4", "name": "GPT-5.4", "latency_label": "Standard"},
     {"id": "gpt-5.4-mini", "name": "GPT-5.4-Mini", "latency_label": "Fast"},
+    {"id": "gpt-5.3-codex", "name": "gpt-5.3-codex", "latency_label": "Standard"},
+    {"id": "gpt-5.2", "name": "gpt-5.2", "latency_label": "Standard"},
 ]
 _PROVIDERS_FETCH_LOCK = threading.Lock()
 _PROVIDER_MODELS_CACHE_TTL = timedelta(hours=24)
@@ -181,6 +183,33 @@ def _fetch_claude_code_models() -> list[dict]:
     return [{"cost_per_1k_input": 0.0, "cost_per_1k_output": 0.0, **m} for m in _CLAUDE_CODE_MODELS]
 
 
+def _codex_latency_label(model_id: str, description: str | None) -> str:
+    lowered_id = model_id.lower()
+    lowered_description = (description or "").lower()
+    if "mini" in lowered_id or "smaller" in lowered_description or "fast" in lowered_description:
+        return "Fast"
+    if "powerful" in lowered_description:
+        return "Powerful"
+    return "Standard"
+
+
+def _normalize_codex_model(model: Any) -> dict[str, Any] | None:
+    if not isinstance(model, dict):
+        return None
+    model_id = str(model.get("id") or model.get("slug") or "").strip()
+    if not model_id:
+        return None
+    description = model.get("description")
+    return {
+        "id": model_id,
+        "name": str(model.get("name") or model.get("display_name") or model_id).strip(),
+        "cost_per_1k_input": float(model.get("cost_per_1k_input", 0.0) or 0.0),
+        "cost_per_1k_output": float(model.get("cost_per_1k_output", 0.0) or 0.0),
+        "latency_label": str(model.get("latency_label") or _codex_latency_label(model_id, description)),
+        "visibility": str(model.get("visibility") or "").strip().lower(),
+    }
+
+
 def _fetch_codex_models() -> list[dict]:
     cache_path = Path.home() / ".codex" / "models_cache.json"
     if cache_path.exists():
@@ -189,16 +218,18 @@ def _fetch_codex_models() -> list[dict]:
                 payload = _jsonlib.load(fh)
             models = payload if isinstance(payload, list) else payload.get("models", [])
             if isinstance(models, list) and models:
+                normalized = [item for item in (_normalize_codex_model(model) for model in models) if item]
+                visible = [item for item in normalized if item.get("visibility") in {"", "list"}]
+                source = visible or normalized
                 return [
                     {
-                        "id": m.get("id", ""),
-                        "name": m.get("name", m.get("id", "")),
-                        "cost_per_1k_input": float(m.get("cost_per_1k_input", 0.0) or 0.0),
-                        "cost_per_1k_output": float(m.get("cost_per_1k_output", 0.0) or 0.0),
-                        "latency_label": m.get("latency_label", "Standard"),
+                        "id": item["id"],
+                        "name": item["name"],
+                        "cost_per_1k_input": item["cost_per_1k_input"],
+                        "cost_per_1k_output": item["cost_per_1k_output"],
+                        "latency_label": item["latency_label"],
                     }
-                    for m in models
-                    if m.get("id")
+                    for item in source
                 ]
         except Exception:
             pass

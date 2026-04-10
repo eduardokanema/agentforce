@@ -340,6 +340,81 @@ def test_get_provider_models_serializes_fetch_and_save(monkeypatch):
     assert store["claude"]["cached_models"][0]["id"] == "claude-opus-4-5"
 
 
+def test_fetch_codex_models_reads_current_cache_schema_and_skips_hidden_models(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": "2026-04-10T11:05:37.777990Z",
+                "client_version": "0.118.0",
+                "models": [
+                    {
+                        "slug": "gpt-5.4",
+                        "display_name": "GPT-5.4",
+                        "description": "Latest frontier agentic coding model.",
+                        "visibility": "list",
+                    },
+                    {
+                        "slug": "gpt-5.4-mini",
+                        "display_name": "GPT-5.4-Mini",
+                        "description": "Smaller frontier agentic coding model.",
+                        "visibility": "list",
+                    },
+                    {
+                        "slug": "gpt-5.2-codex",
+                        "display_name": "gpt-5.2-codex",
+                        "visibility": "hide",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(providers_mod.Path, "home", lambda: tmp_path)
+
+    models = providers_mod._fetch_codex_models()
+
+    assert [model["id"] for model in models] == ["gpt-5.4", "gpt-5.4-mini"]
+    assert models[0]["name"] == "GPT-5.4"
+    assert models[0]["latency_label"] == "Standard"
+    assert models[1]["latency_label"] == "Fast"
+
+
+def test_fetch_codex_models_supports_legacy_cache_shape(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "id": "legacy-model",
+                        "name": "Legacy Model",
+                        "cost_per_1k_input": 1.25,
+                        "cost_per_1k_output": 2.5,
+                        "latency_label": "Fast",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(providers_mod.Path, "home", lambda: tmp_path)
+
+    models = providers_mod._fetch_codex_models()
+
+    assert models == [
+        {
+            "id": "legacy-model",
+            "name": "Legacy Model",
+            "cost_per_1k_input": 1.25,
+            "cost_per_1k_output": 2.5,
+            "latency_label": "Fast",
+        }
+    ]
+
+
 def test_serve_does_not_mutate_module_state_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(handler_mod, "_watch_state_dir", lambda **_kwargs: None)
 
