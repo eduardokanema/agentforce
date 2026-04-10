@@ -403,10 +403,15 @@ class MissionSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> MissionSpec:
-        mission_raw = d.get("mission", d)
-        task_defs = d.get("tasks", mission_raw.pop("tasks", []))
-        caps_raw = mission_raw.pop("caps", {})
-        execution_defaults_raw = mission_raw.pop("execution_defaults", {})
+        root = dict(d)
+        mission_source = root.get("mission", root)
+        mission_raw = dict(mission_source)
+        task_defs = root.get("tasks", mission_raw.get("tasks", []))
+        caps_raw = mission_raw.get("caps", {})
+        execution_defaults_raw = mission_raw.get("execution_defaults", {})
+        mission_raw.pop("tasks", None)
+        mission_raw.pop("caps", None)
+        mission_raw.pop("execution_defaults", None)
         
         tasks = []
         for i, td in enumerate(task_defs):

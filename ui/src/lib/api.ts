@@ -5,6 +5,7 @@ import type {
   FilesystemListing,
   Model,
   MissionDraft,
+  PreflightAnswer,
   MissionState,
   MissionSummary,
   Provider,
@@ -177,8 +178,8 @@ export function createPlanDraft(payload: {
   approved_models: string[];
   workspace_paths: string[];
   companion_profile: Record<string, unknown>;
-}): Promise<{ id: string; revision: number }> {
-  return requestJson<{ id: string; revision: number }>('/api/plan/drafts', {
+}): Promise<{ id: string; revision: number; plan_run_id?: string; requires_preflight?: boolean }> {
+  return requestJson<{ id: string; revision: number; plan_run_id?: string; requires_preflight?: boolean }>('/api/plan/drafts', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -195,6 +196,7 @@ export function patchPlanDraftSpec(
   id: string,
   expectedRevision: number,
   draftSpec: MissionDraft['draft_spec'],
+  validation?: MissionDraft['validation'],
 ): Promise<{ id: string; revision: number }> {
   return fetch(`${BASE_URL}/api/plan/drafts/${encodeURIComponent(id)}/spec`, {
     method: 'PATCH',
@@ -205,6 +207,7 @@ export function patchPlanDraftSpec(
     body: JSON.stringify({
       expected_revision: expectedRevision,
       draft_spec: draftSpec,
+      validation,
     }),
   }).then(async (response) => {
     const payload = await response.json().catch(() => null);
@@ -254,21 +257,36 @@ export function importPlanDraftYaml(
 export async function sendPlanDraftMessage(
   id: string,
   content: string,
-): Promise<Response> {
-  const response = await fetch(`${BASE_URL}/api/plan/drafts/${encodeURIComponent(id)}/messages`, {
+): Promise<{ draft_id: string; plan_run_id: string; status: string }> {
+  return requestJson<{ draft_id: string; plan_run_id: string; status: string }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/messages`,
+    {
     method: 'POST',
     headers: {
-      Accept: 'text/event-stream',
+      Accept: 'application/json',
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ content }),
-  });
+    },
+  );
+}
 
-  if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status} ${response.statusText}`);
-  }
-
-  return response;
+export function submitPlanDraftPreflight(
+  id: string,
+  answers: Record<string, PreflightAnswer>,
+  skip = false,
+): Promise<{ draft_id: string; revision: number; plan_run_id: string; status: string }> {
+  return requestJson<{ draft_id: string; revision: number; plan_run_id: string; status: string }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/preflight`,
+    {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ answers, skip }),
+    },
+  );
 }
 
 export function startPlanDraft(id: string): Promise<{ mission_id: string; draft_id: string; status: string }> {

@@ -11,6 +11,7 @@ import yaml
 
 from .. import state_io, ws
 from ..plan_drafts import PlanDraftStore
+from ..plan_runs import PlanRunStore
 
 
 def _now_iso() -> str:
@@ -239,7 +240,11 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
         state = _load_state(parts[2])
         if not state:
             return 404, {"error": f"Mission {parts[2]!r} not found"}
-        return 200, state.to_dict()
+        payload = state.to_dict()
+        planning_summary = PlanRunStore().summarize_for_mission(state.mission_id)
+        if planning_summary is not None:
+            payload["planning"] = planning_summary
+        return 200, payload
 
     if len(parts) == 5 and parts[1] == "mission" and parts[3] == "task":
         state = _load_state(parts[2])

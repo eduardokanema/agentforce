@@ -87,6 +87,39 @@ class DaemonCallbacks:
     on_status_changed: Optional[Callable] = field(default=None)
 
 
+@dataclass(frozen=True)
+class DaemonJob:
+    job_id: str
+    job_type: str
+    payload: dict = field(default_factory=dict)
+
+    @property
+    def mission_id(self) -> str | None:
+        if self.job_type == "mission":
+            return self.job_id
+        return self.payload.get("mission_id")
+
+    def to_state(self, state: str, **extra) -> dict:
+        payload = {"state": state, "job_type": self.job_type, **self.payload}
+        payload.update(extra)
+        if self.mission_id:
+            payload.setdefault("mission_id", self.mission_id)
+        return payload
+
+    def callback_payload(self, event_type: str, **extra) -> dict:
+        if self.job_type == "mission":
+            payload = {"type": event_type}
+            if self.mission_id:
+                payload["mission_id"] = self.mission_id
+            payload.update(extra)
+            return payload
+        payload = {"type": event_type, "job_id": self.job_id, "job_type": self.job_type, **self.payload}
+        if self.mission_id:
+            payload.setdefault("mission_id", self.mission_id)
+        payload.update(extra)
+        return payload
+
+
 class MissionDaemon:
     """Supervisor that maintains an ordered execution queue of missions.
 
@@ -120,8 +153,9 @@ class MissionDaemon:
 
         self._lock = threading.Lock()
         self._journal_lock = threading.Lock()      # protects JSONL file writes
-        self._queue: list[str] = []               # ordered, waiting missions
-        self._mission_states: dict[str, dict] = {}  # all known mission states
+        self._queue: list[str] = []               # ordered, waiting jobs
+        self._job_states: dict[str, dict] = {}  # all known job states
+        self._jobs: dict[str, DaemonJob] = {}
         self._active_threads: dict[str, threading.Thread] = {}
 
         self._stop_event = threading.Event()
@@ -136,31 +170,34 @@ class MissionDaemon:
     # Public API
     # ------------------------------------------------------------------
 
-    def enqueue(self, mission_id: str) -> None:
-        """Add a mission to the execution queue."""
+    def enqueue_job(self, job: DaemonJob) -> None:
+        """Add a typed job to the execution queue."""
         with self._lock:
             if self._stopping:
                 raise RuntimeError("Daemon is stopping; not accepting new missions")
-            existing = self._mission_states.get(mission_id, {}).get("state")
+            existing = self._job_states.get(job.job_id, {}).get("state")
             if existing in (None, "completed", "failed", "dequeued"):
-                self._queue.append(mission_id)
-                self._mission_states[mission_id] = {
-                    "state": "queued",
-                    "enqueued_at": self._now(),
-                }
-        self._append_journal({"action": "enqueue", "mission_id": mission_id})
+                self._queue.append(job.job_id)
+                self._jobs[job.job_id] = job
+                self._job_states[job.job_id] = job.to_state("queued", enqueued_at=self._now())
+        self._append_journal({"action": "enqueue", "job_id": job.job_id, "job_type": job.job_type, "payload": job.payload})
         if self._notify_queue is not None:
-            self._notify_queue.put_nowait(mission_id)
+            self._notify_queue.put_nowait(job.job_id)
         if self._callbacks.on_enqueue is not None:
-            self._callbacks.on_enqueue({"type": "daemon:enqueued", "mission_id": mission_id})
+            self._callbacks.on_enqueue(job.callback_payload("daemon:enqueued"))
+
+    def enqueue(self, mission_id: str) -> None:
+        """Add a mission to the execution queue."""
+        self.enqueue_job(DaemonJob(job_id=mission_id, job_type="mission"))
 
     def dequeue(self, mission_id: str) -> bool:
         """Remove a queued (not yet running) mission. Returns True if removed."""
         with self._lock:
             if mission_id in self._queue:
                 self._queue.remove(mission_id)
-                self._mission_states[mission_id] = {"state": "dequeued"}
-        self._append_journal({"action": "dequeue", "mission_id": mission_id})
+                current = self._jobs.get(mission_id, DaemonJob(job_id=mission_id, job_type="mission"))
+                self._job_states[mission_id] = current.to_state("dequeued")
+        self._append_journal({"action": "dequeue", "job_id": mission_id})
         return True
 
     def start(self) -> None:
@@ -202,9 +239,14 @@ class MissionDaemon:
         with self._lock:
             for mid, thread in list(self._active_threads.items()):
                 if thread.is_alive():
-                    pause_mission(mid)
-                    self._mission_states[mid]["state"] = "paused"
-                    self._append_journal({"action": "paused", "mission_id": mid})
+                    job = self._jobs.get(mid, DaemonJob(job_id=mid, job_type="mission"))
+                    if job.job_type == "mission":
+                        try:
+                            pause_mission(mid)
+                        except OSError:
+                            pass
+                    self._job_states[mid] = job.to_state("paused")
+                    self._append_journal({"action": "paused", "job_id": mid, "job_type": job.job_type, "payload": job.payload})
 
         self._stop_event.set()
         if self._supervisor_thread:
@@ -223,12 +265,12 @@ class MissionDaemon:
             )
             queue = {
                 mid: dict(state)
-                for mid, state in self._mission_states.items()
+                for mid, state in self._job_states.items()
                 if state.get("state") == "queued"
             }
             active = {
                 mid: dict(state)
-                for mid, state in self._mission_states.items()
+                for mid, state in self._job_states.items()
                 if state.get("state") == "running"
             }
         return {"running": running, "queue": queue, "active": active}
@@ -255,9 +297,9 @@ class MissionDaemon:
         pending_start_events: list[dict] = []
         with self._lock:
             # Reap finished mission threads
-            for mid in list(self._active_threads.keys()):
-                if not self._active_threads[mid].is_alive():
-                    del self._active_threads[mid]
+            for job_id in list(self._active_threads.keys()):
+                if not self._active_threads[job_id].is_alive():
+                    del self._active_threads[job_id]
 
             if self._stopping:
                 return
@@ -265,27 +307,28 @@ class MissionDaemon:
             # Dispatch up to available slots
             slots = self.max_concurrent - len(self._active_threads)
             to_dispatch: list[str] = []
-            for mid in self._queue:
+            for job_id in self._queue:
                 if slots <= 0:
                     break
-                if self._mission_states.get(mid, {}).get("state") == "queued":
-                    to_dispatch.append(mid)
+                if self._job_states.get(job_id, {}).get("state") == "queued":
+                    to_dispatch.append(job_id)
                     slots -= 1
 
-            for mid in to_dispatch:
-                self._queue.remove(mid)
-                self._mission_states[mid]["state"] = "running"
-                self._mission_states[mid]["started_at"] = self._now()
+            for job_id in to_dispatch:
+                job = self._jobs.get(job_id, DaemonJob(job_id=job_id, job_type="mission"))
+                self._queue.remove(job_id)
+                self._job_states[job_id]["state"] = "running"
+                self._job_states[job_id]["started_at"] = self._now()
                 t = threading.Thread(
-                    target=self._run_mission,
-                    args=(mid,),
-                    name=f"mission-{mid}",
+                    target=self._run_job,
+                    args=(job,),
+                    name=f"{job.job_type}-{job_id}",
                     daemon=True,
                 )
-                self._active_threads[mid] = t
+                self._active_threads[job_id] = t
                 t.start()
-                self._append_journal({"action": "running", "mission_id": mid})
-                pending_start_events.append({"type": "daemon:started", "mission_id": mid})
+                self._append_journal({"action": "running", "job_id": job_id, "job_type": job.job_type, "payload": job.payload})
+                pending_start_events.append(job.callback_payload("daemon:started"))
 
         # Fire callbacks outside the lock to avoid blocking I/O under contention
         cb = self._callbacks
@@ -293,12 +336,18 @@ class MissionDaemon:
             for event in pending_start_events:
                 cb.on_start(event)
 
-    def _run_mission(self, mission_id: str) -> None:
-        """Execute one mission, catching SystemExit so the daemon survives."""
+    def _run_job(self, job: DaemonJob) -> None:
+        """Execute one job, catching SystemExit so the daemon survives."""
         success = True
         error_str: Optional[str] = None
         try:
-            run_autonomous(mission_id)
+            if job.job_type == "mission":
+                run_autonomous(job.job_id)
+            elif job.job_type == "plan_run":
+                from agentforce.server.planning_runtime import run_plan_run
+                run_plan_run(job.job_id)
+            else:
+                raise RuntimeError(f"Unsupported daemon job type: {job.job_type}")
         except SystemExit:
             pass
         except Exception as exc:
@@ -307,14 +356,14 @@ class MissionDaemon:
 
         final = "completed" if success else "failed"
         with self._lock:
-            if self._mission_states.get(mission_id, {}).get("state") == "running":
-                self._mission_states[mission_id]["state"] = final
-        self._append_journal({"action": final, "mission_id": mission_id})
+            if self._job_states.get(job.job_id, {}).get("state") == "running":
+                self._job_states[job.job_id]["state"] = final
+        self._append_journal({"action": final, "job_id": job.job_id, "job_type": job.job_type, "payload": job.payload})
         cb = self._callbacks
         if success and cb.on_complete is not None:
-            cb.on_complete({"type": "daemon:completed", "mission_id": mission_id})
+            cb.on_complete(job.callback_payload("daemon:completed"))
         elif not success and cb.on_fail is not None:
-            cb.on_fail({"type": "daemon:failed", "mission_id": mission_id, "error": error_str or ""})
+            cb.on_fail(job.callback_payload("daemon:failed", error=error_str or ""))
 
     # ------------------------------------------------------------------
     # Internal — JSONL persistence
@@ -342,7 +391,7 @@ class MissionDaemon:
             return
 
         order: list[str] = []
-        states: dict[str, str] = {}
+        states: dict[str, tuple[str, DaemonJob]] = {}
 
         for line in lines:
             line = line.strip()
@@ -354,38 +403,43 @@ class MissionDaemon:
                 continue
 
             action = rec.get("action")
-            mid = rec.get("mission_id")
+            job_id = rec.get("job_id") or rec.get("mission_id")
+            job_type = rec.get("job_type") or ("mission" if rec.get("mission_id") else None)
+            payload = dict(rec.get("payload") or {})
+            if rec.get("mission_id"):
+                payload.setdefault("mission_id", rec.get("mission_id"))
+            if not job_id or not job_type:
+                continue
+            job = DaemonJob(job_id=str(job_id), job_type=str(job_type), payload=payload)
 
-            if action == "enqueue" and mid:
-                if mid not in states:
-                    order.append(mid)
-                states[mid] = "queued"
-            elif action == "dequeue" and mid:
-                states[mid] = "dequeued"
-                if mid in order:
-                    order.remove(mid)
-            elif action == "running" and mid:
+            if action == "enqueue":
+                if job.job_id not in states:
+                    order.append(job.job_id)
+                states[job.job_id] = ("queued", job)
+            elif action == "dequeue":
+                states[job.job_id] = ("dequeued", job)
+                if job.job_id in order:
+                    order.remove(job.job_id)
+            elif action == "running":
                 # Was in-flight when daemon last stopped — treat as interrupted
-                states[mid] = "running"
-            elif action in ("completed", "failed", "paused") and mid:
-                states[mid] = action
-                if mid in order:
-                    order.remove(mid)
+                states[job.job_id] = ("running", job)
+            elif action in ("completed", "failed", "paused"):
+                states[job.job_id] = (str(action), job)
+                if job.job_id in order:
+                    order.remove(job.job_id)
             # heartbeat — skip
 
         with self._lock:
-            for mid in order:
-                s = states.get(mid, "queued")
+            for job_id in order:
+                s, job = states.get(job_id, ("queued", DaemonJob(job_id=job_id, job_type="mission")))
+                self._jobs[job_id] = job
                 if s == "queued":
-                    self._queue.append(mid)
-                    self._mission_states[mid] = {"state": "queued"}
+                    self._queue.append(job_id)
+                    self._job_states[job_id] = job.to_state("queued")
                 elif s == "running":
                     # Interrupted: re-enqueue; run_autonomous resets IN_PROGRESS tasks
-                    self._queue.append(mid)
-                    self._mission_states[mid] = {
-                        "state": "queued",
-                        "interrupted": True,
-                    }
+                    self._queue.append(job_id)
+                    self._job_states[job_id] = job.to_state("queued", interrupted=True)
 
 
 # ---------------------------------------------------------------------------

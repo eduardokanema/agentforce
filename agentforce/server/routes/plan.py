@@ -8,8 +8,10 @@ import uuid
 import yaml
 
 from agentforce.core.spec import Caps, MissionSpec
-from agentforce.server import planner_adapter, state_io
+from agentforce.server import state_io
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
+from agentforce.server.plan_runs import PlanRunStore
+from agentforce.server.planning_runtime import create_plan_run_for_draft, discover_preflight_questions
 
 # Set by the server when a MissionDaemon is active; None means ad-hoc threads.
 _active_daemon = None
@@ -17,6 +19,65 @@ _active_daemon = None
 
 def _store() -> PlanDraftStore:
     return PlanDraftStore()
+
+
+def _plan_store() -> PlanRunStore:
+    return PlanRunStore()
+
+
+def _effective_daemon():
+    if _active_daemon is not None:
+        return _active_daemon
+    try:
+        from agentforce.server import handler as _handler
+
+        daemon = getattr(_handler, "_daemon", None)
+        if daemon is None:
+            return None
+        try:
+            return daemon if daemon.status().get("running") else None
+        except Exception:
+            return daemon
+    except Exception:
+        return None
+
+
+def _enqueue_plan_run(run_id: str) -> None:
+    daemon = _effective_daemon()
+    if daemon is not None:
+        from agentforce.daemon import DaemonJob
+
+        daemon.enqueue_job(DaemonJob(job_id=run_id, job_type="plan_run"))
+        return
+
+    def _runner():
+        from agentforce.server.planning_runtime import run_plan_run
+
+        try:
+            run_plan_run(run_id)
+        except Exception:
+            pass
+
+    threading.Thread(target=_runner, daemon=True, name=f"agentforce-plan-{run_id}").start()
+
+
+def _draft_payload(draft: MissionDraftV1) -> dict:
+    payload = draft.to_dict()
+    payload["plan_runs"] = [run.to_dict() for run in _plan_store().list_runs_for_draft(draft.id)]
+    payload["plan_versions"] = [version.to_dict() for version in _plan_store().list_versions_for_draft(draft.id)]
+    latest_version_id = str(payload.get("validation", {}).get("latest_plan_version_id") or "")
+    if latest_version_id:
+        version = _plan_store().load_version(latest_version_id)
+        if version is not None:
+            payload["planning_summary"] = {
+                "latest_plan_version_id": version.id,
+                "changelog": version.changelog,
+                "validation": version.validation,
+            }
+    payload["preflight_status"] = str(payload.get("validation", {}).get("preflight_status") or "not_needed")
+    payload["preflight_questions"] = list(payload.get("validation", {}).get("preflight_questions") or [])
+    payload["preflight_answers"] = dict(payload.get("validation", {}).get("preflight_answers") or {})
+    return payload
 
 
 def _count_workspace_files(workspace_path: str) -> int:
@@ -66,6 +127,40 @@ _DRAFT_INIT_MESSAGE = (
 )
 
 
+def _build_preflight_validation(questions: list[dict]) -> dict:
+    if not questions:
+        return {
+            "preflight_status": "not_needed",
+            "preflight_questions": [],
+            "preflight_answers": {},
+        }
+    return {
+        "preflight_status": "pending",
+        "preflight_questions": questions,
+        "preflight_answers": {},
+    }
+
+
+def _preflight_prompt(draft: MissionDraftV1) -> str:
+    questions = list(draft.validation.get("preflight_questions") or [])
+    answers = dict(draft.validation.get("preflight_answers") or {})
+    lines: list[str] = []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        answer = answers.get(str(question.get("id") or ""))
+        if not isinstance(answer, dict):
+            continue
+        selected = str(answer.get("selected_option") or "").strip()
+        custom = str(answer.get("custom_answer") or "").strip()
+        rendered = custom or selected
+        if rendered:
+            lines.append(f"- {question.get('prompt')}: {rendered}")
+    if not lines:
+        return str(draft.draft_spec.get("goal") or "")
+    return f"{draft.draft_spec.get('goal') or ''}\n\nPreflight clarifications:\n" + "\n".join(lines)
+
+
 def _create_draft(body: dict) -> tuple[int, dict]:
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
@@ -84,7 +179,28 @@ def _create_draft(body: dict) -> tuple[int, dict]:
         companion_profile=dict(body.get("companion_profile") or {}),
         draft_notes=[],
     )
-    return 200, {"id": draft.id, "revision": draft.revision}
+    questions = discover_preflight_questions(draft)
+    if questions:
+        save_result = _store().save(
+            draft.copy_with(
+                validation=_build_preflight_validation(questions),
+                activity_log=list(draft.activity_log) + [{"type": "preflight_questions_generated", "count": len(questions)}],
+            ),
+            expected_revision=draft.revision,
+        )
+        if save_result.status == "saved" and save_result.draft is not None:
+            draft = save_result.draft
+    response = {"id": draft.id, "revision": draft.revision}
+    if body.get("auto_start", True) is not False and draft.validation.get("preflight_status") != "pending":
+        run = create_plan_run_for_draft(
+            draft,
+            trigger_kind="auto",
+            trigger_message=prompt,
+        )
+        _enqueue_plan_run(run.id)
+        response["plan_run_id"] = run.id
+    response["requires_preflight"] = draft.validation.get("preflight_status") == "pending"
+    return 200, response
 
 
 def _load_draft(draft_id: str) -> MissionDraftV1 | None:
@@ -110,9 +226,13 @@ def _patch_spec(draft_id: str, body: dict) -> tuple[int, dict]:
     draft_spec = body.get("draft_spec")
     if not isinstance(draft_spec, dict):
         return 400, {"error": "draft_spec must be an object"}
+    validation = body.get("validation")
+    if validation is not None and not isinstance(validation, dict):
+        return 400, {"error": "validation must be an object"}
 
     updated = draft.copy_with(
         draft_spec=dict(draft_spec),
+        validation=dict(validation) if isinstance(validation, dict) else draft.validation,
         activity_log=list(draft.activity_log) + [{"type": "draft_spec_patched"}],
     )
     save_result = _store().save(updated, expected_revision=expected_revision)
@@ -165,89 +285,105 @@ def _import_yaml(draft_id: str, body: dict) -> tuple[int, dict]:
     }
 
 
-def _stream_turn(handler, draft_id: str, body: dict) -> tuple[int, None]:
+def _stream_turn(handler, draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
-        return error[0], error[1]
+        return error
+    if str(draft.validation.get("preflight_status") or "") == "pending":
+        return 409, {"error": "preflight questions must be answered before planning starts"}
 
     user_message = str(body.get("content") or body.get("message") or "").strip()
     if not user_message:
         return 400, {"error": "content is required"}
 
-    adapter = planner_adapter.get_planner_adapter()
-    turn_result = adapter.plan_turn(draft.to_dict(), user_message)
-    status_events = [event for event in turn_result.events if not event.content]
-    assistant_events = [event for event in turn_result.events if event.content]
-
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream")
-    handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("Connection", "keep-alive")
-    handler.end_headers()
-
-    for payload in planner_adapter.iter_sse_payloads(status_events):
-        handler.wfile.write(payload.encode("utf-8"))
-        handler.wfile.flush()
-
-    _persist_planner_turn(draft, user_message, turn_result)
-
-    for payload in planner_adapter.iter_sse_payloads(
-        assistant_events or [planner_adapter.PlannerEvent(phase="planning", status="completed", content=turn_result.assistant_message)]
-    ):
-        handler.wfile.write(payload.encode("utf-8"))
-        handler.wfile.flush()
-
-    handler.wfile.write(b"data: [DONE]\n\n")
-    handler.wfile.flush()
-    return 200, None
+    updated = draft.copy_with(
+        turns=list(draft.turns) + [{"role": "user", "content": user_message}],
+        activity_log=list(draft.activity_log) + [{"type": "plan_follow_up_requested"}],
+    )
+    save_result = _store().save(updated, expected_revision=draft.revision)
+    if save_result.status != "saved" or save_result.draft is None:
+        current = save_result.draft
+        return 409, {
+            "error": "draft revision conflict",
+            "revision": current.revision if current is not None else None,
+        }
+    run = create_plan_run_for_draft(
+        save_result.draft,
+        trigger_kind="follow_up",
+        trigger_message=user_message,
+    )
+    _enqueue_plan_run(run.id)
+    return 200, {"draft_id": draft.id, "plan_run_id": run.id, "status": "queued"}
 
 
-def _persist_planner_turn(
-    base_draft: MissionDraftV1,
-    user_message: str,
-    turn_result: planner_adapter.PlannerTurnResult,
-) -> MissionDraftV1:
-    current_draft = base_draft
-    store = _store()
-    for _ in range(3):
-        merged_spec = _merge_draft_spec(
-            base_draft.draft_spec,
-            current_draft.draft_spec,
-            turn_result.draft_spec,
-        )
-        updated = current_draft.copy_with(
-            draft_spec=merged_spec,
-            turns=list(current_draft.turns) + [
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": turn_result.assistant_message},
-            ],
-            activity_log=list(current_draft.activity_log) + [{"type": "planner_turn_completed"}],
-        )
-        save_result = store.save(updated, expected_revision=current_draft.revision)
-        if save_result.status == "saved" and save_result.draft is not None:
-            return save_result.draft
-        if save_result.draft is None:
-            break
-        current_draft = save_result.draft
-    raise RuntimeError("failed to persist planner draft checkpoint")
+def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
+    draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
 
+    if str(draft.validation.get("preflight_status") or "") != "pending":
+        return 409, {"error": "preflight is not pending for this draft"}
 
-def _merge_draft_spec(base: dict, current: dict, planned: dict) -> dict:
-    keys = set(base) | set(current) | set(planned)
-    merged: dict = {}
-    for key in keys:
-        base_value = base.get(key)
-        current_value = current.get(key)
-        planned_value = planned.get(key)
-        if isinstance(base_value, dict) and isinstance(current_value, dict) and isinstance(planned_value, dict):
-            merged[key] = _merge_draft_spec(base_value, current_value, planned_value)
-            continue
-        if planned_value != base_value:
-            merged[key] = planned_value
-            continue
-        merged[key] = current_value
-    return merged
+    skip = body.get("skip") is True
+    raw_answers = body.get("answers") or {}
+    if not skip and not isinstance(raw_answers, dict):
+        return 400, {"error": "answers must be an object"}
+
+    questions = list(draft.validation.get("preflight_questions") or [])
+    normalized_answers: dict[str, dict] = {}
+    summary_lines: list[str] = []
+    if not skip:
+        for question in questions:
+            if not isinstance(question, dict):
+                continue
+            question_id = str(question.get("id") or "")
+            prompt = str(question.get("prompt") or "").strip()
+            raw_answer = raw_answers.get(question_id)
+            if not isinstance(raw_answer, dict):
+                continue
+            selected_option = str(raw_answer.get("selected_option") or "").strip()
+            custom_answer = str(raw_answer.get("custom_answer") or "").strip()
+            if not selected_option and not custom_answer:
+                continue
+            normalized_answers[question_id] = {
+                "selected_option": selected_option,
+                "custom_answer": custom_answer,
+            }
+            summary_lines.append(f"- {prompt}: {custom_answer or selected_option}")
+
+    updated = draft.copy_with(
+        validation={
+            **draft.validation,
+            "preflight_status": "skipped" if skip else "answered",
+            "preflight_answers": normalized_answers,
+        },
+        turns=list(draft.turns) + (
+            [{"role": "user", "content": "Preflight skipped. Proceed with the best available assumptions."}]
+            if skip
+            else ([{"role": "user", "content": "Preflight answers:\n" + "\n".join(summary_lines)}] if summary_lines else [])
+        ),
+        activity_log=list(draft.activity_log) + [{"type": "preflight_submitted", "skip": skip}],
+    )
+    save_result = _store().save(updated, expected_revision=draft.revision)
+    if save_result.status != "saved" or save_result.draft is None:
+        current = save_result.draft
+        return 409, {
+            "error": "draft revision conflict",
+            "revision": current.revision if current is not None else None,
+        }
+
+    run = create_plan_run_for_draft(
+        save_result.draft,
+        trigger_kind="auto",
+        trigger_message=_preflight_prompt(save_result.draft),
+    )
+    _enqueue_plan_run(run.id)
+    return 200, {
+        "draft_id": save_result.draft.id,
+        "revision": save_result.draft.revision,
+        "plan_run_id": run.id,
+        "status": "queued",
+    }
 
 
 def _start_draft(draft_id: str) -> tuple[int, dict]:
@@ -259,6 +395,8 @@ def _start_draft(draft_id: str) -> tuple[int, dict]:
 
     if draft.status != "draft":
         return 409, {"error": f"Draft status is {draft.status!r}, expected 'draft'"}
+    if str(draft.validation.get("preflight_status") or "") == "pending":
+        return 409, {"error": "preflight questions must be answered before launch"}
 
     try:
         spec = MissionSpec.from_dict(draft.draft_spec)
@@ -280,6 +418,11 @@ def _start_draft(draft_id: str) -> tuple[int, dict]:
     # Build mission state.
     state = _make_mission_state_from_spec(spec)
     mission_id = state.mission_id
+    latest_plan_version_id = str(draft.validation.get("latest_plan_version_id") or "")
+    latest_plan_run_id = str(draft.validation.get("latest_plan_run_id") or "")
+    state.source_plan_version_id = latest_plan_version_id or None
+    state.source_plan_run_id = latest_plan_run_id or None
+    state.source_draft_id = draft.id
 
     # Checkpoint: record mission_id in draft before saving state (crash safety).
     checkpoint = draft.copy_with(
@@ -294,6 +437,10 @@ def _start_draft(draft_id: str) -> tuple[int, dict]:
     state.log_event("mission_started", details="Started via plan draft")
     s_dir.mkdir(parents=True, exist_ok=True)
     state.save(s_dir / f"{mission_id}.json")
+    if latest_plan_version_id:
+        from agentforce.server.planning_runtime import mark_version_launched
+
+        mark_version_launched(latest_plan_version_id, mission_id)
 
     # Finalize draft.
     _finalize_draft(save1.draft, mission_id)
@@ -311,8 +458,9 @@ def _finalize_draft(draft: MissionDraftV1, mission_id: str) -> None:
 
 
 def _launch_mission(mission_id: str) -> None:
-    if _active_daemon is not None:
-        _active_daemon.enqueue(mission_id)
+    daemon = _effective_daemon()
+    if daemon is not None:
+        daemon.enqueue(mission_id)
         return
 
     def _runner():
@@ -336,7 +484,22 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
         draft, error = _load_draft_or_404(parts[3])
         if error is not None:
             return error
-        return 200, draft.to_dict()
+        return 200, _draft_payload(draft)
+    if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "runs":
+        draft, error = _load_draft_or_404(parts[3])
+        if error is not None:
+            return error
+        return 200, {"draft_id": draft.id, "plan_runs": [run.to_dict() for run in _plan_store().list_runs_for_draft(draft.id)]}
+    if len(parts) == 4 and parts[1] == "plan" and parts[2] == "runs":
+        run = _plan_store().load_run(parts[3])
+        if run is None:
+            return 404, {"error": f"Plan run {parts[3]!r} not found"}
+        return 200, run.to_dict()
+    if len(parts) == 4 and parts[1] == "plan" and parts[2] == "versions":
+        version = _plan_store().load_version(parts[3])
+        if version is None:
+            return 404, {"error": f"Plan version {parts[3]!r} not found"}
+        return 200, version.to_dict()
     return 404, {"error": "Not found"}
 
 
@@ -346,6 +509,9 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
 
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "messages":
         return _stream_turn(handler, parts[3], handler._read_json_body())
+
+    if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "preflight":
+        return _submit_preflight(parts[3], handler._read_json_body())
 
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "import-yaml":
         return _import_yaml(parts[3], handler._read_json_body())

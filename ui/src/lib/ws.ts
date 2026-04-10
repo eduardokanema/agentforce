@@ -57,6 +57,31 @@ export interface TaskStreamDoneEvent {
   task_id: string;
 }
 
+export interface PlanningEvent {
+  type:
+    | 'plan_run_queued'
+    | 'plan_run_started'
+    | 'plan_step_started'
+    | 'plan_step_completed'
+    | 'plan_version_created'
+    | 'plan_head_promoted'
+    | 'plan_run_stale'
+    | 'plan_run_failed'
+    | 'plan_cost_update';
+  draft_id: string;
+  plan_run_id: string;
+  plan_version_id?: string;
+  step?: string;
+  status?: string;
+  message?: string;
+  summary?: string;
+  revision?: number;
+  changelog?: string[];
+  tokens_in?: number;
+  tokens_out?: number;
+  cost_usd?: number;
+}
+
 type WsInboundEvent =
   | MissionListEvent
   | MissionListUpdateEvent
@@ -65,7 +90,8 @@ type WsInboundEvent =
   | TaskCostUpdateEvent
   | StreamLineEvent
   | TaskStreamLineEvent
-  | TaskStreamDoneEvent;
+  | TaskStreamDoneEvent
+  | PlanningEvent;
 
 type WsEventType = WsInboundEvent['type'];
 type WsEventHandler<K extends WsEventType> = (event: Extract<WsInboundEvent, { type: K }>) => void;
@@ -155,6 +181,16 @@ function isInboundEvent(value: unknown): value is WsInboundEvent {
         && isNumber(value.seq);
     case 'task_stream_done':
       return isString(value.mission_id) && isString(value.task_id);
+    case 'plan_run_queued':
+    case 'plan_run_started':
+    case 'plan_step_started':
+    case 'plan_step_completed':
+    case 'plan_version_created':
+    case 'plan_head_promoted':
+    case 'plan_run_stale':
+    case 'plan_run_failed':
+    case 'plan_cost_update':
+      return isString(value.draft_id) && isString(value.plan_run_id);
     default:
       return false;
   }

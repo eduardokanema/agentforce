@@ -203,6 +203,7 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
     mission.working_dir?.trim() || mission.spec.working_dir?.trim() || "—";
   const workerExecution = formatExecutionProfile(mission.execution?.defaults.worker);
   const reviewerExecution = formatExecutionProfile(mission.execution?.defaults.reviewer);
+  const planning = mission.planning;
   let runningTaskIndex = 0;
 
   const confirmPendingAction = async (): Promise<void> => {
@@ -270,6 +271,11 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
           {mission.execution?.mixed_roles.length ? (
             <span className="inline-flex rounded-full border border-cyan/30 bg-cyan/10 px-3 py-0.5 text-[10px] uppercase tracking-[0.08em] text-cyan">
               mixed {mission.execution.mixed_roles.join(", ")}
+            </span>
+          ) : null}
+          {planning ? (
+            <span className="inline-flex rounded-full border border-cyan/30 bg-cyan/10 px-3 py-0.5 font-mono text-[11px] text-cyan">
+              planning ${planning.planning_cost_usd.toFixed(4)}
             </span>
           ) : null}
         </div>
@@ -344,6 +350,52 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
       </div>
 
       <section className="sec">
+        {planning ? (
+          <div className="mb-4 rounded-2xl border border-cyan/20 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.14),transparent_62%),var(--color-card)] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-cyan">
+                  Planning Lineage
+                </div>
+                <h2 className="mt-1 text-lg font-semibold text-text">Preflight Cost</h2>
+                <p className="mt-1 text-sm text-dim">
+                  Source version {planning.source_version_id} · run {planning.source_run_id}
+                </p>
+              </div>
+              <div className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 font-mono text-[11px] text-cyan">
+                ${planning.planning_cost_usd.toFixed(4)}
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div className="rounded-xl border border-border bg-surface px-3 py-3">
+                <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Tokens</div>
+                <div className="mt-1 text-sm text-text">
+                  ↓ {planning.planning_tokens_in} in
+                </div>
+                <div className="text-sm text-text">
+                  ↑ {planning.planning_tokens_out} out
+                </div>
+              </div>
+              <div className="rounded-xl border border-border bg-surface px-3 py-3">
+                <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Reviewed changelog</div>
+                <div className="mt-1 space-y-1">
+                  {planning.changelog.map((entry, index) => (
+                    <div key={`${entry}-${index}`} className="text-sm text-text">{entry}</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {mission.source_draft_id ? (
+              <Link
+                className="mt-3 inline-flex text-sm font-medium text-cyan transition-colors hover:text-cyan/80"
+                to={`/plan?draft=${mission.source_draft_id}`}
+              >
+                Return to planning history
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
+
         <h2 className="section-title">Task Timeline</h2>
         <div className="grid grid-cols-1 gap-2">
           {mission.spec.tasks.map((taskSpec) => {

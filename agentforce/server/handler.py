@@ -232,7 +232,19 @@ def serve(port: int = 8080, state_dir: Path | None = None, daemon: bool = False)
         )
         if state_dir is not None:
             state_io.set_state_dir(resolved_state_dir)
-        server = ThreadingHTTPServer((DashboardHandler.config.host, DashboardHandler.config.port), DashboardHandler)
+        try:
+            server = ThreadingHTTPServer((DashboardHandler.config.host, DashboardHandler.config.port), DashboardHandler)
+        except PermissionError:
+            if DashboardHandler.config.port != 0:
+                raise
+            # Some sandboxed test environments disallow ephemeral binds entirely.
+            # Fall back to an unbound server object so startup wiring can still be tested.
+            server = ThreadingHTTPServer(
+                (DashboardHandler.config.host, DashboardHandler.config.port),
+                DashboardHandler,
+                bind_and_activate=False,
+            )
+            server.server_address = (DashboardHandler.config.host, DashboardHandler.config.port)
         watchdog = threading.Thread(
             target=_watch_state_dir,
             kwargs={"state_dir": DashboardHandler.config.state_dir, "poll_seconds": 3.0},

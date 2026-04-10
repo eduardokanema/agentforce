@@ -453,7 +453,10 @@ def _json_request(handler: DashboardHandler, payload: dict) -> None:
 
 
 def test_plan_draft_create_and_get_round_trip(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
     _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda _run_id: None)
 
     create_payload = {
         "prompt": "Draft a calculator mission",
@@ -470,6 +473,7 @@ def test_plan_draft_create_and_get_round_trip(tmp_path, monkeypatch):
     created_body = _response_body(create_handler)
     assert created_body["id"]
     assert created_body["revision"] == 1
+    assert created_body["plan_run_id"]
 
     get_handler = _make_handler(f"/api/plan/drafts/{created_body['id']}")
     get_handler.do_GET()
@@ -482,10 +486,121 @@ def test_plan_draft_create_and_get_round_trip(tmp_path, monkeypatch):
     assert loaded_body["approved_models"] == ["claude-sonnet"]
     assert loaded_body["workspace_paths"] == ["/workspace/app"]
     assert loaded_body["companion_profile"] == {"id": "planner", "label": "Planner"}
+    assert len(loaded_body["plan_runs"]) == 1
 
 
-def test_plan_draft_messages_stream_status_and_final_and_persist_checkpoint(tmp_path, monkeypatch):
+def test_plan_draft_create_with_preflight_questions_blocks_initial_run(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        plan_routes,
+        "discover_preflight_questions",
+        lambda _draft: [
+            {
+                "id": "scope_mode",
+                "prompt": "Should the first release focus on project selection or project data model changes?",
+                "options": ["Selection only", "Both together"],
+                "reason": "This changes the task graph and dependencies.",
+                "allow_custom": True,
+            }
+        ],
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Plan project support"})
+    create_handler.do_POST()
+
+    body = _response_body(create_handler)
+    assert body["requires_preflight"] is True
+    assert "plan_run_id" not in body
+    assert enqueued == []
+
+    get_handler = _make_handler(f"/api/plan/drafts/{body['id']}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+    assert loaded["preflight_status"] == "pending"
+    assert len(loaded["preflight_questions"]) == 1
+
+
+def test_plan_draft_preflight_submission_enqueues_initial_run(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        plan_routes,
+        "discover_preflight_questions",
+        lambda _draft: [
+            {
+                "id": "scope_mode",
+                "prompt": "Should the first release focus on project selection or project data model changes?",
+                "options": ["Selection only", "Both together"],
+                "reason": "This changes the task graph and dependencies.",
+                "allow_custom": True,
+            }
+        ],
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Plan project support", "auto_start": True})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    submit_handler = _make_handler(f"/api/plan/drafts/{draft_id}/preflight")
+    _json_request(submit_handler, {"answers": {"scope_mode": {"selected_option": "Selection only"}}})
+    submit_handler.do_POST()
+
+    body = _response_body(submit_handler)
+    assert body["status"] == "queued"
+    assert body["plan_run_id"]
+    assert enqueued == [body["plan_run_id"]]
+
+    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+    assert loaded["preflight_status"] == "answered"
+    assert loaded["preflight_answers"]["scope_mode"]["selected_option"] == "Selection only"
+    assert loaded["turns"][-1]["content"].startswith("Preflight answers:")
+
+
+def test_plan_draft_messages_blocked_while_preflight_pending(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        plan_routes,
+        "discover_preflight_questions",
+        lambda _draft: [
+            {
+                "id": "scope_mode",
+                "prompt": "Should the first release focus on project selection or project data model changes?",
+                "options": ["Selection only", "Both together"],
+                "reason": "This changes the task graph and dependencies.",
+                "allow_custom": True,
+            }
+        ],
+    )
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Plan project support"})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    message_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
+    _json_request(message_handler, {"content": "Start now"})
+    message_handler.do_POST()
+
+    assert message_handler.send_response.call_args.args == (409,)
+    assert "preflight" in _response_body(message_handler)["error"]
+
+
+def test_plan_draft_messages_enqueue_and_persist_checkpoint(tmp_path, monkeypatch):
     from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server import planning_runtime
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
@@ -515,10 +630,19 @@ def test_plan_draft_messages_stream_status_and_final_and_persist_checkpoint(tmp_
                 draft_spec=updated,
             )
 
-    monkeypatch.setattr(plan_routes.planner_adapter, "get_planner_adapter", lambda: FakePlanner())
+    monkeypatch.setattr(planner_adapter_mod, "get_planner_adapter", lambda: FakePlanner())
+    monkeypatch.setattr(
+        planning_runtime,
+        "_invoke_profile",
+        lambda *_args, **_kwargs: (
+            json.dumps({"summary": "Critic complete", "issues": [], "suggestions": []}),
+            planning_runtime.TokenEvent(tokens_in=11, tokens_out=7, cost_usd=0.0),
+        ),
+    )
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: planning_runtime.run_plan_run(run_id))
 
     create_handler = _make_handler("/api/plan/drafts")
-    _json_request(create_handler, {"prompt": "Build a calculator mission"})
+    _json_request(create_handler, {"prompt": "Build a calculator mission", "auto_start": False})
     create_handler.do_POST()
     draft_id = _response_body(create_handler)["id"]
 
@@ -527,19 +651,17 @@ def test_plan_draft_messages_stream_status_and_final_and_persist_checkpoint(tmp_
     message_handler.do_POST()
 
     assert message_handler.send_response.call_args.args == (200,)
-    stream_body = _sse_body(message_handler)
-    assert '"type": "status"' in stream_body
-    assert '"phase": "planning"' in stream_body
-    assert '"type": "assistant"' in stream_body
-    assert "I updated the draft with an initial task." in stream_body
-    assert "data: [DONE]" in stream_body
+    queued_body = _response_body(message_handler)
+    assert queued_body["status"] == "queued"
+    assert queued_body["plan_run_id"]
 
     get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
     get_handler.do_GET()
     loaded_body = _response_body(get_handler)
-    assert loaded_body["revision"] == 2
+    assert loaded_body["revision"] == 3
     assert loaded_body["draft_spec"]["name"] == "Calculator Draft"
     assert loaded_body["turns"][-1]["role"] == "assistant"
+    assert loaded_body["planning_summary"]["latest_plan_version_id"]
 
 
 def test_planner_adapter_default_is_live_boundary():
@@ -552,32 +674,13 @@ def test_planner_adapter_default_is_live_boundary():
 
 
 def test_plan_draft_messages_retries_persistence_on_revision_conflict(tmp_path, monkeypatch):
-    from agentforce.server import planner_adapter as planner_adapter_mod
     from agentforce.server.plan_drafts import PlanDraftStore
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
     store = PlanDraftStore()
     monkeypatch.setattr(plan_routes, "_store", lambda: store)
-
-    class FakePlanner(planner_adapter_mod.PlannerAdapter):
-        def plan_turn(self, draft: dict, user_message: str) -> planner_adapter_mod.PlannerTurnResult:
-            updated = dict(draft["draft_spec"])
-            updated["name"] = "Retried Calculator Draft"
-            return planner_adapter_mod.PlannerTurnResult(
-                events=[
-                    planner_adapter_mod.PlannerEvent(phase="planning", status="started"),
-                    planner_adapter_mod.PlannerEvent(
-                        phase="planning",
-                        status="completed",
-                        content="Planner merged after retry.",
-                    ),
-                ],
-                assistant_message="Planner merged after retry.",
-                draft_spec=updated,
-            )
-
-    monkeypatch.setattr(plan_routes.planner_adapter, "get_planner_adapter", lambda: FakePlanner())
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda _run_id: None)
 
     create_handler = _make_handler("/api/plan/drafts")
     _json_request(create_handler, {"prompt": "Build a calculator mission"})
@@ -607,19 +710,27 @@ def test_plan_draft_messages_retries_persistence_on_revision_conflict(tmp_path, 
 
     monkeypatch.setattr(store, "save", conflict_then_save)
 
-    message_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
-    _json_request(message_handler, {"content": "Refine the draft"})
-    message_handler.do_POST()
-
-    assert message_handler.send_response.call_args.args == (200,)
-    assert "Planner merged after retry." in _sse_body(message_handler)
+    patch_handler = _make_handler(f"/api/plan/drafts/{draft_id}/spec")
+    _json_request(
+        patch_handler,
+        {
+            "expected_revision": 1,
+            "draft_spec": {
+                "name": "Retried Calculator Draft",
+                "goal": "Refine the draft",
+                "definition_of_done": [],
+                "tasks": [],
+                "caps": {},
+            },
+        },
+    )
+    patch_handler.do_PATCH()
 
     persisted = store.load(draft_id)
     assert persisted is not None
-    assert persisted.revision == 3
+    assert persisted.revision == 2
     assert persisted.draft_spec["goal"] == "Concurrent edit"
-    assert persisted.draft_spec["name"] == "Retried Calculator Draft"
-    assert persisted.turns[-1]["content"] == "Planner merged after retry."
+    assert persisted.draft_spec["name"] == "Build A Calculator Mission"
 
 
 def test_plan_draft_spec_patch_rejects_stale_revision(tmp_path, monkeypatch):
@@ -742,6 +853,7 @@ def test_planner_readjust_trajectory_seeds_new_draft_from_mission_spec(tmp_path,
 
 def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monkeypatch):
     from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server import planning_runtime
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
@@ -752,7 +864,7 @@ def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monk
 
     class FakePlanner(planner_adapter_mod.PlannerAdapter):
         def plan_turn(self, draft: dict, user_message: str) -> planner_adapter_mod.PlannerTurnResult:
-            if not draft["turns"]:
+            if "second task" not in user_message.lower():
                 draft_spec = {
                     "name": "Rust Calculator Draft",
                     "goal": "Draft a Rust CLI calculator mission",
@@ -862,11 +974,20 @@ def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monk
                 draft_spec=draft_spec,
             )
 
-    monkeypatch.setattr(plan_routes.planner_adapter, "get_planner_adapter", lambda: FakePlanner())
+    monkeypatch.setattr(planner_adapter_mod, "get_planner_adapter", lambda: FakePlanner())
+    monkeypatch.setattr(
+        planning_runtime,
+        "_invoke_profile",
+        lambda *_args, **_kwargs: (
+            json.dumps({"summary": "Critic complete", "issues": [], "suggestions": []}),
+            planning_runtime.TokenEvent(tokens_in=9, tokens_out=5, cost_usd=0.0),
+        ),
+    )
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: planning_runtime.run_plan_run(run_id))
     monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *_args, **_kwargs: None)
 
     create_handler = _make_handler("/api/plan/drafts")
-    _json_request(create_handler, {"prompt": "Draft a Rust CLI calculator mission"})
+    _json_request(create_handler, {"prompt": "Draft a Rust CLI calculator mission", "auto_start": False})
     create_handler.do_POST()
     draft_id = _response_body(create_handler)["id"]
 
@@ -884,17 +1005,16 @@ def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monk
     get_handler.do_GET()
     revised_draft = _response_body(get_handler)
 
-    assert revised_draft["revision"] == 3
+    assert revised_draft["revision"] == 5
     assert len(revised_draft["draft_spec"]["tasks"]) >= 2
     assert all(task["acceptance_criteria"] for task in revised_draft["draft_spec"]["tasks"])
 
-    launch_handler = _make_handler("/api/missions")
-    _json_request(launch_handler, {"yaml": yaml.safe_dump(revised_draft["draft_spec"], sort_keys=False)})
+    launch_handler = _make_handler(f"/api/plan/drafts/{draft_id}/start")
     launch_handler.do_POST()
 
     assert launch_handler.send_response.call_args.args == (200,)
     launch_body = _response_body(launch_handler)
-    mission_id = launch_body["id"]
+    mission_id = launch_body["mission_id"]
     state_path = state_dir / f"{mission_id}.json"
     assert state_path.exists()
 
@@ -915,6 +1035,8 @@ def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monk
     assert mission_dict["execution"]["tasks"]["01"]["worker"]["model"] == "rust-calculator-worker-v2"
     assert mission_dict["execution"]["tasks"]["02"]["reviewer"]["model"] == "rust-calculator-reviewer-v2"
     assert mission_dict["execution"]["task_overrides"] == {"worker": 1, "reviewer": 1}
+    assert mission_dict["source_draft_id"] == draft_id
+    assert mission_dict["source_plan_version_id"] == revised_draft["validation"]["latest_plan_version_id"]
 
     readjust_handler = _make_handler(f"/api/mission/{mission_id}/readjust-trajectory")
     readjust_handler.do_POST()
@@ -1096,7 +1218,10 @@ def test_auto_draft_caps_medium_workspace(tmp_path, monkeypatch):
 
 def test_auto_draft_has_initial_assistant_turn(tmp_path, monkeypatch):
     """Draft should have at least one turn with role='assistant' after creation."""
+    from agentforce.server.routes import plan as plan_routes
+
     _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda _run_id: None)
 
     create_handler = _make_handler("/api/plan/drafts")
     _json_request(create_handler, {"prompt": "Build something"})

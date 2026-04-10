@@ -150,6 +150,9 @@ class MissionState:
     worker_model: str = ""   # model ID passed to the agent
     daemon_pid: Optional[int] = None
     daemon_started_at: Optional[str] = None
+    source_plan_version_id: Optional[str] = None
+    source_plan_run_id: Optional[str] = None
+    source_draft_id: Optional[str] = None
 
     @property
     def caps(self) -> Caps:
@@ -337,6 +340,9 @@ class MissionState:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "cost_usd": self.cost_usd,
+            "source_plan_version_id": self.source_plan_version_id,
+            "source_plan_run_id": self.source_plan_run_id,
+            "source_draft_id": self.source_draft_id,
         }
 
     def to_summary_dict(self) -> dict:
@@ -367,6 +373,9 @@ class MissionState:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "cost_usd": self.cost_usd,
+            "source_plan_version_id": self.source_plan_version_id,
+            "source_plan_run_id": self.source_plan_run_id,
+            "source_draft_id": self.source_draft_id,
         }
 
     @classmethod
@@ -391,6 +400,9 @@ class MissionState:
             working_dir=d.get("working_dir", ""),
             worker_agent=d.get("worker_agent", ""),
             worker_model=d.get("worker_model", ""),
+            source_plan_version_id=d.get("source_plan_version_id"),
+            source_plan_run_id=d.get("source_plan_run_id"),
+            source_draft_id=d.get("source_draft_id"),
         )
 
     def save(self, path: Path | str):

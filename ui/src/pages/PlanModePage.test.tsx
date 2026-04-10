@@ -3,35 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MissionDraft, Model } from '../lib/types';
-import { serializeMissionPlanYaml } from '../lib/planYaml';
 import PlanModePage from './PlanModePage';
-
-function createStreamingResponse(): {
-  response: Response;
-  push: (chunk: string) => void;
-  close: () => void;
-} {
-  const encoder = new TextEncoder();
-  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
-  const response = new Response(
-    new ReadableStream<Uint8Array>({
-      start(streamController) {
-        controller = streamController;
-      },
-    }),
-    { headers: { 'Content-Type': 'text/event-stream' } },
-  );
-
-  return {
-    response,
-    push(chunk: string) {
-      controller?.enqueue(encoder.encode(chunk));
-    },
-    close() {
-      controller?.close();
-    },
-  };
-}
 
 function flushPromises(): Promise<void> {
   return act(async () => {
@@ -189,7 +161,7 @@ describe('PlanModePage', () => {
         });
       }
       if (url === '/api/plan/drafts') {
-        return new Response(JSON.stringify({ id: 'draft-123', revision: 1 }), {
+        return new Response(JSON.stringify({ id: 'draft-123', revision: 1, plan_run_id: 'run-1' }), {
           headers: { 'Content-Type': 'application/json' },
         });
       }
@@ -241,22 +213,10 @@ describe('PlanModePage', () => {
     expect(container.textContent).toContain('Flight Director');
     expect(container.textContent).toContain('Engineering Controls');
     expect(container.textContent).toContain('Calculator Mission');
-    expect(container.textContent).toContain('Draft the planner flow');
-    expect(
-      (container.querySelector('textarea[aria-label="Mission YAML export"]') as HTMLTextAreaElement | null)?.value,
-    ).toEqual(expect.stringContaining('name: "Calculator Mission"'));
-    expect(
-      (container.querySelector('textarea[aria-label="Mission YAML export"]') as HTMLTextAreaElement | null)?.value,
-    ).toEqual(expect.stringContaining('goal: "Build a calculator cockpit"'));
-    expect(
-      (container.querySelector('textarea[aria-label="Mission YAML export"]') as HTMLTextAreaElement | null)?.value,
-    ).toEqual(expect.stringContaining('definition_of_done:'));
-    expect(
-      (container.querySelector('textarea[aria-label="Mission YAML export"]') as HTMLTextAreaElement | null)?.value,
-    ).toEqual(expect.stringContaining('tasks:'));
-    expect(
-      (container.querySelector('textarea[aria-label="Mission YAML export"]') as HTMLTextAreaElement | null)?.value,
-    ).toContain('execution_defaults:');
+    expect(container.textContent).toContain('Build the planning route');
+    expect(container.textContent).toContain('Planning Stack');
+    expect(container.textContent).toContain('Planning History');
+    expect(container.querySelector('textarea[aria-label="Mission YAML export"]')).toBeNull();
 
     act(() => {
       root.unmount();
@@ -300,7 +260,6 @@ describe('PlanModePage', () => {
   });
 
   it('applies a follow-up planner turn and refreshes both transcript and draft summary', async () => {
-    const stream = createStreamingResponse();
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === '/api/models') {
@@ -329,7 +288,13 @@ describe('PlanModePage', () => {
       }
       if (url === '/api/plan/drafts/draft-123/messages') {
         expect(init).toEqual(expect.objectContaining({ method: 'POST' }));
-        return stream.response;
+        return new Response(JSON.stringify({
+          draft_id: 'draft-123',
+          plan_run_id: 'run-2',
+          status: 'queued',
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
       }
 
       throw new Error(`unexpected fetch ${url}`);
@@ -351,16 +316,113 @@ describe('PlanModePage', () => {
     await act(async () => {
       sendButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-
-    await act(async () => {
-      stream.push('data: {"type":"status","phase":"planning","status":"started"}\n\n');
-      stream.push('data: {"type":"assistant","phase":"planning","status":"completed","content":"I tightened the mission summary and task wording."}\n\n');
-      stream.push('data: [DONE]\n\n');
-    });
     await flushPromises();
 
     expect(container.textContent).toContain('I tightened the mission summary and task wording.');
     expect(container.textContent).toContain('Calculator Mission Refined');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('renders preflight multiple-choice questions and starts planning after submission', async () => {
+    let draftState = makeDraft({
+      preflight_status: 'pending',
+      preflight_questions: [
+        {
+          id: 'scope_mode',
+          prompt: 'Should the first release focus on project selection or project data model changes?',
+          options: ['Selection only', 'Both together'],
+          reason: 'This changes the dependency graph.',
+          allow_custom: true,
+        },
+      ],
+      preflight_answers: {},
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(draftState), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123/preflight') {
+        expect(init).toEqual(expect.objectContaining({ method: 'POST' }));
+        expect(String(init?.body)).toContain('Selection only');
+        draftState = makeDraft({
+          revision: 4,
+          preflight_status: 'answered',
+          preflight_questions: [],
+          preflight_answers: {
+            scope_mode: {
+              selected_option: 'Selection only',
+            },
+          },
+          plan_runs: [
+            {
+              id: 'run-1',
+              draft_id: 'draft-123',
+              base_revision: 3,
+              head_revision_seen: 3,
+              status: 'queued',
+              trigger_kind: 'auto',
+              trigger_message: 'Preflight clarifications',
+              created_at: '2026-04-10T00:00:00Z',
+              steps: [],
+            },
+          ],
+        });
+        return new Response(JSON.stringify({
+          draft_id: 'draft-123',
+          revision: 4,
+          plan_run_id: 'run-1',
+          status: 'queued',
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    expect(container.textContent).toContain('Preflight Questions');
+    expect(container.textContent).toContain('Should the first release focus on project selection or project data model changes?');
+
+    const option = container.querySelector('input[type="radio"]') as HTMLInputElement | null;
+    expect(option).toBeTruthy();
+
+    await act(async () => {
+      option?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const startButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Start Planning'));
+    expect(startButton).toBeTruthy();
+
+    await act(async () => {
+      startButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/plan/drafts/draft-123/preflight',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('Selection only'),
+      }),
+    );
+    expect(container.textContent).not.toContain('Preflight Questions');
+    expect(container.textContent).toContain('Run queued');
 
     act(() => {
       root.unmount();
@@ -414,138 +476,6 @@ describe('PlanModePage', () => {
     await flushPromises();
 
     expect(container.textContent?.toLowerCase()).toContain('conflict');
-
-    act(() => {
-      root.unmount();
-    });
-  });
-
-  it('shows parse errors for invalid yaml imports and keeps the current draft spec unchanged', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url === '/api/models') {
-        return new Response(JSON.stringify(models), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      if (url === '/api/plan/drafts/draft-123') {
-        return new Response(JSON.stringify(makeDraft()), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      if (url === '/api/plan/drafts/draft-123/import-yaml') {
-        expect(init).toEqual(expect.objectContaining({ method: 'POST' }));
-        return new Response(JSON.stringify({
-          error: 'invalid mission yaml: parse error on line 1',
-        }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-
-      throw new Error(`unexpected fetch ${url}`);
-    });
-
-    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
-    await flushPromises();
-
-    const importField = container.querySelector('textarea[aria-label="Import YAML"]') as HTMLTextAreaElement | null;
-    expect(importField).toBeTruthy();
-
-    await act(async () => {
-      importField!.value = 'name: Broken\n  - nope';
-      importField!.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-
-    const applyButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Apply YAML'));
-    expect(applyButton).toBeTruthy();
-
-    await act(async () => {
-      applyButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await flushPromises();
-
-    expect(container.textContent?.toLowerCase()).toContain('parse error');
-    expect((container.querySelector('article input') as HTMLInputElement | null)?.value).toBe(
-      'Draft the planner flow',
-    );
-
-    act(() => {
-      root.unmount();
-    });
-  });
-
-  it('imports valid yaml and refreshes the rendered task cards', async () => {
-    const importedDraft = makeDraft({
-      draft_spec: {
-        ...makeDraft().draft_spec,
-        name: 'Imported Mission',
-        tasks: [
-          {
-            ...makeDraft().draft_spec.tasks[0],
-            title: 'Imported task title',
-          },
-        ],
-      },
-    });
-
-    let currentDraft = makeDraft();
-    const importedYaml = serializeMissionPlanYaml(importedDraft.draft_spec);
-
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url === '/api/models') {
-        return new Response(JSON.stringify(models), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      if (url === '/api/plan/drafts/draft-123') {
-        return new Response(JSON.stringify(currentDraft), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      if (url === '/api/plan/drafts/draft-123/import-yaml') {
-        expect(JSON.parse(String(init?.body)).yaml).toBe(importedYaml);
-        currentDraft = importedDraft;
-        return new Response(JSON.stringify({
-          id: 'draft-123',
-          revision: 4,
-          draft_spec: importedDraft.draft_spec,
-        }), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-
-      throw new Error(`unexpected fetch ${url}`);
-    });
-
-    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
-    await flushPromises();
-
-    const importField = container.querySelector('textarea[aria-label="Import YAML"]') as HTMLTextAreaElement | null;
-    expect(importField).toBeTruthy();
-
-    await act(async () => {
-      importField!.value = importedYaml;
-      importField!.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-
-    const applyButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Apply YAML'));
-    expect(applyButton).toBeTruthy();
-
-    await act(async () => {
-      applyButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await flushPromises();
-
-    expect((container.querySelector('input[aria-label="Mission name"]') as HTMLInputElement | null)?.value).toBe(
-      'Imported Mission',
-    );
-    expect((container.querySelector('article input') as HTMLInputElement | null)?.value).toBe(
-      'Imported task title',
-    );
 
     act(() => {
       root.unmount();

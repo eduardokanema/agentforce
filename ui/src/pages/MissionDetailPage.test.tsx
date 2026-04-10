@@ -93,6 +93,19 @@ const mockMission: MissionState = {
   working_dir: '/tmp/work',
   worker_agent: 'opencode',
   worker_model: 'gpt-5',
+  source_plan_version_id: 'version-123',
+  source_plan_run_id: 'run-123',
+  source_draft_id: 'draft-123',
+  planning: {
+    draft_id: 'draft-123',
+    source_run_id: 'run-123',
+    source_version_id: 'version-123',
+    planning_cost_usd: 0.12,
+    planning_tokens_in: 321,
+    planning_tokens_out: 123,
+    changelog: ['Technical adversary flagged 1 issue.', 'Practical adversary flagged 2 issues.'],
+    created_at: '2024-01-01T00:00:00Z',
+  },
   execution: {
     defaults: {
       worker: { agent: 'codex', model: 'gpt-5', thinking: 'medium' },
@@ -129,6 +142,9 @@ describe('MissionDetailPage', () => {
     expect(markup).toContain('↓ 100 in');
     expect(markup).toContain('↑ 23 out');
     expect(markup).toContain('$0.5000');
+    expect(markup).toContain('Preflight Cost');
+    expect(markup).toContain('$0.1200');
+    expect(markup).toContain('Return to planning history');
     expect(markup).toContain('Workspace path');
     expect(markup).toContain('worker codex · gpt-5 · medium');
     expect(markup).toContain('reviewer codex · gpt-5-mini · low');

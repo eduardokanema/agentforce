@@ -28,6 +28,13 @@ export interface ExecutionProfile {
   thinking?: string | null;
 }
 
+export interface PlanningProfileSet {
+  planner?: ExecutionProfile | null;
+  critic_technical?: ExecutionProfile | null;
+  critic_practical?: ExecutionProfile | null;
+  resolver?: ExecutionProfile | null;
+}
+
 export interface ExecutionConfig {
   worker?: ExecutionProfile | null;
   reviewer?: ExecutionProfile | null;
@@ -95,6 +102,91 @@ export interface MissionDraft {
   workspace_paths: string[];
   companion_profile: Record<string, unknown>;
   draft_notes: Record<string, unknown>[];
+  plan_runs?: PlanRun[];
+  plan_versions?: PlanVersion[];
+  planning_summary?: PlanningSummary | null;
+  preflight_status?: string;
+  preflight_questions?: PreflightQuestion[];
+  preflight_answers?: Record<string, PreflightAnswer>;
+}
+
+export interface PlanStep {
+  name: string;
+  status: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  message?: string;
+  summary?: string;
+  tokens_in?: number;
+  tokens_out?: number;
+  cost_usd?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PlanRun {
+  id: string;
+  draft_id: string;
+  base_revision: number;
+  head_revision_seen: number;
+  status: string;
+  trigger_kind: string;
+  trigger_message: string;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  stale?: boolean;
+  current_step?: string | null;
+  steps: PlanStep[];
+  result_version_id?: string | null;
+  promoted_version_id?: string | null;
+  launched_mission_id?: string | null;
+  error_message?: string;
+  changelog?: string[];
+  tokens_in?: number;
+  tokens_out?: number;
+  cost_usd?: number;
+}
+
+export interface PlanVersion {
+  id: string;
+  draft_id: string;
+  source_run_id: string;
+  revision_base: number;
+  created_at: string;
+  draft_spec_snapshot: MissionSpec;
+  changelog: string[];
+  validation: Record<string, unknown>;
+  launched_mission_id?: string | null;
+}
+
+export interface PlanningSummary {
+  latest_plan_version_id?: string;
+  changelog?: string[];
+  validation?: Record<string, unknown>;
+}
+
+export interface PreflightQuestion {
+  id: string;
+  prompt: string;
+  options: string[];
+  reason?: string;
+  allow_custom?: boolean;
+}
+
+export interface PreflightAnswer {
+  selected_option?: string;
+  custom_answer?: string;
+}
+
+export interface MissionPlanningSummary {
+  draft_id: string;
+  source_run_id: string;
+  source_version_id: string;
+  planning_cost_usd: number;
+  planning_tokens_in: number;
+  planning_tokens_out: number;
+  changelog: string[];
+  created_at: string;
 }
 
 export interface TaskState {
@@ -147,6 +239,10 @@ export interface MissionState {
   worker_model?: string;
   daemon_pid?: number | null;
   daemon_started_at?: string | null;
+  source_plan_version_id?: string | null;
+  source_plan_run_id?: string | null;
+  source_draft_id?: string | null;
+  planning?: MissionPlanningSummary | null;
 }
 
 export interface TelemetryMissionByCost {

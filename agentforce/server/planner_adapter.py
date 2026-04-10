@@ -145,11 +145,29 @@ def _build_user_prompt(draft: dict[str, Any], user_message: str) -> str:
     workspace_paths = list(draft.get("workspace_paths") or [])
     workspace_info = ", ".join(workspace_paths) if workspace_paths else "not specified"
     current_spec = json.dumps(draft.get("draft_spec") or {}, indent=2, sort_keys=True)
+    validation = dict(draft.get("validation") or {})
+    preflight_answers = dict(validation.get("preflight_answers") or {})
+    preflight_questions = list(validation.get("preflight_questions") or [])
+    clarification_lines: list[str] = []
+    for question in preflight_questions:
+        if not isinstance(question, dict):
+            continue
+        question_id = str(question.get("id") or "")
+        answer = preflight_answers.get(question_id)
+        if not isinstance(answer, dict):
+            continue
+        selected = str(answer.get("selected_option") or "").strip()
+        custom = str(answer.get("custom_answer") or "").strip()
+        if selected or custom:
+            rendered_answer = custom or selected
+            clarification_lines.append(f"- {question.get('prompt')}: {rendered_answer}")
+    clarifications = "\n".join(clarification_lines) if clarification_lines else "No preflight clarifications provided."
     return (
         "Update the mission planning draft.\n"
         "Return valid JSON only with keys 'assistant_message' and 'draft_spec'.\n"
         "'draft_spec' must be a complete AgentForce MissionSpec-shaped object.\n\n"
         f"Workspaces: {workspace_info}\n\n"
+        f"Preflight clarifications:\n{clarifications}\n\n"
         f"Current draft_spec JSON:\n{current_spec}\n\n"
         f"User message:\n{user_message}\n"
     )
