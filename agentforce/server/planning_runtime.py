@@ -300,16 +300,11 @@ def _parse_critic_output(text: str) -> dict[str, Any]:
         except (json.JSONDecodeError, IndexError):
             pass
 
-    # Try backward scanning for JSON object if still not found
     if payload is None:
-        try:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end > start:
-                candidate = text[start : end + 1]
-                payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
+        payload = _extract_json_object_candidate(
+            text,
+            required_keys=("summary", "issues", "suggestions"),
+        )
 
     if not isinstance(payload, dict):
         return {"summary": text, "issues": [], "suggestions": []}
@@ -359,6 +354,19 @@ def _resolve_findings(draft: MissionDraftV1, spec_dict: dict[str, Any], technica
             lines = text.splitlines()
             text = "\n".join(line for line in lines if not line.startswith("```")).strip()
         payload = json.loads(text)
+        if not isinstance(payload, dict):
+            payload = _extract_json_object_candidate(
+                text,
+                required_keys=("assistant_message", "draft_spec"),
+            )
+    except Exception:
+        payload = _extract_json_object_candidate(
+            output.strip(),
+            required_keys=("assistant_message", "draft_spec"),
+        )
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("resolver response was not valid JSON")
         resolved_spec = payload.get("draft_spec")
         message = payload.get("assistant_message") or "Resolved critic findings and updated the plan."
         if not isinstance(resolved_spec, dict):
@@ -367,6 +375,30 @@ def _resolve_findings(draft: MissionDraftV1, spec_dict: dict[str, Any], technica
     except Exception as exc:
         # Fallback to original spec if resolution fails
         return spec_dict, f"Resolution failed: {str(exc)}. Using original plan.", usage
+
+
+def _extract_json_object_candidate(text: str, *, required_keys: tuple[str, ...]) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            candidate, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
+
+    for candidate in reversed(candidates):
+        if all(key in candidate for key in required_keys):
+            return candidate
+
+    for candidate in reversed(candidates):
+        return candidate
+
+    return None
 
 
 def run_plan_run(run_id: str) -> None:

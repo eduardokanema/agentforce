@@ -240,6 +240,34 @@ def test_launch_defaults_fill_explicit_worker_runtime_fallback_fields(tmp_path):
     assert worker.thinking == "high"
 
 
+def test_runtime_fallback_defaults_match_detected_agent(tmp_path, monkeypatch):
+    spec = MissionSpec(
+        name="Detected fallback execution",
+        goal="Use a provider-compatible fallback",
+        definition_of_done=["All tasks pass"],
+        tasks=[
+            TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["done"]),
+        ],
+    )
+    state_dir = tmp_path / "state"
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("agentforce.core.engine.detect_runtime_agent", lambda: "gemini")
+
+    engine = MissionEngine(
+        spec=spec,
+        state_dir=state_dir,
+        memory=Memory(memory_dir),
+    )
+
+    assert engine.state.execution_defaults.worker is not None
+    assert engine.state.execution_defaults.worker.agent == "gemini"
+    assert engine.state.execution_defaults.worker.model == "auto"
+    assert engine.state.execution_defaults.reviewer is not None
+    assert engine.state.execution_defaults.reviewer.agent == "gemini"
+    assert engine.state.execution_defaults.reviewer.model == "auto"
+
+
 def test_change_default_models_pins_started_tasks_and_updates_pending_defaults(tmp_path):
     spec = MissionSpec(
         name="Default model update",

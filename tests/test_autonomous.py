@@ -211,6 +211,126 @@ def test_autonomous_prefers_resolved_delegation_model_over_cli_default(tmp_path,
     assert captured["variant"] == "high"
 
 
+def test_autonomous_detected_agent_uses_provider_compatible_fallback_model(tmp_path, monkeypatch):
+    """Auto-detected agents must not inherit an incompatible model from a different provider."""
+    from agentforce.autonomous import run_autonomous
+    from agentforce.core.spec import MissionSpec, TaskSpec
+    from agentforce.core.state import MissionState, TaskState
+
+    mission_id = "mission-auto-agent-fallback"
+    state_root = tmp_path / ".agentforce" / "state"
+    memory_root = tmp_path / ".agentforce" / "memory"
+    state_root.mkdir(parents=True, exist_ok=True)
+    memory_root.mkdir(parents=True, exist_ok=True)
+
+    spec = MissionSpec(
+        name="Autonomous fallback",
+        goal="Choose a compatible runtime model",
+        definition_of_done=["done"],
+        tasks=[TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["done"])],
+    )
+    state = MissionState(mission_id=mission_id, spec=spec, working_dir=str(tmp_path))
+    state.task_states["01"] = TaskState(task_id="01")
+    state_file = state_root / f"{mission_id}.json"
+    state.save(state_file)
+
+    monkeypatch.setattr("agentforce.autonomous.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._ensure_pkg", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._detect_agent", lambda: "gemini")
+
+    captured = {}
+
+    def fake_run_agent(prompt, workdir, timeout=300, agent="auto", model=None, stream_path=None, variant=None, session_id=None):
+        captured["agent"] = agent
+        captured["model"] = model
+        captured["variant"] = variant
+        return True, "worker ok", "", "session-1", None
+
+    monkeypatch.setattr("agentforce.autonomous._run_agent", fake_run_agent)
+
+    def fake_apply_worker_result(self, task_id, success, output="", error=""):
+        self.state.task_states[task_id].status = "review_approved"
+
+    monkeypatch.setattr("agentforce.core.engine.MissionEngine.apply_worker_result", fake_apply_worker_result)
+
+    run_autonomous(
+        mission_id,
+        workdir=str(tmp_path),
+        agent="auto",
+        model=None,
+        variant=None,
+        max_ticks=3,
+    )
+
+    assert captured["agent"] == "gemini"
+    assert captured["model"] == "auto"
+    assert captured["variant"] == "high"
+
+
+def test_autonomous_normalizes_persisted_incompatible_defaults_before_retry(tmp_path, monkeypatch):
+    """Persisted invalid agent/model pairs must be repaired before redispatching a retried mission."""
+    from agentforce.autonomous import run_autonomous
+    from agentforce.core.spec import ExecutionConfig, ExecutionProfile, MissionSpec, TaskSpec
+    from agentforce.core.state import MissionState, TaskState
+
+    mission_id = "mission-persisted-invalid-default"
+    state_root = tmp_path / ".agentforce" / "state"
+    memory_root = tmp_path / ".agentforce" / "memory"
+    state_root.mkdir(parents=True, exist_ok=True)
+    memory_root.mkdir(parents=True, exist_ok=True)
+
+    spec = MissionSpec(
+        name="Autonomous retry fallback",
+        goal="Repair persisted execution defaults",
+        definition_of_done=["done"],
+        tasks=[TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["done"])],
+    )
+    state = MissionState(
+        mission_id=mission_id,
+        spec=spec,
+        working_dir=str(tmp_path),
+        execution_defaults=ExecutionConfig(
+            worker=ExecutionProfile(agent="gemini", model="opencode/nemotron-3-super-free", thinking="high"),
+            reviewer=ExecutionProfile(agent="gemini", model="opencode/nemotron-3-super-free", thinking="high"),
+        ),
+    )
+    state.task_states["01"] = TaskState(task_id="01")
+    state_file = state_root / f"{mission_id}.json"
+    state.save(state_file)
+
+    monkeypatch.setattr("agentforce.autonomous.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._ensure_pkg", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._detect_agent", lambda: "gemini")
+
+    captured = {}
+
+    def fake_run_agent(prompt, workdir, timeout=300, agent="auto", model=None, stream_path=None, variant=None, session_id=None):
+        captured["agent"] = agent
+        captured["model"] = model
+        captured["variant"] = variant
+        return True, "worker ok", "", "session-1", None
+
+    monkeypatch.setattr("agentforce.autonomous._run_agent", fake_run_agent)
+
+    def fake_apply_worker_result(self, task_id, success, output="", error=""):
+        self.state.task_states[task_id].status = "review_approved"
+
+    monkeypatch.setattr("agentforce.core.engine.MissionEngine.apply_worker_result", fake_apply_worker_result)
+
+    run_autonomous(
+        mission_id,
+        workdir=str(tmp_path),
+        agent="auto",
+        model=None,
+        variant=None,
+        max_ticks=3,
+    )
+
+    assert captured["agent"] == "gemini"
+    assert captured["model"] == "auto"
+    assert captured["variant"] == "high"
+
+
 # ---------------------------------------------------------------------------
 # Hard-block tests (security / TDD per-criterion blocking)
 # ---------------------------------------------------------------------------

@@ -25,6 +25,8 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agentforce.core.engine import detect_runtime_agent, normalize_runtime_profile
+
 def _agentforce_home() -> Path:
     return Path.home() / ".agentforce"
 
@@ -93,16 +95,7 @@ def _ensure_pkg():
 
 def _detect_agent() -> str:
     """Auto-detect which agent to use: gemini > claude > opencode."""
-    from agentforce.connectors import gemini as _gm
-    from agentforce.connectors import claude as _cl
-    from agentforce.connectors import opencode as _oc
-    if _gm.available():
-        return "gemini"
-    if _cl.available():
-        return "claude"
-    if _oc.available():
-        return "opencode"
-    raise SystemExit("No agent CLI found. Install 'gemini', 'claude', or 'opencode'.")
+    return detect_runtime_agent()
 
 
 def _run_agent(
@@ -311,9 +304,9 @@ def run_autonomous(
         )
         if resolved_agent is None:
             resolved_agent = _detect_agent()
-        return ExecutionProfile(
+        return normalize_runtime_profile(
             agent=resolved_agent,
-            model=model or (persisted.model if persisted and persisted.model else _DEFAULT_MODEL),
+            model=model or (persisted.model if persisted and persisted.model else None),
             thinking=variant or (persisted.thinking if persisted and persisted.thinking else _DEFAULT_VARIANT),
         )
 
@@ -321,18 +314,8 @@ def run_autonomous(
     reviewer_runtime = _resolve_role_default("reviewer")
 
     engine.state.execution_defaults = ExecutionConfig(
-        worker=engine.spec.resolve_execution_profile(
-            TaskSpec(id="__defaults__", title="", description=""),
-            "worker",
-            mission_defaults=engine.state.execution_defaults,
-            runtime_fallback=worker_runtime,
-        ),
-        reviewer=engine.spec.resolve_execution_profile(
-            TaskSpec(id="__defaults__", title="", description=""),
-            "reviewer",
-            mission_defaults=engine.state.execution_defaults,
-            runtime_fallback=reviewer_runtime,
-        ),
+        worker=worker_runtime,
+        reviewer=reviewer_runtime,
     )
     engine._sync_execution_telemetry()
     engine.state.caps_hit = {}

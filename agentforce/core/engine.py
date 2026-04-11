@@ -31,6 +31,61 @@ BACKOFF_MAX_SECONDS = 60
 DEFAULT_RUNTIME_AGENT = "opencode"
 DEFAULT_RUNTIME_MODEL = "opencode/nemotron-3-super-free"
 DEFAULT_RUNTIME_THINKING = "high"
+_RUNTIME_MODEL_FALLBACKS = {
+    "opencode": DEFAULT_RUNTIME_MODEL,
+    "claude": "claude-sonnet-4-6",
+    "codex": "gpt-5.4",
+    "gemini": "auto",
+}
+
+
+def detect_runtime_agent() -> str:
+    """Choose the first available local runtime provider."""
+    from agentforce.connectors import claude as _cl
+    from agentforce.connectors import gemini as _gm
+    from agentforce.connectors import opencode as _oc
+
+    if _gm.available():
+        return "gemini"
+    if _cl.available():
+        return "claude"
+    if _oc.available():
+        return "opencode"
+    return DEFAULT_RUNTIME_AGENT
+
+
+def _model_matches_agent(agent: str, model: str | None) -> bool:
+    if not model:
+        return False
+    if agent == "gemini":
+        return model == "auto" or model in {"pro", "flash", "flash-lite"} or model.startswith("gemini-")
+    if agent == "claude":
+        return model.startswith("claude-")
+    if agent == "codex":
+        return not (
+            model.startswith("claude-")
+            or model.startswith("gemini-")
+            or model in {"auto", "pro", "flash", "flash-lite"}
+            or model.startswith("opencode/")
+        )
+    return True
+
+
+def normalize_runtime_profile(
+    *,
+    agent: str | None = None,
+    model: str | None = None,
+    thinking: str | None = None,
+) -> ExecutionProfile:
+    resolved_agent = agent or detect_runtime_agent()
+    resolved_model = model.strip() if isinstance(model, str) and model.strip() else None
+    if not _model_matches_agent(resolved_agent, resolved_model):
+        resolved_model = _RUNTIME_MODEL_FALLBACKS.get(resolved_agent, DEFAULT_RUNTIME_MODEL)
+    return ExecutionProfile(
+        agent=resolved_agent,
+        model=resolved_model,
+        thinking=thinking or DEFAULT_RUNTIME_THINKING,
+    )
 
 
 # ── Delegation descriptors ──
@@ -269,11 +324,7 @@ class MissionEngine:
         return ExecutionProfile(model=model)
 
     def _runtime_fallback_profile(self) -> ExecutionProfile:
-        return ExecutionProfile(
-            agent=DEFAULT_RUNTIME_AGENT,
-            model=DEFAULT_RUNTIME_MODEL,
-            thinking=DEFAULT_RUNTIME_THINKING,
-        )
+        return normalize_runtime_profile()
 
     def _normalized_execution_defaults(self) -> ExecutionConfig:
         return ExecutionConfig(

@@ -1703,6 +1703,63 @@ I’m checking the mission-spec shape and the repo’s planner guidance first, t
     assert draft_spec["name"] == "Mission"
 
 
+def test_parse_critic_output_extracts_final_json_from_mixed_codex_output():
+    from agentforce.server import planning_runtime
+
+    response_text = """
+I’m checking the repository rules first.
+▶ /bin/zsh -lc "pwd"
+✓ /bin/zsh -lc "pwd"
+{"summary":"Critic summary","issues":[{"severity":"high","title":"Issue","fix":"Fix it"}],"suggestions":["Do the thing"]}
+""".strip()
+
+    parsed = planning_runtime._parse_critic_output(response_text)
+
+    assert parsed["summary"] == "Critic summary"
+    assert parsed["issues"][0]["title"] == "Issue"
+    assert parsed["suggestions"] == ["Do the thing"]
+
+
+def test_resolve_findings_extracts_final_json_from_mixed_codex_output(monkeypatch):
+    from agentforce.server import planning_runtime
+    from agentforce.server.plan_drafts import MissionDraftV1
+    from agentforce.core.token_event import TokenEvent
+
+    draft = MissionDraftV1.from_dict({
+        "id": "draft-1",
+        "revision": 1,
+        "status": "draft",
+        "draft_spec": {"name": "Draft", "goal": "Goal", "definition_of_done": [], "tasks": [], "caps": {}},
+        "turns": [],
+        "validation": {},
+        "activity_log": [],
+        "approved_models": [],
+        "workspace_paths": [],
+        "companion_profile": {},
+        "draft_notes": [],
+    })
+
+    monkeypatch.setattr(
+        planning_runtime,
+        "_invoke_profile",
+        lambda *_args, **_kwargs: (
+            'Checking constraints first\n{"assistant_message":"Resolved cleanly.","draft_spec":{"name":"Resolved","goal":"Goal","definition_of_done":[],"tasks":[],"caps":{}}}',
+            TokenEvent(1, 2, 0.0),
+        ),
+    )
+
+    resolved_spec, message, usage = planning_runtime._resolve_findings(
+        draft,
+        {"name": "Draft", "goal": "Goal", "definition_of_done": [], "tasks": [], "caps": {}},
+        {"issues": [{"severity": "high"}]},
+        {"issues": []},
+    )
+
+    assert resolved_spec["name"] == "Resolved"
+    assert message == "Resolved cleanly."
+    assert usage.tokens_in == 1
+
+
 def test_plan_start_draft_status_finalized(tmp_path, monkeypatch):
     """Draft status must be 'finalized' after a successful start."""
     draft_id, _, handler, _ = _make_started_draft(tmp_path, monkeypatch)

@@ -252,6 +252,19 @@ def test_criteria_validation_empty_criteria_list_is_error():
     assert issues.criteria_errors[0].task_id == "01"
 
 
+def test_tiny_validation_mission_round_trip_is_launch_valid():
+    artifact_path = Path("artifacts/tiny-validation-mission.json")
+    assert artifact_path.exists()
+
+    data = json.loads(artifact_path.read_text())
+    assert data["tasks"][0]["id"] == "01"
+    spec = MissionSpec.from_dict(data)
+    round_tripped = MissionSpec.from_dict(spec.to_dict())
+
+    assert len(round_tripped.tasks) == 1
+    assert round_tripped.validate(stage="launch") == []
+
+
 def test_criteria_validation_all_failures_reported_in_one_pass():
     """All vague criteria across all tasks are collected before returning."""
     spec = _mission_with_tasks([
