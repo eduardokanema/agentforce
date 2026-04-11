@@ -307,6 +307,11 @@ SCORE ANCHORS:
   9 = Excellent: principles followed with notable care (e.g. extracted utility)
   10 = Perfect: exemplary adherence; could be used as a reference
 
+SCOPE GUARDRAILS:
+  - Judge ONLY this task's description, acceptance criteria, and listed output artifacts.
+  - Do NOT reject this task for artifacts, tests, docs, or verification steps assigned to later dependent tasks.
+  - Treat the mission Definition of Done as background context for contradictions, not as a requirement that every downstream deliverable already exists in this task.
+
 ARTIFACT VERIFICATION:
 {artifact_lines}
   If any artifact is missing or empty: score Quality dimension < 7.

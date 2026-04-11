@@ -131,7 +131,7 @@ describe('PlanModePage', () => {
     vi.unstubAllGlobals();
   });
 
-  it('loads models, creates a planning draft, and renders transcript plus engineering panels', async () => {
+  it('loads models, creates a planning draft, and keeps secondary surfaces hidden by default', async () => {
     const createdDraft = makeDraft();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -212,12 +212,15 @@ describe('PlanModePage', () => {
         body: expect.stringContaining('Build a calculator mission'),
       }),
     );
-    expect(container.textContent).toContain('Flight Director');
-    expect(container.textContent).toContain('Engineering Controls');
+    expect(container.textContent).toContain('Flight Director Cockpit');
     expect(container.textContent).toContain('Calculator Mission');
-    expect(container.textContent).toContain('Build the planning route');
-    expect(container.textContent).toContain('Planning Stack');
-    expect(container.textContent).toContain('Planning History');
+    expect(container.textContent).toContain('Edit Mission');
+    expect(container.textContent).toContain('Transcript');
+    expect(container.textContent).toContain('Logbook');
+    expect(container.textContent).not.toContain('Engineering Controls');
+    expect(container.textContent).not.toContain('Planning History');
+    expect(container.querySelector('#planner-follow-up')).toBeNull();
+    expect(container.querySelector('input[aria-label="Mission name"]')).toBeNull();
     expect(container.querySelector('textarea[aria-label="Mission YAML export"]')).toBeNull();
 
     act(() => {
@@ -305,7 +308,15 @@ describe('PlanModePage', () => {
     const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
     await flushPromises();
 
-    const followUp = container.querySelector('textarea') as HTMLTextAreaElement;
+    const transcriptButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Transcript'));
+    expect(transcriptButton).toBeTruthy();
+
+    await act(async () => {
+      transcriptButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const followUp = container.querySelector('textarea#planner-follow-up') as HTMLTextAreaElement;
     await act(async () => {
       followUp.value = 'Tighten the summary';
       followUp.dispatchEvent(new Event('input', { bubbles: true }));
@@ -460,6 +471,14 @@ describe('PlanModePage', () => {
     const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
     await flushPromises();
 
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Edit Mission'));
+    expect(editButton).toBeTruthy();
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
     const summaryName = container.querySelector('input[aria-label="Mission name"]') as HTMLInputElement | null;
     expect(summaryName).toBeTruthy();
 
@@ -548,11 +567,20 @@ describe('PlanModePage', () => {
     await flushPromises();
 
     const retryButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Retry run'));
+      button.textContent?.includes('Retry Latest Run'));
     expect(retryButton).toBeTruthy();
 
     await act(async () => {
       retryButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushPromises();
+
+    const logbookButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Logbook'));
+    expect(logbookButton).toBeTruthy();
+
+    await act(async () => {
+      logbookButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushPromises();
 
@@ -711,8 +739,24 @@ describe('PlanModePage', () => {
     const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
     await flushPromises();
 
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Edit Mission'));
+    expect(editButton).toBeTruthy();
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
     expect(container.textContent).toContain('Advisory Flight Checks');
     expect(container.textContent).not.toContain('Draft-only notes are present');
+
+    const transcriptButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Transcript'));
+    expect(transcriptButton).toBeTruthy();
+
+    await act(async () => {
+      transcriptButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
 
     const followUp = container.querySelector('textarea#planner-follow-up') as HTMLTextAreaElement | null;
     expect(followUp).toBeTruthy();
@@ -759,6 +803,14 @@ describe('PlanModePage', () => {
     const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
     await flushPromises();
 
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Edit Mission'));
+    expect(editButton).toBeTruthy();
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
     const acceptanceCriteriaField = container.querySelector(
       'textarea[aria-label="Task 01 acceptance criteria"]',
     ) as HTMLTextAreaElement | null;
@@ -785,6 +837,64 @@ describe('PlanModePage', () => {
         body: expect.stringContaining('Updated acceptance criterion'),
       }),
     );
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('shows exactly one support surface at a time', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft()), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const transcriptButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Transcript'));
+    expect(transcriptButton).toBeTruthy();
+
+    await act(async () => {
+      transcriptButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.querySelector('textarea#planner-follow-up')).toBeTruthy();
+    expect(container.textContent).not.toContain('Planning History');
+
+    const logbookButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Logbook'));
+    expect(logbookButton).toBeTruthy();
+
+    await act(async () => {
+      logbookButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.querySelector('textarea#planner-follow-up')).toBeNull();
+    expect(container.textContent).toContain('Planning History');
+
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Edit Mission'));
+    expect(editButton).toBeTruthy();
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).not.toContain('Planning History');
+    expect(container.querySelector('input[aria-label="Mission name"]')).toBeTruthy();
 
     act(() => {
       root.unmount();

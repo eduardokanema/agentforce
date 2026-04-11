@@ -2,12 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import FileBrowser from "../components/FileBrowser";
 import ModelSelector from "../components/ModelSelector";
+import SpaceProgress from "../components/SpaceProgress";
 import DraftSummaryPanel from "../components/planning/DraftSummaryPanel";
+import CockpitSupportDrawer from "../components/planning/CockpitSupportDrawer";
 import ExecutionProfileControls from "../components/planning/ExecutionProfileControls";
+import FlightPlanProgressRail from "../components/planning/FlightPlanProgressRail";
 import PlannerStreamPanel, {
   type PlannerStreamEventView,
 } from "../components/planning/PlannerStreamPanel";
 import PlannerTranscriptPanel from "../components/planning/PlannerTranscriptPanel";
+import PlanningSubstepTracker from "../components/planning/PlanningSubstepTracker";
 import TaskTimelinePanel from "../components/planning/TaskTimelinePanel";
 import ValidationBoard from "../components/planning/ValidationBoard";
 import {
@@ -20,6 +24,11 @@ import {
   startPlanDraft,
   submitPlanDraftPreflight,
 } from "../lib/api";
+import {
+  type CockpitPhaseId,
+  derivePlanFlow,
+  type PlanningSubstepId,
+} from "../lib/planFlow";
 import { collectAdvisoryFlightChecks } from "../lib/planChecks";
 import type {
   ExecutionProfile,
@@ -27,6 +36,7 @@ import type {
   MissionSpec,
   Model,
   PlanRun,
+  PlanStep,
   PlanVersion,
   PreflightAnswer,
 } from "../lib/types";
@@ -82,7 +92,8 @@ function normalizePlanningProfile(value: unknown): ExecutionProfile {
     ? candidate.agent
     : "claude";
   const model = typeof candidate.model === "string" ? candidate.model : "";
-  const thinking = typeof candidate.thinking === "string" && THINKING_LEVELS.includes(candidate.thinking as typeof THINKING_LEVELS[number])
+  const thinking = typeof candidate.thinking === "string"
+    && THINKING_LEVELS.includes(candidate.thinking as typeof THINKING_LEVELS[number])
     ? candidate.thinking
     : "medium";
   return { agent, model, thinking };
@@ -115,10 +126,7 @@ function getConflictMessage(caught: unknown): string | null {
   return `Conflict detected while saving this draft.${revision}`;
 }
 
-function updateDraftSpec(
-  draft: MissionDraft,
-  draftSpec: MissionSpec,
-): MissionDraft {
+function updateDraftSpec(draft: MissionDraft, draftSpec: MissionSpec): MissionDraft {
   return {
     ...draft,
     draft_spec: draftSpec,
@@ -143,9 +151,7 @@ function draftValidationIssues(draft: MissionDraft | null): string[] {
   return issues;
 }
 
-function getPlanningProfiles(
-  draft: MissionDraft | null,
-): Record<string, ExecutionProfile> {
+function getPlanningProfiles(draft: MissionDraft | null): Record<string, ExecutionProfile> {
   const raw = draft?.validation?.planning_profiles;
   if (!raw || typeof raw !== "object") {
     return {};
@@ -153,10 +159,7 @@ function getPlanningProfiles(
   return raw as Record<string, ExecutionProfile>;
 }
 
-function getProfileValue(
-  draft: MissionDraft | null,
-  key: string,
-): ExecutionProfile {
+function getProfileValue(draft: MissionDraft | null, key: string): ExecutionProfile {
   const stored = getPlanningProfiles(draft)[key] ?? {};
   return {
     agent: stored.agent ?? "codex",
@@ -184,16 +187,6 @@ function summarizeStep(stepName: string): string {
   return stepName.replace(/_/g, " ");
 }
 
-function toPlannerEventView(event: PlanningEvent): PlannerStreamEventView {
-  return {
-    type: event.type,
-    phase: event.step ?? event.plan_version_id ?? "runtime",
-    status:
-      event.status ?? (event.type.includes("started") ? "started" : "updated"),
-    content: event.summary ?? event.message,
-  };
-}
-
 function latestRun(draft: MissionDraft | null): PlanRun | null {
   return draft?.plan_runs?.[0] ?? null;
 }
@@ -211,11 +204,271 @@ function buildRunEvents(run: PlanRun | null): PlannerStreamEventView[] {
     phase: summarizeStep(step.name),
     status: step.status,
     content: step.summary || step.message || undefined,
+    timestamp: step.completed_at || step.started_at || null,
   }));
 }
 
 function planningBusy(run: PlanRun | null): boolean {
   return run?.status === "queued" || run?.status === "running";
+}
+
+function latestFailedRun(draft: MissionDraft | null): PlanRun | null {
+  return (draft?.plan_runs ?? []).find((run) => run.status === "failed" || run.status === "stale") ?? null;
+}
+
+function firstTurnPrompt(draft: MissionDraft | null): string {
+  if (!draft) {
+    return "";
+  }
+  const firstUserTurn = draft.turns.find((turn) => turn.role === "user");
+  return firstUserTurn?.content ?? "";
+}
+
+function countStepIssues(step: PlanStep | null | undefined): number {
+  const issues = step?.metadata?.issues;
+  return Array.isArray(issues) ? issues.length : 0;
+}
+
+function plannerProgressPct(
+  currentPhaseId: CockpitPhaseId,
+  phaseCountComplete: number,
+  substepCompleteCount: number,
+): number {
+  const base = (phaseCountComplete / 6) * 100;
+  if (currentPhaseId !== "draft" && currentPhaseId !== "stress_test") {
+    return Math.round(base);
+  }
+  const extra = (substepCompleteCount / 5) * (100 / 6);
+  return Math.round(Math.min(100, base + extra));
+}
+
+function toPlannerEventView(event: PlanningEvent): PlannerStreamEventView {
+  return {
+    type: event.type,
+    phase: event.step ?? event.plan_version_id ?? "runtime",
+    status:
+      event.status ?? (event.type.includes("started") ? "started" : "updated"),
+    content: event.summary ?? event.message,
+    live: true,
+  };
+}
+
+function joinIssueTitles(step: PlanStep | null | undefined): string {
+  const issues = step?.metadata?.issues;
+  if (!Array.isArray(issues) || issues.length === 0) {
+    return step?.summary || step?.message || "No detailed findings recorded.";
+  }
+  return issues
+    .map((issue) => {
+      if (!issue || typeof issue !== "object") {
+        return "";
+      }
+      const title = "title" in issue ? String(issue.title ?? "").trim() : "";
+      const severity = "severity" in issue ? String(issue.severity ?? "").trim() : "";
+      return [severity, title].filter(Boolean).join(" · ");
+    })
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function StepFindingCard({
+  title,
+  step,
+}: {
+  title: string;
+  step: PlanStep | null | undefined;
+}) {
+  const status = step?.status ?? "idle";
+  const issueCount = countStepIssues(step);
+
+  return (
+    <article className="rounded-[1.05rem] border border-border bg-card px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+            {title}
+          </div>
+          <div className="mt-2 text-sm font-semibold tracking-[-0.02em] text-text">
+            {status.replace("_", " ")}
+          </div>
+        </div>
+        <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
+          {issueCount} issue{issueCount === 1 ? "" : "s"}
+        </div>
+      </div>
+      <p className="mt-2 text-[12px] leading-5 text-dim">
+        {joinIssueTitles(step)}
+      </p>
+      <div className="mt-3 font-mono text-[11px] text-dim">
+        {formatDateTime(step?.completed_at || step?.started_at || null)}
+      </div>
+    </article>
+  );
+}
+
+type SupportPanelId = "edit" | "transcript" | "logbook";
+
+function PhaseHero({
+  phaseLabel,
+  selectedPhaseStatus,
+  currentPhaseId,
+  nextAction,
+  activeSummary,
+  currentRun,
+  currentVersion,
+  completedPhases,
+  completedSubsteps,
+  latestRunIssue,
+  launchReadinessSummary,
+  latestFailed,
+  retryingRunId,
+  onRetryLatestRun,
+}: {
+  phaseLabel: string;
+  selectedPhaseStatus: ReturnType<typeof derivePlanFlow>["phases"][number]["status"];
+  currentPhaseId: CockpitPhaseId;
+  nextAction: string;
+  activeSummary: string;
+  currentRun: PlanRun | null;
+  currentVersion: PlanVersion | null;
+  completedPhases: number;
+  completedSubsteps: number;
+  latestRunIssue: string | null;
+  launchReadinessSummary: string;
+  latestFailed: PlanRun | null;
+  retryingRunId: string | null;
+  onRetryLatestRun: (runId: string) => void;
+}) {
+  const pct = plannerProgressPct(currentPhaseId, completedPhases, completedSubsteps);
+  const phaseLabelText = selectedPhaseStatus === "complete"
+    ? "Completed Stage"
+    : selectedPhaseStatus === "up_next"
+      ? "Upcoming Stage"
+      : selectedPhaseStatus === "blocked"
+        ? "Blocked Stage"
+        : "Active Stage";
+
+  return (
+    <section className="overflow-hidden rounded-[1.3rem] border border-border bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.16),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(46,204,138,0.12),transparent_36%),var(--color-card)] p-5">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_17rem]">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+            {phaseLabelText}
+          </div>
+          <h2 className="mt-2 text-[clamp(1.6rem,3vw,2.35rem)] font-semibold tracking-[-0.04em] text-text">
+            {phaseLabel}
+          </h2>
+          <p className="mt-3 max-w-[68ch] text-sm leading-7 text-dim">
+            {activeSummary}
+          </p>
+          <div className="mt-5 rounded-[1rem] border border-border bg-black/14 px-4 py-4">
+            <div className="text-[11px] uppercase tracking-[0.1em] text-muted">Now Tracking</div>
+            <div className="mt-2 text-base font-semibold tracking-[-0.03em] text-text">
+              {nextAction}
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2 text-[11px] text-dim">
+              <span className="rounded-full border border-border bg-surface px-3 py-1">
+                {currentRun ? `Run ${currentRun.status}` : "Awaiting run"}
+              </span>
+              <span className="rounded-full border border-border bg-surface px-3 py-1">
+                {formatCurrency(currentRun?.cost_usd)}
+              </span>
+              <span className="rounded-full border border-border bg-surface px-3 py-1">
+                {currentVersion ? `Version ${currentVersion.id}` : "No promoted version"}
+              </span>
+            </div>
+          </div>
+          {latestRunIssue ? (
+            <div className="mt-4 rounded-xl border border-red/25 bg-red/8 px-4 py-3 text-sm text-red">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span>{latestRunIssue}</span>
+                {latestFailed ? (
+                  <button
+                    type="button"
+                    className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-xs font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={retryingRunId === latestFailed.id}
+                    onClick={() => onRetryLatestRun(latestFailed.id)}
+                  >
+                    {retryingRunId === latestFailed.id ? "Retrying..." : "Retry Latest Run"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="rounded-[1.1rem] border border-border bg-black/12 p-4">
+          <SpaceProgress pct={pct} isRunning={currentRun?.status === "running"} />
+          <div className="mt-4 text-[11px] uppercase tracking-[0.14em] text-muted">
+            Mission Telemetry
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-dim">
+            <span className="rounded-full border border-border bg-surface px-3 py-1">
+              {completedPhases}/6 phases complete
+            </span>
+            <span className="rounded-full border border-border bg-surface px-3 py-1">
+              {completedSubsteps}/5 planning steps
+            </span>
+            <span className="rounded-full border border-border bg-surface px-3 py-1">
+              {(currentRun?.tokens_in ?? 0) + (currentRun?.tokens_out ?? 0)} tokens
+            </span>
+          </div>
+          <p className="mt-4 text-sm leading-6 text-dim">
+            {launchReadinessSummary}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SupportDock({
+  activePanel,
+  onToggle,
+}: {
+  activePanel: SupportPanelId | null;
+  onToggle: (panel: SupportPanelId) => void;
+}) {
+  const items: Array<{ id: SupportPanelId; label: string; description: string }> = [
+    { id: "edit", label: "Edit Mission", description: "Summary, tasks, and execution defaults." },
+    { id: "transcript", label: "Transcript", description: "Planner turns and follow-up guidance." },
+    { id: "logbook", label: "Logbook", description: "Run history, changelog, and planner stream." },
+  ];
+
+  return (
+    <section className="rounded-[1.1rem] border border-border bg-card px-4 py-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+            Support Dock
+          </div>
+          <p className="mt-1 text-xs text-dim">
+            Secondary tools stay out of the way until you call for them.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {items.map((item) => {
+            const open = activePanel === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={[
+                  "rounded-full border px-3 py-2 text-sm font-semibold transition-colors",
+                  open
+                    ? "border-cyan/35 bg-cyan/10 text-cyan"
+                    : "border-border bg-surface text-dim hover:bg-card-hover hover:text-text",
+                ].join(" ")}
+                onClick={() => onToggle(item.id)}
+              >
+                {open ? `Hide ${item.label}` : item.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function PreflightQuestionsPanel({
@@ -236,14 +489,12 @@ function PreflightQuestionsPanel({
   const questions = draft.preflight_questions ?? [];
 
   return (
-    <section className="rounded-lg border border-amber/30 bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.12),transparent_62%),var(--color-card)] p-4">
+    <section className="rounded-[1.15rem] border border-amber/30 bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.12),transparent_62%),var(--color-card)] p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="section-title">Preflight Questions</h2>
           <p className="mt-1 text-xs text-dim">
-            Answer the important clarifications before the first full planning
-            run. Each question supports a custom reply when the listed options
-            do not fit.
+            Clarify only what changes structure, dependencies, or acceptance criteria.
           </p>
         </div>
         <div className="rounded-full border border-amber/30 bg-amber/10 px-3 py-1 font-mono text-[11px] text-amber">
@@ -259,19 +510,15 @@ function PreflightQuestionsPanel({
               key={question.id}
               className="rounded-xl border border-border bg-surface p-3"
             >
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
-                    Question {index + 1}
-                  </div>
-                  <div className="mt-1 text-sm font-semibold text-text">
-                    {question.prompt}
-                  </div>
-                  {question.reason ? (
-                    <p className="mt-1 text-xs text-dim">{question.reason}</p>
-                  ) : null}
-                </div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+                Question {index + 1}
               </div>
+              <div className="mt-2 text-sm font-semibold text-text">
+                {question.prompt}
+              </div>
+              {question.reason ? (
+                <p className="mt-1 text-xs text-dim">{question.reason}</p>
+              ) : null}
               <div className="mt-3 grid gap-2">
                 {question.options.map((option) => (
                   <label
@@ -286,8 +533,7 @@ function PreflightQuestionsPanel({
                         onAnswerChange(question.id, {
                           ...answer,
                           selected_option: option,
-                        })
-                      }
+                        })}
                     />
                     <span>{option}</span>
                   </label>
@@ -301,8 +547,7 @@ function PreflightQuestionsPanel({
                       onAnswerChange(question.id, {
                         ...answer,
                         custom_answer: event.currentTarget.value,
-                      })
-                    }
+                      })}
                   />
                 ) : null}
               </div>
@@ -341,39 +586,30 @@ function PlanningProfilesSummary({
   models: Model[];
 }) {
   return (
-    <section className="rounded-lg border border-border bg-card p-4">
+    <section className="rounded-[1.15rem] border border-border bg-card p-4">
       <div className="mb-3">
         <h2 className="section-title">Planning Stack</h2>
         <p className="mt-1 text-xs text-dim">
-          Models configured for this draft's planning runs.
+          Configured models for this draft&apos;s planning loop.
         </p>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
           const profile = getProfileValue(draft, key);
-          const modelObj = models.find((m) => m.id === profile.model);
+          const modelObj = models.find((model) => model.id === profile.model);
           const modelName = modelObj
             ? `[${modelObj.provider}] ${modelObj.name}`
             : profile.model || "Default";
           return (
-            <div
-              key={key}
-              className="rounded-lg border border-border bg-surface p-3"
-            >
+            <div key={key} className="rounded-lg border border-border bg-surface p-3">
               <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
                 {label}
               </div>
-              <div
-                className="truncate text-sm font-semibold text-text"
-                title={modelName}
-              >
+              <div className="truncate text-sm font-semibold text-text" title={modelName}>
                 {modelName}
               </div>
               <div className="mt-1 text-xs text-dim">
-                Thinking:{" "}
-                <span className="font-medium text-text">
-                  {profile.thinking}
-                </span>
+                Thinking <span className="font-medium text-text">{profile.thinking}</span>
               </div>
             </div>
           );
@@ -396,23 +632,20 @@ function PlanHistoryPanel({
   const currentVersion = latestVersion(draft);
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4">
+    <section className="rounded-[1.15rem] border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="section-title">Planning History</h2>
           <p className="mt-1 text-xs text-dim">
-            Stored runs, versions, and changelog checkpoints for future reviews
-            and metrics.
+            Stored runs, versions, and changelog checkpoints.
           </p>
         </div>
         <div className="rounded-full border border-cyan/20 bg-cyan/10 px-3 py-1 text-[11px] font-mono text-cyan">
-          {currentRun
-            ? `${formatCurrency(currentRun.cost_usd)} planning`
-            : "No runs yet"}
+          {currentRun ? `${formatCurrency(currentRun.cost_usd)} planning` : "No runs yet"}
         </div>
       </div>
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(16rem,0.95fr)]">
+      <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.05fr)_minmax(16rem,0.95fr)]">
         <div className="space-y-3">
           {(draft.plan_runs ?? []).map((run) => (
             <article
@@ -427,7 +660,9 @@ function PlanHistoryPanel({
                 <div className="text-sm font-semibold text-text">
                   {run.trigger_kind === "follow_up"
                     ? "Follow-up run"
-                    : "Initial run"}
+                    : run.trigger_kind === "retry"
+                      ? "Retry run"
+                      : "Initial run"}
                 </div>
                 <div className="rounded-full border border-border bg-card px-2.5 py-1 font-mono text-[11px] text-dim">
                   {run.status}
@@ -435,8 +670,7 @@ function PlanHistoryPanel({
               </div>
               {run.status === "failed" && run.error_message ? (
                 <div className="mt-2 rounded-lg border border-red/20 bg-red/5 px-3 py-2 text-xs text-red/80">
-                  <span className="font-semibold">Error:</span>{" "}
-                  {run.error_message}
+                  <span className="font-semibold">Error:</span> {run.error_message}
                 </div>
               ) : (
                 <p className="mt-2 text-sm text-text">
@@ -454,7 +688,7 @@ function PlanHistoryPanel({
                   {formatCurrency(run.cost_usd)}
                 </span>
               </div>
-              {run.status === "failed" ? (
+              {run.status === "failed" || run.status === "stale" ? (
                 <div className="mt-3 flex justify-end">
                   <button
                     type="button"
@@ -505,8 +739,7 @@ function PlanHistoryPanel({
               draft.planning_summary?.changelog?.length
             ) ? (
               <div className="rounded-lg border border-dashed border-border px-3 py-3 text-sm text-dim">
-                The reviewed changelog will appear here after the resolver
-                finishes.
+                Resolver changelog appears here after a reviewed version is promoted.
               </div>
             ) : null}
           </div>
@@ -516,10 +749,496 @@ function PlanHistoryPanel({
   );
 }
 
+function EngineeringControls({
+  draft,
+  models,
+  savingDraft,
+  onSaveSummary,
+  onTaskChange,
+  onNameChange,
+  onGoalChange,
+  onDodChange,
+  onWorkerModelChange,
+  onReviewerModelChange,
+  onWorkerThinkingChange,
+  onReviewerThinkingChange,
+}: {
+  draft: MissionDraft;
+  models: Model[];
+  savingDraft: boolean;
+  onSaveSummary: () => void;
+  onTaskChange: (taskId: string, patch: Partial<MissionSpec["tasks"][number]>) => void;
+  onNameChange: (value: string) => void;
+  onGoalChange: (value: string) => void;
+  onDodChange: (value: string[]) => void;
+  onWorkerModelChange: (value: string) => void;
+  onReviewerModelChange: (value: string) => void;
+  onWorkerThinkingChange: (value: string) => void;
+  onReviewerThinkingChange: (value: string) => void;
+}) {
+  return (
+    <section className="space-y-5 rounded-[1.15rem] border border-border bg-card p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="section-title">Engineering Controls</h2>
+          <p className="mt-1 text-xs text-dim">
+            Summary, tasks, and execution defaults remain editable while the active phase stays in focus.
+          </p>
+        </div>
+        <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
+          Revision {draft.revision}
+        </div>
+      </div>
+
+      <DraftSummaryPanel
+        draft={draft}
+        saving={savingDraft}
+        onNameChange={onNameChange}
+        onGoalChange={onGoalChange}
+        onDodChange={onDodChange}
+        onSave={onSaveSummary}
+      />
+      <TaskTimelinePanel
+        draft={draft}
+        saving={savingDraft}
+        models={models}
+        onTaskChange={onTaskChange}
+        onSave={onSaveSummary}
+      />
+      <ExecutionProfileControls
+        draft={draft}
+        models={models}
+        onWorkerModelChange={onWorkerModelChange}
+        onReviewerModelChange={onReviewerModelChange}
+        onWorkerThinkingChange={onWorkerThinkingChange}
+        onReviewerThinkingChange={onReviewerThinkingChange}
+      />
+      <PlanningProfilesSummary draft={draft} models={models} />
+    </section>
+  );
+}
+
+function PhaseViewport({
+  selectedPhase,
+  draft,
+  substeps,
+  retryingRunId,
+  loadingModels,
+  conflictMessage,
+  summaryIssues,
+  advisoryIssues,
+  preflightAnswers,
+  submittingPreflight,
+  currentRun,
+  streaming,
+  launching,
+  launchReadiness,
+  onRetryRun,
+  onAnswerChange,
+  onSubmitPreflight,
+  onSkipPreflight,
+  onLaunch,
+  onOpenSupportPanel,
+}: {
+  selectedPhase: CockpitPhaseId;
+  draft: MissionDraft | null;
+  substeps: ReturnType<typeof derivePlanFlow>["substeps"];
+  retryingRunId: string | null;
+  loadingModels: boolean;
+  conflictMessage: string | null;
+  summaryIssues: string[];
+  advisoryIssues: string[];
+  preflightAnswers: Record<string, PreflightAnswer>;
+  submittingPreflight: boolean;
+  currentRun: PlanRun | null;
+  streaming: boolean;
+  launching: boolean;
+  launchReadiness: ReturnType<typeof derivePlanFlow>["launchReadiness"];
+  onRetryRun: (runId: string) => void;
+  onAnswerChange: (questionId: string, answer: PreflightAnswer) => void;
+  onSubmitPreflight: () => void;
+  onSkipPreflight: () => void;
+  onLaunch: () => void;
+  onOpenSupportPanel: (panel: SupportPanelId) => void;
+}) {
+  if (!draft) {
+    return null;
+  }
+
+  const currentVersion = latestVersion(draft);
+  const latestFailed = latestFailedRun(draft);
+  const activeSubstep = substeps.find((step) => step.status === "running" || step.status === "failed" || step.status === "stale")
+    ?? [...substeps].reverse().find((step) => step.status === "complete")
+    ?? substeps[0];
+  const stepsById = new Map<PlanningSubstepId, PlanStep>(
+    (currentRun?.steps ?? [])
+      .filter((step): step is PlanStep & { name: PlanningSubstepId } =>
+        step.name === "planner_synthesis"
+        || step.name === "mission_plan_pass"
+        || step.name === "technical_critic"
+        || step.name === "practical_critic"
+        || step.name === "resolver")
+      .map((step) => [step.name, step]),
+  );
+
+  if (selectedPhase === "briefing") {
+    return (
+      <section className="rounded-[1.15rem] border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="section-title">Mission Brief</h2>
+            <h3 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-text">
+              {draft.draft_spec.name || "Untitled mission draft"}
+            </h3>
+          </div>
+          <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
+            Revision {draft.revision}
+          </div>
+        </div>
+        <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(18rem,0.9fr)]">
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-surface px-4 py-4">
+              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Original Prompt</div>
+              <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-text">
+                {firstTurnPrompt(draft) || "No original prompt stored."}
+              </p>
+            </div>
+            <div className="rounded-xl border border-border bg-surface px-4 py-4">
+              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Goal</div>
+              <p className="mt-2 text-sm leading-7 text-text">{draft.draft_spec.goal}</p>
+            </div>
+          </div>
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-surface px-4 py-4">
+              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Mission Footprint</div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] text-dim">
+                  {draft.workspace_paths.length} workspace{draft.workspace_paths.length === 1 ? "" : "s"}
+                </span>
+                <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] text-dim">
+                  {draft.approved_models.length} approved model{draft.approved_models.length === 1 ? "" : "s"}
+                </span>
+                <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] text-dim">
+                  {draft.draft_spec.tasks.length} task{draft.draft_spec.tasks.length === 1 ? "" : "s"}
+                </span>
+              </div>
+            </div>
+            <div className="rounded-xl border border-border bg-surface px-4 py-4">
+              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Planning Stack</div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
+                  const profile = getProfileValue(draft, key);
+                  return (
+                    <span key={key} className="rounded-full border border-border bg-card px-3 py-1 text-[11px] text-dim">
+                      {label}: <span className="font-mono text-text">{profile.model || "Default"}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (selectedPhase === "preflight") {
+    const preflightPending = draft.preflight_status === "pending"
+      && (draft.preflight_questions?.length ?? 0) > 0;
+
+    if (preflightPending) {
+      return (
+        <PreflightQuestionsPanel
+          draft={draft}
+          answers={preflightAnswers}
+          submitting={submittingPreflight}
+          onAnswerChange={onAnswerChange}
+          onSubmit={onSubmitPreflight}
+          onSkip={onSkipPreflight}
+        />
+      );
+    }
+
+    return (
+      <section className="rounded-[1.15rem] border border-border bg-card p-5">
+        <h2 className="section-title">Preflight Complete</h2>
+        <p className="mt-3 max-w-[62ch] text-sm leading-7 text-dim">
+          Clarifications are resolved. The cockpit will keep the recorded answers in the transcript and logbook without competing with the live stage.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <span className="rounded-full border border-border bg-surface px-3 py-1 text-[11px] text-dim">
+            {draft.preflight_status === "skipped" ? "Skipped" : "Answered"}
+          </span>
+          <span className="rounded-full border border-border bg-surface px-3 py-1 text-[11px] text-dim">
+            {Object.keys(draft.preflight_answers ?? {}).length} response{Object.keys(draft.preflight_answers ?? {}).length === 1 ? "" : "s"}
+          </span>
+        </div>
+        <div className="mt-4 rounded-xl border border-border bg-surface px-4 py-4">
+          <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Recorded Answers</div>
+          <div className="mt-3 space-y-2">
+            {Object.entries(draft.preflight_answers ?? {}).map(([id, answer]) => (
+              <div key={id} className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-text">
+                <span className="font-mono text-[11px] text-dim">{id}</span>
+                <div className="mt-1">{answer.custom_answer || answer.selected_option || "No answer recorded."}</div>
+              </div>
+            ))}
+            {Object.keys(draft.preflight_answers ?? {}).length === 0 ? (
+              <div className="rounded-lg border border-dashed border-border px-3 py-3 text-sm text-dim">
+                No stored answers.
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (selectedPhase === "draft") {
+    return (
+      <div className="space-y-5">
+        <section className="rounded-[1.15rem] border border-border bg-card p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+                Planning Orbit
+              </div>
+              <h2 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-text">
+                {activeSubstep?.label || "Planner standing by"}
+              </h2>
+              <p className="mt-3 max-w-[64ch] text-sm leading-7 text-dim">
+                {activeSubstep?.summary || "The planner is waiting for guidance or the first queued run."}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {latestFailed ? (
+                <button
+                  type="button"
+                  className="rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={retryingRunId === latestFailed.id}
+                  onClick={() => onRetryRun(latestFailed.id)}
+                >
+                  {retryingRunId === latestFailed.id ? "Retrying..." : "Retry Latest Run"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
+                onClick={() => onOpenSupportPanel("transcript")}
+              >
+                Open Transcript
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2 text-[11px] text-dim">
+            <span className="rounded-full border border-border bg-surface px-3 py-1">
+              {currentRun ? `Run ${currentRun.status}` : "Awaiting run"}
+            </span>
+            <span className="rounded-full border border-border bg-surface px-3 py-1">
+              {formatCurrency(currentRun?.cost_usd)}
+            </span>
+            <span className="rounded-full border border-border bg-surface px-3 py-1">
+              {streaming ? "Planner streaming" : "Standing by"}
+            </span>
+          </div>
+        </section>
+        <PlanningSubstepTracker title="Live Planning Orbit" steps={substeps} />
+      </div>
+    );
+  }
+
+  if (selectedPhase === "stress_test") {
+    return (
+      <div className="space-y-5">
+        <section className="rounded-[1.15rem] border border-border bg-card p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+                Stress Test
+              </div>
+              <h2 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-text">
+                Critics and resolver are pressure-testing the mission.
+              </h2>
+              <p className="mt-3 max-w-[64ch] text-sm leading-7 text-dim">
+                Focus on the latest blocker or confirmation signal. Detailed transcripts and full run history stay in the logbook.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {latestFailed ? (
+                <button
+                  type="button"
+                  className="rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={retryingRunId === latestFailed.id}
+                  onClick={() => onRetryRun(latestFailed.id)}
+                >
+                  {retryingRunId === latestFailed.id ? "Retrying..." : "Retry Latest Run"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
+                onClick={() => onOpenSupportPanel("logbook")}
+              >
+                Open Logbook
+              </button>
+            </div>
+          </div>
+        </section>
+        <PlanningSubstepTracker title="Stress Test Orbit" steps={substeps} />
+        <div className="space-y-3">
+          <StepFindingCard title="Technical Critic" step={stepsById.get("technical_critic")} />
+          <StepFindingCard title="Practical Critic" step={stepsById.get("practical_critic")} />
+          <StepFindingCard title="Resolver" step={stepsById.get("resolver")} />
+        </div>
+        {latestFailed ? (
+          <div className="rounded-xl border border-red/20 bg-red/8 px-4 py-4 text-sm text-red">
+            Newest run issue: {latestFailed.error_message || `Run ${latestFailed.id} requires intervention.`}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (selectedPhase === "finalize") {
+    return (
+      <div className="space-y-5">
+        <section className="rounded-[1.15rem] border border-border bg-card p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="section-title">Finalize Review</h2>
+              <p className="mt-3 max-w-[68ch] text-sm leading-7 text-dim">
+                This pass is read-first. Check readiness, resolve blockers, then open edit mode only if the mission itself needs revision.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15"
+              onClick={() => onOpenSupportPanel("edit")}
+            >
+              Edit Mission
+            </button>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2 text-[11px] text-dim">
+            <span className="rounded-full border border-border bg-surface px-3 py-1">
+              {summaryIssues.length === 0 ? "No visible blockers" : `${summaryIssues.length} blocker${summaryIssues.length === 1 ? "" : "s"}`}
+            </span>
+            <span className="rounded-full border border-border bg-surface px-3 py-1">
+              {advisoryIssues.length} advisory check{advisoryIssues.length === 1 ? "" : "s"}
+            </span>
+          </div>
+        </section>
+        <ValidationBoard
+          conflictMessage={conflictMessage}
+          summaryIssues={summaryIssues}
+          advisoryIssues={loadingModels ? [] : advisoryIssues}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <section className="rounded-[1.15rem] border border-border bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.14),transparent_58%),var(--color-card)] p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="section-title">Launch Window</h2>
+            <h3 className="mt-2 text-[clamp(1.4rem,2.2vw,2rem)] font-semibold tracking-[-0.03em] text-text">
+              {draft.draft_spec.name || "Untitled mission draft"}
+            </h3>
+            <p className="mt-3 max-w-[70ch] text-sm leading-7 text-dim">
+              Final reviewed version {currentVersion?.id ?? "pending"} is staged here. Confirm readiness, inspect the final changelog, and commit the mission when the window is clear.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="rounded-full border border-cyan/30 bg-cyan/10 px-5 py-2.5 text-sm font-semibold text-cyan transition-all hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={launching || summaryIssues.length > 0 || streaming || !!latestFailed}
+            onClick={onLaunch}
+          >
+            {launching ? "Launching..." : "Launch Mission"}
+          </button>
+        </div>
+
+        <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1.08fr)_minmax(16rem,0.92fr)]">
+          <div className="rounded-xl border border-border bg-surface px-4 py-4">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Readiness</div>
+            <div className="mt-2 text-lg font-semibold tracking-[-0.03em] text-text">
+              {launchReadiness.ready ? "Window clear" : "Launch blocked"}
+            </div>
+            <p className="mt-2 text-sm leading-6 text-dim">
+              {launchReadiness.summary}
+            </p>
+            {launchReadiness.blockers.length > 0 ? (
+              <div className="mt-4 space-y-2">
+                {launchReadiness.blockers.map((blocker) => (
+                  <div key={blocker} className="rounded-lg border border-red/18 bg-red/5 px-3 py-2 text-sm text-red">
+                    {blocker}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-surface px-4 py-4">
+              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Launch Telemetry</div>
+              <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-dim">
+                <span className="rounded-full border border-border bg-card px-3 py-1">
+                  {currentRun?.status ?? "idle"}
+                </span>
+                <span className="rounded-full border border-border bg-card px-3 py-1">
+                  {currentVersion?.id ?? "Pending"}
+                </span>
+                <span className="rounded-full border border-border bg-card px-3 py-1">
+                  {formatCurrency(currentRun?.cost_usd)}
+                </span>
+              </div>
+              <div className="mt-3 text-sm leading-6 text-dim">
+                {formatDateTime(currentVersion?.created_at ?? null)}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border bg-surface px-4 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Resolver Changelog</div>
+                <button
+                  type="button"
+                  className="rounded-full border border-border bg-card px-3 py-1 text-[11px] font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
+                  onClick={() => onOpenSupportPanel("edit")}
+                >
+                  Edit Mission
+                </button>
+              </div>
+              <div className="mt-3 space-y-2">
+                {(currentVersion?.changelog ?? draft.planning_summary?.changelog ?? []).map((entry, index) => (
+                  <div
+                    key={`${entry}-${index}`}
+                    className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-text"
+                  >
+                    {entry}
+                  </div>
+                ))}
+                {!(currentVersion?.changelog?.length || draft.planning_summary?.changelog?.length) ? (
+                  <div className="rounded-lg border border-dashed border-border px-3 py-3 text-sm text-dim">
+                    Final resolver notes will land here after promotion.
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <ValidationBoard
+        conflictMessage={conflictMessage}
+        summaryIssues={summaryIssues}
+        advisoryIssues={loadingModels ? [] : advisoryIssues}
+      />
+    </div>
+  );
+}
+
 export default function PlanModePage() {
   const navigate = useNavigate();
   const { id } = useParams();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const draftId = id || searchParams.get("draft");
 
   const [prompt, setPrompt] = useState("");
@@ -536,6 +1255,9 @@ export default function PlanModePage() {
   const [draft, setDraft] = useState<MissionDraft | null>(null);
   const [followUpMessage, setFollowUpMessage] = useState("");
   const [liveEvents, setLiveEvents] = useState<PlannerStreamEventView[]>([]);
+  const [selectedPhase, setSelectedPhase] = useState<CockpitPhaseId>("briefing");
+  const [autoFollowPhase, setAutoFollowPhase] = useState(true);
+  const [activeSupportPanel, setActiveSupportPanel] = useState<SupportPanelId | null>(null);
   const [loadingModels, setLoadingModels] = useState(true);
   const [loadingDraft, setLoadingDraft] = useState(false);
   const [creatingDraft, setCreatingDraft] = useState(false);
@@ -544,9 +1266,7 @@ export default function PlanModePage() {
   const [streaming, setStreaming] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [submittingPreflight, setSubmittingPreflight] = useState(false);
-  const [preflightAnswers, setPreflightAnswers] = useState<
-    Record<string, PreflightAnswer>
-  >({});
+  const [preflightAnswers, setPreflightAnswers] = useState<Record<string, PreflightAnswer>>({});
   const [pageError, setPageError] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
@@ -558,11 +1278,11 @@ export default function PlanModePage() {
     [models, selectedModels],
   );
 
-  const loadDraft = async (id: string): Promise<void> => {
+  const loadDraft = async (nextDraftId: string): Promise<void> => {
     setLoadingDraft(true);
     setPageError(null);
     try {
-      const loaded = await getPlanDraft(id);
+      const loaded = await getPlanDraft(nextDraftId);
       setDraft(loaded);
       setStreaming(planningBusy(latestRun(loaded)));
       setPreflightAnswers(loaded.preflight_answers ?? {});
@@ -599,10 +1319,10 @@ export default function PlanModePage() {
 
         setInitialPlanningProfiles((current) => {
           const next = { ...current };
-          (Object.keys(next) as Array<keyof typeof next>).forEach((k) => {
-            if (!availableModelIds.has(String(next[k].model || ""))) {
-              next[k] = {
-                ...next[k],
+          (Object.keys(next) as Array<keyof typeof next>).forEach((key) => {
+            if (!availableModelIds.has(String(next[key].model || ""))) {
+              next[key] = {
+                ...next[key],
                 model: defaultModel,
                 agent: defaultAgent,
               };
@@ -663,6 +1383,9 @@ export default function PlanModePage() {
     if (!draftId) {
       setDraft(null);
       setLiveEvents([]);
+      setAutoFollowPhase(true);
+      setSelectedPhase("briefing");
+      setActiveSupportPanel(null);
       return;
     }
     void loadDraft(draftId);
@@ -801,7 +1524,9 @@ export default function PlanModePage() {
     try {
       await sendPlanDraftMessage(draft.id, followUpMessage);
       setFollowUpMessage("");
+      setAutoFollowPhase(true);
       await loadDraft(draft.id);
+      setSelectedPhase("draft");
     } catch (caught) {
       setStreaming(false);
       setPageError(
@@ -817,6 +1542,7 @@ export default function PlanModePage() {
 
     setRetryingRunId(runId);
     setStreaming(true);
+    setAutoFollowPhase(true);
     setConflictMessage(null);
     setPageError(null);
     try {
@@ -856,6 +1582,7 @@ export default function PlanModePage() {
     }
     setSubmittingPreflight(true);
     setStreaming(true);
+    setAutoFollowPhase(true);
     setPageError(null);
     try {
       await submitPlanDraftPreflight(draft.id, preflightAnswers, skip);
@@ -872,179 +1599,38 @@ export default function PlanModePage() {
     }
   };
 
-  const handlePlanningProfileChange = (
-    key: string,
-    profile: ExecutionProfile,
-  ): void => {
-    updateCurrentDraft((current) => ({
-      ...current,
-      validation: {
-        ...current.validation,
-        planning_profiles: {
-          ...getPlanningProfiles(current),
-          [key]: profile,
-        },
-      },
-    }));
-  };
-
   const validationIssues = draftValidationIssues(draft);
   const advisoryIssues = useMemo(
     () =>
       loadingModels
         ? []
         : collectAdvisoryFlightChecks(
-            draft,
-            models.map((model) => model.id),
-          ),
+          draft,
+          models.map((model) => model.id),
+        ),
     [draft, loadingModels, models],
   );
   const currentRun = latestRun(draft);
-  const preflightPending =
-    draft?.preflight_status === "pending" &&
-    (draft.preflight_questions?.length ?? 0) > 0;
   const streamEvents = useMemo(
     () => [...buildRunEvents(currentRun), ...liveEvents].slice(-20),
     [currentRun, liveEvents],
   );
+  const planFlow = useMemo(
+    () => derivePlanFlow(draft, {
+      conflictMessage,
+      validationIssues,
+    }),
+    [draft, conflictMessage, validationIssues],
+  );
 
-  if (!draftId) {
-    return (
-      <div className="flex flex-col gap-5">
-        <header className="page-head">
-          <h1 className="text-3xl font-semibold tracking-tight">
-            Flight Director Cockpit
-          </h1>
-          <p className="mt-1 text-sm text-dim">
-            Create a planning draft, auto-start the first run, and keep the
-            reviewed version ready for launch.
-          </p>
-        </header>
+  useEffect(() => {
+    const selected = planFlow.phases.find((phase) => phase.id === selectedPhase);
+    if (autoFollowPhase || !selected || !selected.available) {
+      setSelectedPhase(planFlow.currentPhaseId);
+    }
+  }, [autoFollowPhase, planFlow.currentPhaseId, planFlow.phases, selectedPhase]);
 
-        {pageError ? (
-          <div className="rounded-lg border border-red/30 bg-red/10 px-4 py-3 text-sm text-red">
-            {pageError}
-          </div>
-        ) : null}
-
-        <section className="rounded-lg border border-border bg-card p-4">
-          <label
-            className="block text-sm font-medium text-text"
-            htmlFor="plan-prompt"
-          >
-            Mission prompt
-          </label>
-          <textarea
-            id="plan-prompt"
-            rows={8}
-            className="mt-2 w-full rounded-lg border border-border bg-surface p-3 text-sm text-text outline-none placeholder:text-dim focus:border-cyan"
-            placeholder="Describe what you want to build..."
-            value={prompt}
-            onInput={(event) => setPrompt(event.currentTarget.value)}
-          />
-
-          <div className="mt-4">
-            <div className="mb-2 text-sm font-medium text-text">
-              Working directories
-            </div>
-            <FileBrowser selected={workspaces} onSelect={setWorkspaces} />
-          </div>
-
-          <div className="mt-4">
-            <div className="mb-2 text-sm font-medium text-text">
-              Approved models
-            </div>
-            <ModelSelector
-              models={models}
-              selected={effectiveSelectedModels}
-              onChange={setSelectedModels}
-            />
-          </div>
-
-          <div className="mt-6">
-            <div className="mb-3 text-sm font-medium text-text">
-              Planning Stack
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
-                const profile = initialPlanningProfiles[key];
-                return (
-                  <div
-                    key={key}
-                    className="rounded-xl border border-border bg-surface p-3"
-                  >
-                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-                      {label}
-                    </div>
-                    <div className="grid gap-2">
-                      <select
-                        className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
-                        value={profile.model ?? ""}
-                        onChange={(e) => {
-                          const mid = e.target.value;
-                          const m = models.find((mod) => mod.id === mid);
-                          setInitialPlanningProfiles((p) => ({
-                            ...p,
-                            [key]: {
-                              ...profile,
-                              model: mid,
-                              agent: m?.provider_id || profile.agent,
-                            },
-                          }));
-                        }}
-                      >
-                        {models.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            [{m.provider}] {m.name}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
-                        value={profile.thinking ?? ""}
-                        onChange={(e) =>
-                          setInitialPlanningProfiles((p) => ({
-                            ...p,
-                            [key]: { ...profile, thinking: e.target.value },
-                          }))
-                        }
-                      >
-                        {THINKING_LEVELS.map((t) => (
-                          <option key={t} value={t}>
-                            {t}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="mt-5 flex items-center justify-between gap-3">
-            <span className="text-[11px] text-dim">
-              {loadingModels
-                ? "Loading models..."
-                : `${effectiveSelectedModels.length} approved model(s) armed`}
-            </span>
-            <button
-              type="button"
-              disabled={!canCreateDraft || creatingDraft}
-              className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={() => {
-                void handleCreateDraft();
-              }}
-            >
-              Open Flight Plan
-            </button>
-          </div>
-        </section>
-      </div>
-    );
-  }
-
-  if (loadingDraft || !draft) {
+  if (loadingDraft) {
     return (
       <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-dim">
         {pageError ?? "Loading planning draft..."}
@@ -1052,43 +1638,252 @@ export default function PlanModePage() {
     );
   }
 
+  const completedPhaseCount = planFlow.phases.filter((phase) => phase.status === "complete").length;
+  const completedSubsteps = planFlow.substeps.filter((step) => step.status === "complete").length;
+  const selectedPhaseState = planFlow.phases.find((phase) => phase.id === selectedPhase) ?? planFlow.phases[0];
+  const heroAction = selectedPhase === planFlow.currentPhaseId
+    ? planFlow.nextAction
+    : selectedPhaseState.status === "complete"
+      ? "Review what happened in this completed stage."
+      : selectedPhaseState.status === "up_next"
+        ? "This stage unlocks after the live stage completes."
+        : selectedPhaseState.blocker ?? planFlow.nextAction;
+  const latestFailed = latestFailedRun(draft);
+  const handleTaskChange = (taskId: string, patch: Partial<MissionSpec["tasks"][number]>): void => {
+    updateCurrentDraft((current) =>
+      updateDraftSpec(current, {
+        ...current.draft_spec,
+        tasks: current.draft_spec.tasks.map((task) =>
+          task.id === taskId ? { ...task, ...patch } : task,
+        ),
+      }),
+    );
+  };
+  const handleNameChange = (value: string): void => {
+    updateCurrentDraft((current) =>
+      updateDraftSpec(current, {
+        ...current.draft_spec,
+        name: value,
+      }),
+    );
+  };
+  const handleGoalChange = (value: string): void => {
+    updateCurrentDraft((current) =>
+      updateDraftSpec(current, {
+        ...current.draft_spec,
+        goal: value,
+      }),
+    );
+  };
+  const handleDodChange = (value: string[]): void => {
+    updateCurrentDraft((current) =>
+      updateDraftSpec(current, {
+        ...current.draft_spec,
+        definition_of_done: value,
+      }),
+    );
+  };
+  const handleWorkerModelChange = (value: string): void => {
+    updateCurrentDraft((current) =>
+      updateDraftSpec(current, {
+        ...current.draft_spec,
+        execution_defaults: {
+          ...current.draft_spec.execution_defaults,
+          worker: {
+            agent:
+              current.draft_spec.execution_defaults?.worker?.agent ?? "codex",
+            thinking:
+              current.draft_spec.execution_defaults?.worker?.thinking ?? "medium",
+            model: value,
+          },
+          reviewer: current.draft_spec.execution_defaults?.reviewer ?? {
+            agent: "codex",
+            thinking: "medium",
+            model:
+              current.draft_spec.execution_defaults?.reviewer?.model ??
+              models[0]?.id ??
+              "",
+          },
+        },
+      }),
+    );
+  };
+  const handleReviewerModelChange = (value: string): void => {
+    updateCurrentDraft((current) =>
+      updateDraftSpec(current, {
+        ...current.draft_spec,
+        execution_defaults: {
+          ...current.draft_spec.execution_defaults,
+          worker: current.draft_spec.execution_defaults?.worker ?? {
+            agent: "codex",
+            thinking: "medium",
+            model:
+              current.draft_spec.execution_defaults?.worker?.model ??
+              models[0]?.id ??
+              "",
+          },
+          reviewer: {
+            agent:
+              current.draft_spec.execution_defaults?.reviewer?.agent ?? "codex",
+            thinking:
+              current.draft_spec.execution_defaults?.reviewer?.thinking ?? "medium",
+            model: value,
+          },
+        },
+      }),
+    );
+  };
+  const handleWorkerThinkingChange = (value: string): void => {
+    updateCurrentDraft((current) =>
+      updateDraftSpec(current, {
+        ...current.draft_spec,
+        execution_defaults: {
+          ...current.draft_spec.execution_defaults,
+          worker: {
+            agent:
+              current.draft_spec.execution_defaults?.worker?.agent ?? "codex",
+            model:
+              current.draft_spec.execution_defaults?.worker?.model ??
+              models[0]?.id ??
+              "",
+            thinking: value,
+          },
+          reviewer: current.draft_spec.execution_defaults?.reviewer ?? {
+            agent: "codex",
+            model:
+              current.draft_spec.execution_defaults?.reviewer?.model ??
+              models[0]?.id ??
+              "",
+            thinking: "medium",
+          },
+        },
+      }),
+    );
+  };
+  const handleReviewerThinkingChange = (value: string): void => {
+    updateCurrentDraft((current) =>
+      updateDraftSpec(current, {
+        ...current.draft_spec,
+        execution_defaults: {
+          ...current.draft_spec.execution_defaults,
+          worker: current.draft_spec.execution_defaults?.worker ?? {
+            agent: "codex",
+            model:
+              current.draft_spec.execution_defaults?.worker?.model ??
+              models[0]?.id ??
+              "",
+            thinking: "medium",
+          },
+          reviewer: {
+            agent:
+              current.draft_spec.execution_defaults?.reviewer?.agent ?? "codex",
+            model:
+              current.draft_spec.execution_defaults?.reviewer?.model ??
+              models[0]?.id ??
+              "",
+            thinking: value,
+          },
+        },
+      }),
+    );
+  };
+
+  const toggleSupportPanel = (panel: SupportPanelId): void => {
+    setActiveSupportPanel((current) => (current === panel ? null : panel));
+  };
+
+  const supportPanelMeta = activeSupportPanel
+    ? {
+        edit: {
+          title: "Edit Mission",
+          description: "Mission summary, task sequencing, and execution defaults live here when you need to revise the plan.",
+          label: "Edit mission panel",
+        },
+        transcript: {
+          title: "Planner Transcript",
+          description: "Review the conversation with the planner and send follow-up instructions without crowding the main stage.",
+          label: "Planner transcript panel",
+        },
+        logbook: {
+          title: "Mission Logbook",
+          description: "Run history, changelog checkpoints, and planner stream stay archived here for on-demand review.",
+          label: "Mission logbook panel",
+        },
+      }[activeSupportPanel]
+    : null;
+
+  const supportPanelContent = !draft || !activeSupportPanel ? null : (
+    activeSupportPanel === "edit" ? (
+      <div className="space-y-5">
+        <ValidationBoard
+          conflictMessage={conflictMessage}
+          summaryIssues={validationIssues}
+          advisoryIssues={advisoryIssues}
+        />
+        <EngineeringControls
+          draft={draft}
+          models={models}
+          savingDraft={savingDraft}
+          onSaveSummary={() => {
+            void persistDraftSpec();
+          }}
+          onTaskChange={handleTaskChange}
+          onNameChange={handleNameChange}
+          onGoalChange={handleGoalChange}
+          onDodChange={handleDodChange}
+          onWorkerModelChange={handleWorkerModelChange}
+          onReviewerModelChange={handleReviewerModelChange}
+          onWorkerThinkingChange={handleWorkerThinkingChange}
+          onReviewerThinkingChange={handleReviewerThinkingChange}
+        />
+      </div>
+    ) : activeSupportPanel === "transcript" ? (
+      <PlannerTranscriptPanel
+        turns={draft.turns}
+        message={followUpMessage}
+        busy={streaming || draft.preflight_status === "pending"}
+        onMessageChange={setFollowUpMessage}
+        onSend={() => {
+          void handleFollowUp();
+        }}
+      />
+    ) : (
+      <div className="space-y-5">
+        <PlanHistoryPanel
+          draft={draft}
+          retryingRunId={retryingRunId}
+          onRetryRun={(runId) => {
+            void handleRetryRun(runId);
+          }}
+        />
+        <PlannerStreamPanel events={streamEvents} busy={streaming} />
+      </div>
+    )
+  );
+
   return (
-    <div className="flex flex-col gap-5">
-      <header className="page-head flex items-start justify-between">
+    <div className="flex flex-col gap-6">
+      <header className="page-head flex-wrap justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight">
+          <h1 className="text-[clamp(1.7rem,3vw,2.35rem)] font-semibold tracking-[-0.04em] text-text">
             Flight Director Cockpit
           </h1>
-          <p className="mt-1 text-sm text-dim">
-            Flight Director conversation on the left, engineering controls on
-            the right.
+          {draft?.draft_spec.name ? (
+            <div className="mt-3 text-lg font-semibold tracking-[-0.03em] text-text">
+              {draft.draft_spec.name}
+            </div>
+          ) : null}
+          <p className="mt-2 max-w-[72ch] text-sm leading-7 text-dim">
+            Guided mission planning with a live orbital map of what is happening now, what already happened, and what still blocks launch.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="rounded-full border border-red/30 bg-red/10 px-4 py-2 text-sm font-semibold text-red transition-colors hover:bg-red/15 disabled:opacity-50"
-            disabled={true}
-            title="Not implemented for drafts yet"
-          >
-            Stop
-          </button>
-          <button
-            type="button"
-            className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-semibold text-text transition-colors hover:bg-card disabled:opacity-50"
-            disabled={true}
-            title="Not implemented for drafts yet"
-          >
-            Restart
-          </button>
-          <button
-            type="button"
-            className="rounded-full border border-red/30 bg-red/10 px-4 py-2 text-sm font-semibold text-red transition-colors hover:bg-red/15 disabled:opacity-50"
-            disabled={true}
-            title="Not implemented for drafts yet"
-          >
-            Delete
-          </button>
+        <div className="flex flex-wrap gap-2 text-[11px] text-dim">
+          <span className="rounded-full border border-border bg-surface px-3 py-1">
+            {draft ? `Draft ${draft.id}` : "No draft"}
+          </span>
+          <span className={`rounded-full border px-3 py-1 ${planFlow.launchReadiness.ready ? "border-green/30 bg-green/10 text-green" : "border-amber/30 bg-amber/10 text-amber"}`}>
+            {planFlow.launchReadiness.ready ? "Launch Ready" : "Launch Blocked"}
+          </span>
         </div>
       </header>
 
@@ -1098,324 +1893,212 @@ export default function PlanModePage() {
         </div>
       ) : null}
 
-      <div className="grid gap-5 md:grid-cols-[1fr_350px] lg:grid-cols-[1fr_400px]">
-        <div className="space-y-5">
-          <div
-            className="animate-fade-in-up"
-            style={{ animationDelay: "100ms", animationFillMode: "forwards" }}
-          >
-            <PlannerTranscriptPanel
-              turns={draft.turns}
-              message={followUpMessage}
-              busy={streaming || preflightPending}
-              onMessageChange={setFollowUpMessage}
-              onSend={() => {
-                void handleFollowUp();
-              }}
-            />
+      <FlightPlanProgressRail
+        phases={planFlow.phases}
+        selectedPhase={selectedPhase}
+        onSelectPhase={(phaseId) => {
+          setAutoFollowPhase(false);
+          setSelectedPhase(phaseId);
+        }}
+      />
+
+      <PhaseHero
+        phaseLabel={selectedPhaseState.label}
+        selectedPhaseStatus={selectedPhaseState.status}
+        currentPhaseId={planFlow.currentPhaseId}
+        nextAction={heroAction}
+        activeSummary={selectedPhaseState.summary}
+        currentRun={planFlow.currentRun}
+        currentVersion={planFlow.latestVersion}
+        completedPhases={completedPhaseCount}
+        completedSubsteps={completedSubsteps}
+        latestRunIssue={selectedPhase === planFlow.currentPhaseId ? planFlow.latestRunIssue : null}
+        launchReadinessSummary={planFlow.launchReadiness.summary}
+        latestFailed={latestFailed}
+        retryingRunId={retryingRunId}
+        onRetryLatestRun={(runId) => {
+          void handleRetryRun(runId);
+        }}
+      />
+
+      {!draft ? (
+        <section className="rounded-[1.15rem] border border-border bg-card p-5">
+          <div className="mb-5 max-w-[62ch]">
+            <h2 className="section-title">Mission Brief</h2>
+            <p className="mt-2 text-sm leading-7 text-dim">
+              Define the mission, choose the workspaces, approve the planning models, and open the flight plan. Nothing else needs attention yet.
+            </p>
           </div>
-          {preflightPending ? (
-            <div
-              className="animate-fade-in-up"
-              style={{ animationDelay: "150ms", animationFillMode: "forwards" }}
+          <section className="rounded-[1.15rem] border border-border bg-card p-5">
+            <label
+              className="block text-sm font-medium text-text"
+              htmlFor="plan-prompt"
             >
-              <PreflightQuestionsPanel
-                draft={draft}
-                answers={preflightAnswers}
-                submitting={submittingPreflight}
-                onAnswerChange={(questionId, answer) => {
-                  setPreflightAnswers((current) => ({
-                    ...current,
-                    [questionId]: answer,
-                  }));
-                }}
-                onSubmit={() => {
-                  void handleSubmitPreflight(false);
-                }}
-                onSkip={() => {
-                  void handleSubmitPreflight(true);
-                }}
+              Mission prompt
+            </label>
+            <textarea
+              id="plan-prompt"
+              rows={8}
+              className="mt-2 w-full rounded-lg border border-border bg-surface p-3 text-sm text-text outline-none placeholder:text-dim focus:border-cyan"
+              placeholder="Describe what you want to build..."
+              value={prompt}
+              onInput={(event) => setPrompt(event.currentTarget.value)}
+            />
+
+            <div className="mt-4">
+              <div className="mb-2 text-sm font-medium text-text">
+                Working directories
+              </div>
+              <FileBrowser selected={workspaces} onSelect={setWorkspaces} />
+            </div>
+
+            <div className="mt-4">
+              <div className="mb-2 text-sm font-medium text-text">
+                Approved models
+              </div>
+              <ModelSelector
+                models={models}
+                selected={effectiveSelectedModels}
+                onChange={setSelectedModels}
               />
             </div>
-          ) : null}
-          <div
-            className="animate-fade-in-up"
-            style={{ animationDelay: "200ms", animationFillMode: "forwards" }}
-          >
-            <PlannerStreamPanel events={streamEvents} busy={streaming} />
-          </div>
-          <div
-            className="animate-fade-in-up"
-            style={{ animationDelay: "250ms", animationFillMode: "forwards" }}
-          >
-            <PlanHistoryPanel
-              draft={draft}
-              retryingRunId={retryingRunId}
-              onRetryRun={handleRetryRun}
-            />
-          </div>
-        </div>
 
-        <aside className="space-y-5">
-          <section
-            className="rounded-lg border border-border bg-card p-4 animate-fade-in-up"
-            style={{ animationDelay: "150ms", animationFillMode: "forwards" }}
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h2 className="section-title">Engineering Controls</h2>
-                <p className="mt-1 text-xs text-dim">
-                  Mission summary, task timeline, validation, execution, and
-                  launch.
-                </p>
-                <p className="mt-2 text-sm font-semibold text-text">
-                  {draft.draft_spec.name || "Untitled mission draft"}
-                </p>
-                {preflightPending ? (
-                  <p className="mt-2 text-xs text-amber">
-                    Preflight answers are required before the first planning run
-                    and launch.
-                  </p>
-                ) : null}
+            <div className="mt-6">
+              <div className="mb-3 text-sm font-medium text-text">
+                Planning Stack
               </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
+                  const profile = initialPlanningProfiles[key];
+                  return (
+                    <div
+                      key={key}
+                      className="rounded-xl border border-border bg-surface p-3"
+                    >
+                      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                        {label}
+                      </div>
+                      <div className="grid gap-2">
+                        <select
+                          className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
+                          value={profile.model ?? ""}
+                          onChange={(event) => {
+                            const modelId = event.target.value;
+                            const model = models.find((item) => item.id === modelId);
+                            setInitialPlanningProfiles((current) => ({
+                              ...current,
+                              [key]: {
+                                ...profile,
+                                model: modelId,
+                                agent: model?.provider_id || profile.agent,
+                              },
+                            }));
+                          }}
+                        >
+                          {models.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              [{model.provider}] {model.name}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
+                          value={profile.thinking ?? ""}
+                          onChange={(event) =>
+                            setInitialPlanningProfiles((current) => ({
+                              ...current,
+                              [key]: { ...profile, thinking: event.target.value },
+                            }))}
+                        >
+                          {THINKING_LEVELS.map((thinking) => (
+                            <option key={thinking} value={thinking}>
+                              {thinking}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-5 flex items-center justify-between gap-3">
+              <span className="text-[11px] text-dim">
+                {loadingModels
+                  ? "Loading models..."
+                  : `${effectiveSelectedModels.length} approved model(s) armed`}
+              </span>
               <button
                 type="button"
-                className={`rounded-full border border-cyan/30 px-4 py-2 text-sm font-semibold text-cyan transition-all disabled:cursor-not-allowed disabled:opacity-50 ${!(launching || validationIssues.length > 0 || streaming || preflightPending) ? "bg-cyan/20 animate-pulse-glow shadow-[0_0_15px_rgba(34,211,238,0.4)]" : "bg-cyan/10 hover:bg-cyan/15"}`}
-                disabled={
-                  launching ||
-                  validationIssues.length > 0 ||
-                  streaming ||
-                  preflightPending
-                }
+                disabled={!canCreateDraft || creatingDraft}
+                className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={() => {
-                  void handleLaunch();
+                  void handleCreateDraft();
                 }}
               >
-                Launch Mission
+                Open Flight Plan
               </button>
             </div>
-
-            <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-dim">
-              <span className="rounded-full border border-border bg-surface px-3 py-1">
-                Run {currentRun?.status ?? "idle"}
-              </span>
-              <span className="rounded-full border border-border bg-surface px-3 py-1">
-                Cost {formatCurrency(currentRun?.cost_usd)}
-              </span>
-              <span className="rounded-full border border-border bg-surface px-3 py-1">
-                Tokens{" "}
-                {(currentRun?.tokens_in ?? 0) + (currentRun?.tokens_out ?? 0)}
-              </span>
-            </div>
           </section>
-
-          <div
-            className="animate-fade-in-up"
-            style={{ animationDelay: "200ms", animationFillMode: "forwards" }}
-          >
-            <DraftSummaryPanel
-              draft={draft}
-              saving={savingDraft}
-              onNameChange={(value) => {
-                updateCurrentDraft((current) =>
-                  updateDraftSpec(current, {
-                    ...current.draft_spec,
-                    name: value,
-                  }),
-                );
-              }}
-              onGoalChange={(value) => {
-                updateCurrentDraft((current) =>
-                  updateDraftSpec(current, {
-                    ...current.draft_spec,
-                    goal: value,
-                  }),
-                );
-              }}
-              onDodChange={(value) => {
-                updateCurrentDraft((current) =>
-                  updateDraftSpec(current, {
-                    ...current.draft_spec,
-                    definition_of_done: value,
-                  }),
-                );
-              }}
-              onSave={() => {
-                void persistDraftSpec();
-              }}
+        </section>
+      ) : (
+        <div className={activeSupportPanel ? "grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]" : "space-y-5"}>
+          <div className="space-y-5">
+            <SupportDock
+              activePanel={activeSupportPanel}
+              onToggle={toggleSupportPanel}
             />
-          </div>
-
-          <div
-            className="animate-fade-in-up"
-            style={{ animationDelay: "250ms", animationFillMode: "forwards" }}
-          >
-            <TaskTimelinePanel
+            <PhaseViewport
+              selectedPhase={selectedPhase}
               draft={draft}
-              saving={savingDraft}
-              models={models}
-              onTaskChange={(taskId, patch) => {
-                updateCurrentDraft((current) =>
-                  updateDraftSpec(current, {
-                    ...current.draft_spec,
-                    tasks: current.draft_spec.tasks.map((task) =>
-                      task.id === taskId ? { ...task, ...patch } : task,
-                    ),
-                  }),
-                );
-              }}
-              onSave={() => {
-                void persistDraftSpec();
-              }}
-            />
-          </div>
-
-          <div
-            className="animate-fade-in-up"
-            style={{ animationDelay: "300ms", animationFillMode: "forwards" }}
-          >
-            <ExecutionProfileControls
-              draft={draft}
-              models={models}
-              onWorkerModelChange={(value) => {
-                updateCurrentDraft((current) =>
-                  updateDraftSpec(current, {
-                    ...current.draft_spec,
-                    execution_defaults: {
-                      ...current.draft_spec.execution_defaults,
-                      worker: {
-                        agent:
-                          current.draft_spec.execution_defaults?.worker
-                            ?.agent ?? "codex",
-                        thinking:
-                          current.draft_spec.execution_defaults?.worker
-                            ?.thinking ?? "medium",
-                        model: value,
-                      },
-                      reviewer: current.draft_spec.execution_defaults
-                        ?.reviewer ?? {
-                        agent: "codex",
-                        thinking: "medium",
-                        model:
-                          current.draft_spec.execution_defaults?.reviewer
-                            ?.model ??
-                          models[0]?.id ??
-                          "",
-                      },
-                    },
-                  }),
-                );
-              }}
-              onReviewerModelChange={(value) => {
-                updateCurrentDraft((current) =>
-                  updateDraftSpec(current, {
-                    ...current.draft_spec,
-                    execution_defaults: {
-                      ...current.draft_spec.execution_defaults,
-                      worker: current.draft_spec.execution_defaults?.worker ?? {
-                        agent: "codex",
-                        thinking: "medium",
-                        model:
-                          current.draft_spec.execution_defaults?.worker
-                            ?.model ??
-                          models[0]?.id ??
-                          "",
-                      },
-                      reviewer: {
-                        agent:
-                          current.draft_spec.execution_defaults?.reviewer
-                            ?.agent ?? "codex",
-                        thinking:
-                          current.draft_spec.execution_defaults?.reviewer
-                            ?.thinking ?? "medium",
-                        model: value,
-                      },
-                    },
-                  }),
-                );
-              }}
-              onWorkerThinkingChange={(value) => {
-                updateCurrentDraft((current) =>
-                  updateDraftSpec(current, {
-                    ...current.draft_spec,
-                    execution_defaults: {
-                      ...current.draft_spec.execution_defaults,
-                      worker: {
-                        agent:
-                          current.draft_spec.execution_defaults?.worker
-                            ?.agent ?? "codex",
-                        model:
-                          current.draft_spec.execution_defaults?.worker
-                            ?.model ??
-                          models[0]?.id ??
-                          "",
-                        thinking: value,
-                      },
-                      reviewer: current.draft_spec.execution_defaults?.reviewer ?? {
-                        agent: "codex",
-                        model:
-                          current.draft_spec.execution_defaults?.reviewer
-                            ?.model ??
-                          models[0]?.id ??
-                          "",
-                        thinking: "medium",
-                      },
-                    },
-                  }),
-                );
-              }}
-              onReviewerThinkingChange={(value) => {
-                updateCurrentDraft((current) =>
-                  updateDraftSpec(current, {
-                    ...current.draft_spec,
-                    execution_defaults: {
-                      ...current.draft_spec.execution_defaults,
-                      worker: current.draft_spec.execution_defaults?.worker ?? {
-                        agent: "codex",
-                        model:
-                          current.draft_spec.execution_defaults?.worker
-                            ?.model ??
-                          models[0]?.id ??
-                          "",
-                        thinking: "medium",
-                      },
-                      reviewer: {
-                        agent:
-                          current.draft_spec.execution_defaults?.reviewer
-                            ?.agent ?? "codex",
-                        model:
-                          current.draft_spec.execution_defaults?.reviewer
-                            ?.model ??
-                          models[0]?.id ??
-                          "",
-                        thinking: value,
-                      },
-                    },
-                  }),
-                );
-              }}
-            />
-          </div>
-
-          <div
-            className="animate-fade-in-up"
-            style={{ animationDelay: "350ms", animationFillMode: "forwards" }}
-          >
-            <PlanningProfilesSummary draft={draft} models={models} />
-          </div>
-
-          <div
-            className="animate-fade-in-up"
-            style={{ animationDelay: "400ms", animationFillMode: "forwards" }}
-          >
-            <ValidationBoard
+              substeps={planFlow.substeps}
+              retryingRunId={retryingRunId}
+              loadingModels={loadingModels}
               conflictMessage={conflictMessage}
               summaryIssues={validationIssues}
               advisoryIssues={advisoryIssues}
+              preflightAnswers={preflightAnswers}
+              submittingPreflight={submittingPreflight}
+              currentRun={currentRun}
+              streaming={streaming}
+              launching={launching}
+              launchReadiness={planFlow.launchReadiness}
+              onRetryRun={(runId) => {
+                void handleRetryRun(runId);
+              }}
+              onAnswerChange={(questionId, answer) => {
+                setPreflightAnswers((current) => ({
+                  ...current,
+                  [questionId]: answer,
+                }));
+              }}
+              onSubmitPreflight={() => {
+                void handleSubmitPreflight(false);
+              }}
+              onSkipPreflight={() => {
+                void handleSubmitPreflight(true);
+              }}
+              onLaunch={() => {
+                void handleLaunch();
+              }}
+              onOpenSupportPanel={(panel) => {
+                setActiveSupportPanel(panel);
+              }}
             />
           </div>
-        </aside>
-      </div>
+          {supportPanelMeta && supportPanelContent ? (
+            <CockpitSupportDrawer
+              title={supportPanelMeta.title}
+              description={supportPanelMeta.description}
+              label={supportPanelMeta.label}
+              onClose={() => setActiveSupportPanel(null)}
+            >
+              {supportPanelContent}
+            </CockpitSupportDrawer>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

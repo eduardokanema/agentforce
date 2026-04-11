@@ -262,6 +262,24 @@ def _record_usage(ledger, task_id: str, output: str) -> None:
             ledger.add(task_id, usage["input_tokens"], usage["output_tokens"], usage["cost_usd"])
 
 
+def _next_retry_delay_seconds(engine) -> float | None:
+    """Return the shortest remaining retry backoff, if any."""
+    from agentforce.core.spec import TaskStatus
+
+    now = time.time()
+    remaining_delays: list[float] = []
+    for task_state in engine.state.task_states.values():
+        if task_state.status != TaskStatus.RETRY or not task_state.retry_not_before:
+            continue
+        remaining = task_state.retry_not_before - now
+        if remaining > 0:
+            remaining_delays.append(remaining)
+
+    if not remaining_delays:
+        return None
+    return min(remaining_delays)
+
+
 def run_autonomous(
     mission_id: str,
     workdir: str = None,
@@ -664,10 +682,16 @@ def run_autonomous(
                     engine._save()
 
             if not actions and not in_flight:
-                idle_ticks += 1
-                if idle_ticks >= 3:
-                    print(f"\n  No actions and nothing in flight — stopping.")
-                    break
+                next_retry_delay = _next_retry_delay_seconds(engine)
+                if next_retry_delay is not None:
+                    idle_ticks = 0
+                    if tick % 5 == 0 or next_retry_delay <= 2:
+                        print(f"  waiting for retry backoff ({next_retry_delay:.1f}s remaining)")
+                else:
+                    idle_ticks += 1
+                    if idle_ticks >= 3:
+                        print(f"\n  No actions and nothing in flight — stopping.")
+                        break
             else:
                 idle_ticks = 0
 

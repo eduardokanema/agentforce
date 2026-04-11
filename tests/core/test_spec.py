@@ -291,6 +291,14 @@ class TestReviewerPromptBARSAndArtifacts:
         )
         assert "< 7" in prompt
 
+    def test_scope_guardrails_limit_review_to_current_task(self):
+        prompt = self._make_spec().generate_reviewer_prompt(
+            worker_output="done", mission_name="M", dod="D"
+        )
+        assert "Judge ONLY this task's description" in prompt
+        assert "Do NOT reject this task for artifacts" in prompt
+        assert "later dependent tasks" in prompt
+
     def test_all_8_existing_dimensions_present(self):
         prompt = self._make_spec().generate_reviewer_prompt(
             worker_output="done", mission_name="M", dod="D"

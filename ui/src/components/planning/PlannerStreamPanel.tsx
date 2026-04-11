@@ -5,6 +5,8 @@ export interface PlannerStreamEventView {
   phase: string;
   status: string;
   content?: string;
+  timestamp?: string | null;
+  live?: boolean;
 }
 
 interface PlannerStreamPanelProps {
@@ -79,12 +81,12 @@ export default function PlannerStreamPanel({
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const eventViews = useMemo(
-    () => events.map((event, index) => ({
+      () => events.map((event, index) => ({
       ...event,
       key: `${event.type}-${event.phase}-${event.status}-${index}`,
       label: labelForEvent(event),
       tone: toneForEvent(event),
-      time: formatClock(new Date().toISOString()),
+      time: event.live ? 'LIVE' : formatClock(event.timestamp ?? ''),
     })),
     [events],
   );
@@ -146,7 +148,9 @@ export default function PlannerStreamPanel({
                   {event.phase} · {event.status}
                 </span>
               </div>
-              <span className="font-mono text-[11px] text-dim">{event.time}</span>
+              <span className="font-mono text-[11px] text-dim">
+                {event.time || 'Pending'}
+              </span>
             </div>
             {event.content ? (
               <div className="mt-1 text-sm text-text">

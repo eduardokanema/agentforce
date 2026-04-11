@@ -331,6 +331,85 @@ def test_autonomous_normalizes_persisted_incompatible_defaults_before_retry(tmp_
     assert captured["variant"] == "high"
 
 
+def test_autonomous_waits_through_retry_backoff_and_redispatches(tmp_path, monkeypatch):
+    """The supervisor must not stop while a rejected task is waiting for retry backoff."""
+    from agentforce.autonomous import run_autonomous
+    from agentforce.core.spec import MissionSpec, TaskSpec
+    from agentforce.core.state import MissionState, TaskState
+
+    mission_id = "mission-retry-backoff"
+    state_root = tmp_path / ".agentforce" / "state"
+    memory_root = tmp_path / ".agentforce" / "memory"
+    state_root.mkdir(parents=True, exist_ok=True)
+    memory_root.mkdir(parents=True, exist_ok=True)
+
+    spec = MissionSpec(
+        name="Autonomous retry backoff",
+        goal="Stay alive until retry dispatches",
+        definition_of_done=["done"],
+        tasks=[TaskSpec(id="01", title="Task", description="Do it", max_retries=2, acceptance_criteria=["done"])],
+    )
+    state = MissionState(mission_id=mission_id, spec=spec, working_dir=str(tmp_path))
+    state.task_states["01"] = TaskState(task_id="01")
+    state_file = state_root / f"{mission_id}.json"
+    state.save(state_file)
+
+    monkeypatch.setattr("agentforce.autonomous.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._ensure_pkg", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._detect_agent", lambda: "codex")
+
+    clock = {"now": 100.0}
+
+    def fake_time():
+        return clock["now"]
+
+    def fake_sleep(seconds):
+        clock["now"] += seconds
+
+    attempts = {"worker": 0, "reviewer": 0}
+
+    def fake_run_agent(prompt, workdir, timeout=300, agent="auto", model=None, stream_path=None, variant=None, session_id=None):
+        if "RESPOND WITH VALID JSON ONLY" in prompt:
+            attempts["reviewer"] += 1
+            if attempts["reviewer"] == 1:
+                return True, json.dumps({
+                    "approved": False,
+                    "score": 6,
+                    "feedback": "Need another pass",
+                    "blocking_issues": [],
+                }), "", "review-session", None
+            return True, json.dumps({
+                "approved": True,
+                "score": 9,
+                "feedback": "Looks good",
+                "blocking_issues": [],
+                "criteria_results": {"security": "met"},
+            }), "", "review-session", None
+
+        attempts["worker"] += 1
+        return True, f"worker pass {attempts['worker']}", "", "worker-session", None
+
+    monkeypatch.setattr("agentforce.autonomous._run_agent", fake_run_agent)
+    monkeypatch.setattr("agentforce.autonomous.time.time", fake_time)
+    monkeypatch.setattr("agentforce.autonomous.time.sleep", fake_sleep)
+    monkeypatch.setattr("agentforce.core.engine.time.time", fake_time)
+
+    run_autonomous(
+        mission_id,
+        workdir=str(tmp_path),
+        agent="codex",
+        model="gpt-5.4",
+        variant="medium",
+        max_ticks=10,
+    )
+
+    final_state = MissionState.load(state_file)
+
+    assert attempts["worker"] == 2
+    assert attempts["reviewer"] == 2
+    assert final_state.get_task("01").status == "review_approved"
+
+
 # ---------------------------------------------------------------------------
 # Hard-block tests (security / TDD per-criterion blocking)
 # ---------------------------------------------------------------------------
