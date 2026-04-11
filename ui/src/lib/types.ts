@@ -90,10 +90,13 @@ export interface DraftTurn {
   content: string;
 }
 
+export type DraftKind = 'simple_plan' | 'black_hole';
+
 export interface MissionDraft {
   id: string;
   revision: number;
   status: string;
+  draft_kind?: DraftKind;
   draft_spec: MissionSpec;
   turns: DraftTurn[];
   validation: Record<string, unknown>;
@@ -237,6 +240,7 @@ export interface BlackHoleLoop {
 
 export interface BlackHoleCampaignState {
   draft_id: string;
+  draft_kind?: DraftKind;
   config?: BlackHoleConfig | null;
   campaign?: BlackHoleCampaign | null;
   loops: BlackHoleLoop[];
@@ -389,6 +393,7 @@ export interface DraftSummary {
   name: string;
   goal: string;
   status: 'draft';
+  draft_kind?: DraftKind;
   created_at: string;
   updated_at: string;
 }
@@ -397,6 +402,7 @@ export interface MissionSummary {
   mission_id: string;
   name: string;
   status: MissionSummaryStatus;
+  draft_kind?: DraftKind;
   done_tasks: number;
   total_tasks: number;
   pct: number;

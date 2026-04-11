@@ -301,6 +301,7 @@ export function createPlanDraft(payload: {
   workspace_paths: string[];
   companion_profile: Record<string, unknown>;
   validation?: Record<string, unknown>;
+  auto_start?: boolean;
 }): Promise<{ id: string; revision: number; plan_run_id?: string; requires_preflight?: boolean }> {
   return requestJson<{ id: string; revision: number; plan_run_id?: string; requires_preflight?: boolean }>('/api/plan/drafts', {
     method: 'POST',

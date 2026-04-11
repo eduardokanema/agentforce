@@ -453,7 +453,7 @@ def _json_request(handler: DashboardHandler, payload: dict) -> None:
     handler.headers["Content-Length"] = str(len(body))
 
 
-def _draft_payload(name: str, *, status: str = "draft") -> dict:
+def _draft_payload(name: str, *, status: str = "draft", validation: dict | None = None) -> dict:
     return {
         "status": status,
         "draft_spec": {
@@ -461,7 +461,7 @@ def _draft_payload(name: str, *, status: str = "draft") -> dict:
             "goal": name,
         },
         "turns": [],
-        "validation": {},
+        "validation": validation or {},
         "activity_log": [],
         "approved_models": [],
         "workspace_paths": [],
@@ -533,12 +533,33 @@ def test_api_plan_drafts_list_filtering(tmp_path, monkeypatch):
     assert {b["status"] for b in body_all} == {"draft", "finalized", "cancelled"}
 
 
+def test_api_plan_drafts_include_draft_kind(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    store = PlanDraftStore(tmp_path / "drafts")
+    store.create("simple-draft", **_draft_payload("Simple Draft"))
+    store.create(
+        "black-hole-draft",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
+
+    list_handler = _make_handler("/api/plan/drafts")
+    list_handler.do_GET()
+    body = _response_body(list_handler)
+    by_id = {item["id"]: item for item in body}
+
+    assert by_id["simple-draft"]["draft_kind"] == "simple_plan"
+    assert by_id["black-hole-draft"]["draft_kind"] == "black_hole"
+
+
 def test_api_plan_black_hole_campaign_lifecycle(tmp_path, monkeypatch):
     _patch_home(monkeypatch, tmp_path)
     from agentforce.server.routes import plan as plan_routes
 
     store = PlanDraftStore(tmp_path / "drafts")
-    draft = store.create("draft-black-hole", **_draft_payload("Black Hole Draft"))
+    draft = store.create(
+        "draft-black-hole",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
     monkeypatch.setattr(plan_routes, "_store", lambda: store)
 
     enqueued: list[tuple[str, str | None]] = []
@@ -551,7 +572,9 @@ def test_api_plan_black_hole_campaign_lifecycle(tmp_path, monkeypatch):
     get_handler = _make_handler("/api/plan/drafts/draft-black-hole/black-hole")
     get_handler.do_GET()
     assert get_handler.send_response.call_args.args == (200,)
-    assert _response_body(get_handler)["campaign"] is None
+    initial_body = _response_body(get_handler)
+    assert initial_body["campaign"] is None
+    assert initial_body["draft_kind"] == "black_hole"
 
     start_handler = _make_handler("/api/plan/drafts/draft-black-hole/black-hole")
     _json_request(
@@ -604,6 +627,21 @@ def test_api_plan_black_hole_campaign_lifecycle(tmp_path, monkeypatch):
     body_none = _response_body(list_none_handler)
     assert len(body_none) == 1
     assert body_none[0]["status"] == "draft"
+
+
+def test_black_hole_draft_cannot_launch_simple_mission(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.create(
+        "draft-black-hole-launch",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
+
+    start_handler = _make_handler(f"/api/plan/drafts/{draft.id}/start")
+    start_handler.do_POST()
+
+    assert start_handler.send_response.call_args.args == (409,)
+    assert _response_body(start_handler)["error"] == "black hole drafts cannot launch missions directly"
 
 
 def test_plan_draft_create_and_get_round_trip(tmp_path, monkeypatch):
@@ -750,6 +788,39 @@ def test_plan_draft_preflight_submission_enqueues_initial_run(tmp_path, monkeypa
     loaded = _response_body(get_handler)
     assert loaded["preflight_status"] == "answered"
     assert loaded["preflight_answers"]["scope_mode"]["selected_option"] == "Selection only"
+
+
+def test_black_hole_preflight_submission_does_not_enqueue_simple_plan_run(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        plan_routes,
+        "discover_preflight_questions",
+        lambda _draft: [
+            {
+                "id": "scope_mode",
+                "prompt": "Should the campaign inspect one workspace or all workspaces?",
+                "options": ["Selection only", "All workspaces"],
+                "allow_custom": False,
+            }
+        ],
+    )
+    enqueued: list[str] = []
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Black hole prompt", "validation": {"draft_kind": "black_hole"}, "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    submit_handler = _make_handler(f"/api/plan/drafts/{draft_id}/preflight")
+    _json_request(submit_handler, {"answers": {"scope_mode": {"selected_option": "Selection only"}}})
+    submit_handler.do_POST()
+
+    assert submit_handler.send_response.call_args.args == (200,)
+    assert _response_body(submit_handler)["status"] == "ready"
+    assert enqueued == []
     assert loaded["turns"][-1]["content"].startswith("Preflight answers:")
 
 
@@ -1825,6 +1896,94 @@ def test_resolve_findings_extracts_final_json_from_mixed_codex_output(monkeypatc
     assert resolved_spec["name"] == "Resolved"
     assert message == "Resolved cleanly."
     assert usage.tokens_in == 1
+
+
+def test_black_hole_child_spec_normalizes_wrapped_payload():
+    from agentforce.server import planning_runtime
+    from agentforce.server.plan_drafts import MissionDraftV1
+    from agentforce.core.spec import MissionSpec
+
+    draft = MissionDraftV1.from_dict({
+        "id": "draft-black-hole",
+        "revision": 1,
+        "status": "draft",
+        "draft_spec": {"name": "Draft", "goal": "Goal", "definition_of_done": [], "tasks": [], "caps": {}},
+        "turns": [],
+        "validation": {},
+        "activity_log": [],
+        "approved_models": [],
+        "workspace_paths": ["/workspace/app"],
+        "companion_profile": {},
+        "draft_notes": [],
+    })
+    config = {"objective": "Refactor until all functions fit the limit.", "loop_limits": {"function_line_limit": 300}}
+    candidate = {
+        "id": "candidate-1",
+        "payload": {
+            "path": "/workspace/app/module.py",
+            "function_name": "oversized_function",
+            "line_count": 832,
+        },
+    }
+
+    spec_dict = planning_runtime._normalize_black_hole_child_spec(
+        draft,
+        config,
+        candidate,
+        {
+            "draft_spec": {
+                "name": "Wrapped Mission",
+                "goal": "Shrink one function",
+                "definition_of_done": ["Target is under the configured limit."],
+                "caps": {"max_concurrent_workers": 5},
+                "tasks": [
+                    {
+                        "id": "primary",
+                        "title": "Primary refactor",
+                        "description": "Refactor the chosen function only.",
+                        "acceptance_criteria": ["Function is within the line limit."],
+                    },
+                    {
+                        "id": "secondary",
+                        "title": "Unexpected extra task",
+                        "description": "Should be dropped.",
+                        "acceptance_criteria": ["Should not survive normalization."],
+                    },
+                ],
+            }
+        },
+    )
+
+    parsed = MissionSpec.from_dict(spec_dict)
+
+    assert parsed.name == "Wrapped Mission"
+    assert parsed.goal == "Shrink one function"
+    assert parsed.caps.max_concurrent_workers == 1
+    assert len(parsed.tasks) == 1
+    assert parsed.tasks[0].id == "primary"
+
+
+def test_python_fn_length_ignores_virtualenv_and_site_packages(tmp_path):
+    from agentforce.server.black_hole_analyzers import analyze_python_fn_length
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    local_file = workspace / "app.py"
+    local_file.write_text("def local_target():\n" + ("    value = 1\n" * 304), encoding="utf-8")
+
+    vendored_file = workspace / ".venv" / "lib" / "python3.14" / "site-packages" / "networkx" / "drawing" / "nx_pylab.py"
+    vendored_file.parent.mkdir(parents=True)
+    vendored_file.write_text("def vendored_target():\n" + ("    value = 1\n" * 840), encoding="utf-8")
+
+    result = analyze_python_fn_length(
+        [str(workspace)],
+        {"loop_limits": {"function_line_limit": 300}},
+    )
+
+    assert len(result.candidates) == 1
+    assert result.candidates[0].payload["path"] == str(local_file)
+    assert result.metric["violations"] == 1
 
 
 def test_plan_start_draft_status_finalized(tmp_path, monkeypatch):

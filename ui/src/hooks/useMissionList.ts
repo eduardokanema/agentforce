@@ -9,6 +9,7 @@ function mapDraftToSummary(draft: DraftSummary): MissionSummary {
     mission_id: draft.id,
     name: draft.name,
     status: 'draft',
+    draft_kind: draft.draft_kind,
     done_tasks: 0,
     total_tasks: 0,
     pct: 0,

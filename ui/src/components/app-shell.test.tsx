@@ -165,7 +165,7 @@ describe('app shell components', () => {
     });
   });
 
-  it('Sidebar persists collapsed state and renders five nav items', () => {
+  it('Sidebar persists collapsed state and renders the full nav', () => {
     localStorage.setItem('sidebar-collapsed', '1');
     wsHarness.state = 'open';
 
@@ -177,7 +177,7 @@ describe('app shell components', () => {
 
     expect(container.textContent).not.toContain('Mission Control');
     expect(container.textContent).not.toContain('Plan Mode');
-    expect(container.querySelectorAll('a').length).toBe(6);
+    expect(container.querySelectorAll('a').length).toBe(7);
     expect(container.textContent).not.toContain('v0.0.0');
 
     const button = container.querySelector('button');

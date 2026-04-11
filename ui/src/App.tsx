@@ -6,6 +6,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import MissionsPageScreen from './pages/MissionsPage';
 import MissionDetailPageScreen from './pages/MissionDetailPage';
 import PlanModePageScreen from './pages/PlanModePage';
+import BlackHoleModePageScreen from './pages/BlackHoleModePage';
 import ModelsPageScreen from './pages/ConnectorsPage';
 import TelemetryPageScreen from './pages/TelemetryPage';
 import TaskDetailPageScreen from './pages/TaskDetailPage';
@@ -18,6 +19,8 @@ const routeConfig = [
   { path: '/mission/:mission_id/task/:task_id', element: <TaskDetailPageScreen /> },
   { path: '/plan', element: <PlanModePageScreen /> },
   { path: '/plan/:id', element: <PlanModePageScreen /> },
+  { path: '/black-hole', element: <BlackHoleModePageScreen /> },
+  { path: '/black-hole/:id', element: <BlackHoleModePageScreen /> },
   { path: '/ground-control', element: <GroundControlPageScreen /> },
   { path: '/models', element: <ModelsPageScreen /> },
   { path: '/telemetry', element: <TelemetryPageScreen /> },
@@ -29,6 +32,8 @@ type RoutePath = (typeof routeConfig)[number]['path'];
 type _taskRouteExists = Expect<'/mission/:mission_id/task/:task_id' extends RoutePath ? true : false>;
 type _planRouteExists = Expect<'/plan' extends RoutePath ? true : false>;
 type _planIdRouteExists = Expect<'/plan/:id' extends RoutePath ? true : false>;
+type _blackHoleRouteExists = Expect<'/black-hole' extends RoutePath ? true : false>;
+type _blackHoleIdRouteExists = Expect<'/black-hole/:id' extends RoutePath ? true : false>;
 type _modelsRouteExists = Expect<'/models' extends RoutePath ? true : false>;
 type _telemetryRouteExists = Expect<'/telemetry' extends RoutePath ? true : false>;
 

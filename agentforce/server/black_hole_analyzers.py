@@ -10,6 +10,27 @@ from typing import Any
 import yaml
 
 
+_IGNORED_PATH_PARTS = {
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "dist-packages",
+    "node_modules",
+    "site-packages",
+    "venv",
+}
+
+
 @dataclass(frozen=True)
 class BlackHoleCandidate:
     id: str
@@ -59,10 +80,21 @@ def _candidate_payload(path: Path, function_name: str, start_line: int, end_line
     }
 
 
+def _should_ignore_python_path(root: Path, path: Path) -> bool:
+    try:
+        relative_parts = path.relative_to(root).parts
+    except ValueError:
+        relative_parts = path.parts
+    lowered = [part.lower() for part in relative_parts]
+    return any(part in _IGNORED_PATH_PARTS or part.endswith(".egg-info") for part in lowered)
+
+
 def _iter_python_function_candidates(root: Path, threshold: int) -> list[BlackHoleCandidate]:
     candidates: list[BlackHoleCandidate] = []
     for path in sorted(root.rglob("*.py")):
         if not path.is_file():
+            continue
+        if _should_ignore_python_path(root, path):
             continue
         try:
             source = path.read_text(encoding="utf-8")

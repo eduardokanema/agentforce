@@ -11,3 +11,5 @@ graphify-out/
 tsc*.txt
 plans/
 .subagents/
+.codex/
+AGENTS.md

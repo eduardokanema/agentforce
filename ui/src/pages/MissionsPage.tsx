@@ -145,12 +145,20 @@ export default function MissionsPage() {
           <h1 className="text-3xl font-semibold tracking-tight">AgentForce Missions</h1>
           <p className="mt-1 text-sm text-dim">Track mission progress, cost, and controls from one list.</p>
         </div>
-        <Link
-          className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
-          to="/plan"
-        >
-          + New Mission
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
+            to="/plan"
+          >
+            + New Mission
+          </Link>
+          <Link
+            className="inline-flex items-center rounded-full border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-semibold text-amber transition-colors hover:bg-amber/15 hover:no-underline"
+            to="/black-hole"
+          >
+            + New Black Hole
+          </Link>
+        </div>
       </header>
 
       {!loading ? <MetricsStrip missions={missions} /> : null}
@@ -162,6 +170,10 @@ export default function MissionsPage() {
           <span>No missions yet. </span>
           <Link className="text-cyan hover:no-underline" to="/plan">
             Launch one with Plan Mode →
+          </Link>
+          <span> or </span>
+          <Link className="text-amber hover:no-underline" to="/black-hole">
+            arm a Black Hole →
           </Link>
         </section>
       ) : (

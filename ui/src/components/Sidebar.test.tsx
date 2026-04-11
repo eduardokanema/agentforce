@@ -86,7 +86,7 @@ function getThemeButton(container: HTMLElement): HTMLButtonElement | null {
 }
 
 describe('Sidebar', () => {
-  it('persists collapsed state and renders five nav items', () => {
+  it('persists collapsed state and renders the full nav', () => {
     localStorage.setItem('sidebar-collapsed', '1');
     wsHarness.state = 'open';
 
@@ -97,7 +97,7 @@ describe('Sidebar', () => {
     );
 
     expect(container.textContent).not.toContain('Mission Control');
-    expect(container.querySelectorAll('a').length).toBe(6);
+    expect(container.querySelectorAll('a').length).toBe(7);
 
     const button = container.querySelector('button');
     act(() => {

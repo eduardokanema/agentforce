@@ -20,6 +20,8 @@ from agentforce.server.planning_runtime import (
 
 # Set by the server when a MissionDaemon is active; None means ad-hoc threads.
 _active_daemon = None
+_SIMPLE_PLAN_KIND = "simple_plan"
+_BLACK_HOLE_KIND = "black_hole"
 
 
 def _store() -> PlanDraftStore:
@@ -72,6 +74,7 @@ def _enqueue_plan_run(run_id: str) -> None:
 
 def _draft_payload(draft: MissionDraftV1) -> dict:
     payload = draft.to_dict()
+    payload["draft_kind"] = _draft_kind(draft)
     payload["plan_runs"] = [run.to_dict() for run in _plan_store().list_runs_for_draft(draft.id)]
     payload["plan_versions"] = [version.to_dict() for version in _plan_store().list_versions_for_draft(draft.id)]
     latest_version_id = str(payload.get("validation", {}).get("latest_plan_version_id") or "")
@@ -93,10 +96,27 @@ def _black_hole_payload(draft: MissionDraftV1) -> dict:
     summary = _black_hole_store().summarize(draft.id)
     return {
         "draft_id": draft.id,
+        "draft_kind": _draft_kind(draft),
         "config": dict(draft.validation.get("black_hole_config") or {}) or None,
         "campaign": summary.get("campaign"),
         "loops": summary.get("loops") or [],
     }
+
+
+def _draft_kind(draft: MissionDraftV1) -> str:
+    return _draft_kind_from_validation(draft.validation)
+
+
+def _draft_kind_from_validation(validation: dict | None) -> str:
+    if isinstance(validation, dict):
+        kind = str(validation.get("draft_kind") or "").strip()
+        if kind == _BLACK_HOLE_KIND:
+            return _BLACK_HOLE_KIND
+        if kind == _SIMPLE_PLAN_KIND:
+            return _SIMPLE_PLAN_KIND
+        if isinstance(validation.get("black_hole_config"), dict) and validation.get("black_hole_config"):
+            return _BLACK_HOLE_KIND
+    return _SIMPLE_PLAN_KIND
 
 
 def _count_workspace_files(workspace_path: str) -> int:
@@ -149,11 +169,13 @@ _DRAFT_INIT_MESSAGE = (
 def _build_preflight_validation(questions: list[dict]) -> dict:
     if not questions:
         return {
+            "draft_kind": _SIMPLE_PLAN_KIND,
             "preflight_status": "not_needed",
             "preflight_questions": [],
             "preflight_answers": {},
         }
     return {
+        "draft_kind": _SIMPLE_PLAN_KIND,
         "preflight_status": "pending",
         "preflight_questions": questions,
         "preflight_answers": {},
@@ -235,6 +257,11 @@ def _create_draft(body: dict) -> tuple[int, dict]:
     validation = body.get("validation")
     if not isinstance(validation, dict):
         validation = {}
+    draft_kind = _draft_kind_from_validation(validation)
+    validation = {
+        **validation,
+        "draft_kind": draft_kind,
+    }
 
     draft = _store().create(
         str(uuid.uuid4()),
@@ -250,9 +277,11 @@ def _create_draft(body: dict) -> tuple[int, dict]:
     )
     questions = discover_preflight_questions(draft)
     if questions:
+        preflight_validation = _build_preflight_validation(questions)
+        preflight_validation["draft_kind"] = draft_kind
         save_result = _store().save(
             draft.copy_with(
-                validation=_build_preflight_validation(questions),
+                validation=preflight_validation,
                 activity_log=list(draft.activity_log) + [{"type": "preflight_questions_generated", "count": len(questions)}],
             ),
             expected_revision=draft.revision,
@@ -364,6 +393,8 @@ def _stream_turn(handler, draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    if _draft_kind(draft) != _SIMPLE_PLAN_KIND:
+        return 409, {"error": "black hole drafts do not accept manual planning messages"}
     if str(draft.validation.get("preflight_status") or "") == "pending":
         return 409, {"error": "preflight questions must be answered before planning starts"}
 
@@ -431,6 +462,7 @@ def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
     updated = draft.copy_with(
         validation={
             **draft.validation,
+            "draft_kind": _draft_kind(draft),
             "preflight_status": "skipped" if skip else "answered",
             "preflight_answers": normalized_answers,
         },
@@ -447,6 +479,15 @@ def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
         return 409, {
             "error": "draft revision conflict",
             "revision": current.revision if current is not None else None,
+        }
+
+    if _draft_kind(save_result.draft) == _BLACK_HOLE_KIND:
+        ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+        state_io._broadcast_mission_list_refresh()
+        return 200, {
+            "draft_id": save_result.draft.id,
+            "revision": save_result.draft.revision,
+            "status": "ready",
         }
 
     run = create_plan_run_for_draft(
@@ -474,6 +515,8 @@ def _start_draft(draft_id: str) -> tuple[int, dict]:
 
     if draft.status != "draft":
         return 409, {"error": f"Draft status is {draft.status!r}, expected 'draft'"}
+    if _draft_kind(draft) != _SIMPLE_PLAN_KIND:
+        return 409, {"error": "black hole drafts cannot launch missions directly"}
     if str(draft.validation.get("preflight_status") or "") == "pending":
         return 409, {"error": "preflight questions must be answered before launch"}
 
@@ -532,6 +575,8 @@ def _start_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    if _draft_kind(draft) != _BLACK_HOLE_KIND:
+        return 409, {"error": "draft is not a black hole plan"}
     if draft.status != "draft":
         return 409, {"error": f"Draft status is {draft.status!r}, expected 'draft'"}
     if str(draft.validation.get("preflight_status") or "") == "pending":
@@ -548,7 +593,7 @@ def _start_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
 
     snapshot = _black_hole_profile_snapshot(draft, config)
     updated = draft.copy_with(
-        validation={**draft.validation, "black_hole_config": config},
+        validation={**draft.validation, "draft_kind": _BLACK_HOLE_KIND, "black_hole_config": config},
         activity_log=list(draft.activity_log) + [{"type": "black_hole_configured"}],
     )
     revision = draft.revision if expected_revision is None else expected_revision
@@ -587,6 +632,8 @@ def _get_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    if _draft_kind(draft) != _BLACK_HOLE_KIND:
+        return 409, {"error": "draft is not a black hole plan"}
     return 200, _black_hole_payload(draft)
 
 
@@ -594,6 +641,8 @@ def _pause_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    if _draft_kind(draft) != _BLACK_HOLE_KIND:
+        return 409, {"error": "draft is not a black hole plan"}
     campaign = _black_hole_store().latest_for_draft(draft_id)
     if campaign is None:
         return 404, {"error": "black-hole campaign not found"}
@@ -609,6 +658,8 @@ def _resume_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    if _draft_kind(draft) != _BLACK_HOLE_KIND:
+        return 409, {"error": "draft is not a black hole plan"}
     campaign = _black_hole_store().latest_for_draft(draft_id)
     if campaign is None:
         return 404, {"error": "black-hole campaign not found"}
@@ -621,7 +672,7 @@ def _resume_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
     updated_draft = draft
     if config:
         updated_draft = draft.copy_with(
-            validation={**draft.validation, "black_hole_config": config},
+            validation={**draft.validation, "draft_kind": _BLACK_HOLE_KIND, "black_hole_config": config},
             activity_log=list(draft.activity_log) + [{"type": "black_hole_resumed"}],
         )
         save_result = _store().save(updated_draft, expected_revision=draft.revision)
@@ -639,9 +690,11 @@ def _resume_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
 
 
 def _stop_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
-    _draft, error = _load_draft_or_404(draft_id)
+    draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    if _draft_kind(draft) != _BLACK_HOLE_KIND:
+        return 409, {"error": "draft is not a black hole plan"}
     campaign = _black_hole_store().latest_for_draft(draft_id)
     if campaign is None:
         return 404, {"error": "black-hole campaign not found"}
@@ -731,6 +784,7 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
                 "name": d.name,
                 "goal": d.goal,
                 "status": d.status,
+                "draft_kind": _draft_kind(d),
                 "created_at": d.created_at.isoformat() if d.created_at else None,
                 "updated_at": d.updated_at.isoformat() if d.updated_at else None,
             }

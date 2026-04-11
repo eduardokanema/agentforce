@@ -4,6 +4,7 @@ import ConfirmDialog from './ConfirmDialog';
 import SpaceProgress from './SpaceProgress';
 import StatusBadge from './StatusBadge';
 import { useElapsedTime } from '../hooks/useElapsedTime';
+import { draftHref } from '../lib/draftKinds';
 import type { MissionSummary } from '../lib/types';
 
 interface MissionCardProps {
@@ -123,7 +124,7 @@ export default function MissionCard({ mission, onStop, onRestart, onArchive, onD
     void Promise.resolve(action()).catch(() => undefined);
   };
 
-  const missionHref = isDraft ? `/plan/${mission.mission_id}` : `/mission/${mission.mission_id}`;
+  const missionHref = isDraft ? draftHref(mission) : `/mission/${mission.mission_id}`;
   const primaryActionLabel = isDraft ? 'Open' : 'View';
   const deleteTitle = isDraft ? `Discard draft "${mission.name}"?` : `Delete mission "${mission.name}"?`;
   const deleteMessage = isDraft

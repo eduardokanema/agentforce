@@ -50,6 +50,12 @@ vi.mock('./pages/PlanModePage', () => ({
   },
 }));
 
+vi.mock('./pages/BlackHoleModePage', () => ({
+  default: function BlackHoleModePage() {
+    return <div data-testid="page">Black hole page</div>;
+  },
+}));
+
 vi.mock('./pages/ConnectorsPage', () => ({
   default: function ConnectorsPage() {
     return <div data-testid="page">Connectors page</div>;
@@ -89,6 +95,16 @@ describe('App routes', () => {
     expect(container.querySelector('[data-testid="sidebar"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="hudbar"]')).toBeTruthy();
     expect(container.textContent).toContain('Plan mode page');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('renders the black-hole route', () => {
+    const { root, container } = renderAt('/black-hole');
+
+    expect(container.textContent).toContain('Black hole page');
 
     act(() => {
       root.unmount();

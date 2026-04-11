@@ -18,10 +18,13 @@ interface BlackHoleHeroProps {
 type HeroTone = {
   accent: string;
   glow: string;
+  glowFade: string;
   badge: string;
 };
 
 const TAU = Math.PI * 2;
+const HERO_MAX_FPS = 30;
+const HERO_PIXEL_BUDGET = 900_000;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -57,6 +60,7 @@ function toneForState(state: string): HeroTone {
     return {
       accent: "text-red",
       glow: "rgba(255, 107, 107, 0.38)",
+      glowFade: "rgba(255, 107, 107, 0.2)",
       badge: "border-red/25 bg-red/10 text-red",
     };
   }
@@ -69,6 +73,7 @@ function toneForState(state: string): HeroTone {
     return {
       accent: "text-green",
       glow: "rgba(46, 204, 138, 0.35)",
+      glowFade: "rgba(46, 204, 138, 0.2)",
       badge: "border-green/25 bg-green/10 text-green",
     };
   }
@@ -82,6 +87,7 @@ function toneForState(state: string): HeroTone {
     return {
       accent: "text-cyan",
       glow: "rgba(34, 211, 238, 0.35)",
+      glowFade: "rgba(34, 211, 238, 0.2)",
       badge: "border-cyan/25 bg-cyan/10 text-cyan",
     };
   }
@@ -89,6 +95,7 @@ function toneForState(state: string): HeroTone {
   return {
     accent: "text-amber",
     glow: "rgba(240, 180, 41, 0.32)",
+    glowFade: "rgba(240, 180, 41, 0.2)",
     badge: "border-amber/25 bg-amber/10 text-amber",
   };
 }
@@ -123,13 +130,14 @@ function drawHotspot(
   radiusY: number,
   angle: number,
   glow: string,
+  glowFade: string,
   scale = 1,
 ): void {
   const x = centerX + Math.cos(angle) * radiusX;
   const y = centerY + Math.sin(angle) * radiusY;
   const gradient = ctx.createRadialGradient(x, y, 0, x, y, radiusX * 0.18 * scale);
   gradient.addColorStop(0, glow);
-  gradient.addColorStop(0.3, glow.replace(/0\.\d+\)$/, "0.2)"));
+  gradient.addColorStop(0.3, glowFade);
   gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
   ctx.fillStyle = gradient;
   ctx.beginPath();
@@ -160,6 +168,12 @@ function drawHeroFrame(
   const spin = 1.35 + ((seed >>> 8) % 7) * 0.08;
   const lightAngle = Math.PI * 0.95 + Math.sin(phase * 0.65) * 0.08;
   const warmAngle = Math.PI * 0.05 + Math.cos(phase * 0.37) * 0.13;
+  const fidelity = reducedMotion
+    ? 0.42
+    : clamp(Math.sqrt(HERO_PIXEL_BUDGET / Math.max(1, width * height)), 0.58, 1);
+  const blurSegments = Math.max(16, Math.round(24 * fidelity));
+  const diskSegments = Math.max(64, Math.round(96 * fidelity));
+  const ringCount = fidelity >= 0.84 ? 3 : 2;
 
   const bg = ctx.createRadialGradient(
     centerX - width * 0.06,
@@ -197,9 +211,9 @@ function drawHeroFrame(
   ctx.lineCap = "round";
   ctx.strokeStyle = "rgba(255, 164, 73, 0.12)";
   ctx.lineWidth = diskRadiusY * 0.95;
-  for (let segment = 0; segment < 32; segment += 1) {
-    const start = (segment / 32) * TAU;
-    const end = start + TAU / 32 * 0.58;
+  for (let segment = 0; segment < blurSegments; segment += 1) {
+    const start = (segment / blurSegments) * TAU;
+    const end = start + TAU / blurSegments * 0.58;
     drawEllipseSegment(ctx, centerX, centerY, diskRadiusX, diskRadiusY, start, end, phase, drift * 0.5);
   }
   ctx.restore();
@@ -207,10 +221,10 @@ function drawHeroFrame(
   ctx.save();
   ctx.lineCap = "round";
   ctx.filter = "blur(1.25px)";
-  for (let segment = 0; segment < 140; segment += 1) {
-    const start = (segment / 140) * TAU + time * spin * 0.12;
-    const end = start + TAU / 140 * 1.08;
-    const angle = start + TAU / 280;
+  for (let segment = 0; segment < diskSegments; segment += 1) {
+    const start = (segment / diskSegments) * TAU + time * spin * 0.12;
+    const end = start + TAU / diskSegments * 1.08;
+    const angle = start + TAU / (diskSegments * 2);
     const front = clamp(Math.cos(angle - lightAngle) * 0.55 + 0.55, 0, 1);
     const crescent = clamp(Math.cos(angle - warmAngle) * 0.45 + 0.55, 0, 1);
     const turbulence = Math.sin(angle * 7.2 + phase * 3.1) * 0.07 + Math.sin(angle * 13.4 + seed * 0.001) * 0.04;
@@ -236,7 +250,7 @@ function drawHeroFrame(
   ctx.filter = "blur(10px)";
   ctx.strokeStyle = "rgba(255, 197, 109, 0.12)";
   ctx.lineWidth = 2;
-  for (let arc = 0; arc < 3; arc += 1) {
+  for (let arc = 0; arc < ringCount; arc += 1) {
     const arcPhase = phase * (0.45 + arc * 0.12) + arc * 1.2;
     ctx.beginPath();
     ctx.ellipse(
@@ -272,8 +286,28 @@ function drawHeroFrame(
   ctx.fill();
   ctx.restore();
 
-  drawHotspot(ctx, centerX, centerY, diskRadiusX, diskRadiusY, lightAngle + Math.sin(phase * 1.8) * 0.12, "rgba(255, 231, 172, 0.55)", 0.88);
-  drawHotspot(ctx, centerX, centerY, diskRadiusX * 0.92, diskRadiusY * 0.92, warmAngle - Math.sin(phase * 1.3) * 0.16, tone.glow, 0.72);
+  drawHotspot(
+    ctx,
+    centerX,
+    centerY,
+    diskRadiusX,
+    diskRadiusY,
+    lightAngle + Math.sin(phase * 1.8) * 0.12,
+    "rgba(255, 231, 172, 0.55)",
+    "rgba(255, 231, 172, 0.2)",
+    0.88,
+  );
+  drawHotspot(
+    ctx,
+    centerX,
+    centerY,
+    diskRadiusX * 0.92,
+    diskRadiusY * 0.92,
+    warmAngle - Math.sin(phase * 1.3) * 0.16,
+    tone.glow,
+    tone.glowFade,
+    0.72,
+  );
 
   ctx.save();
   ctx.globalCompositeOperation = "screen";
@@ -368,16 +402,56 @@ export default function BlackHoleHero({
 
     let disposed = false;
     let animationFrame = 0;
+    let resizeFrame = 0;
     let width = 0;
     let height = 0;
+    let inViewport = true;
+    let documentVisible = document.visibilityState !== "hidden";
+    let lastDrawAt = 0;
 
-    const resize = (): void => {
+    const draw = (now: number): void => {
+      if (!width || !height) {
+        return;
+      }
+      drawHeroFrame(context, width, height, now, seed, prefersReducedMotion, tone);
+    };
+
+    const stopAnimation = (): void => {
+      if (animationFrame) {
+        window.cancelAnimationFrame(animationFrame);
+        animationFrame = 0;
+      }
+    };
+
+    const shouldAnimate = (): boolean => (
+      !prefersReducedMotion && inViewport && documentVisible && width > 0 && height > 0
+    );
+
+    const syncAnimation = (): void => {
+      if (disposed) {
+        return;
+      }
+
+      stopAnimation();
+      if (shouldAnimate()) {
+        lastDrawAt = 0;
+        animationFrame = window.requestAnimationFrame(tick);
+        return;
+      }
+
+      draw(performance.now());
+    };
+
+    const commitResize = (): void => {
+      resizeFrame = 0;
       if (disposed) {
         return;
       }
 
       const rect = canvas.getBoundingClientRect();
-      const devicePixelRatio = clamp(window.devicePixelRatio || 1, 1, 2.25);
+      const canvasArea = Math.max(1, rect.width * rect.height);
+      const maxDevicePixelRatio = clamp(Math.sqrt(HERO_PIXEL_BUDGET / canvasArea), 1, 1.6);
+      const devicePixelRatio = clamp(window.devicePixelRatio || 1, 1, maxDevicePixelRatio);
       const nextWidth = Math.max(1, Math.floor(rect.width * devicePixelRatio));
       const nextHeight = Math.max(1, Math.floor(rect.height * devicePixelRatio));
 
@@ -388,36 +462,75 @@ export default function BlackHoleHero({
 
       width = nextWidth;
       height = nextHeight;
-      drawHeroFrame(context, width, height, performance.now(), seed, prefersReducedMotion, tone);
+      draw(performance.now());
+      syncAnimation();
+    };
+
+    const scheduleResize = (): void => {
+      if (disposed || resizeFrame) {
+        return;
+      }
+      resizeFrame = window.requestAnimationFrame(commitResize);
     };
 
     const resizeObserver = typeof ResizeObserver !== "undefined"
       ? new ResizeObserver(() => {
-          resize();
+          scheduleResize();
         })
       : null;
 
     resizeObserver?.observe(canvas);
-    window.addEventListener("resize", resize);
-    resize();
+    if (!resizeObserver) {
+      window.addEventListener("resize", scheduleResize);
+    }
+
+    const intersectionObserver = typeof IntersectionObserver !== "undefined"
+      ? new IntersectionObserver(
+          (entries) => {
+            inViewport = entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0.08);
+            syncAnimation();
+          },
+          { threshold: 0.08 },
+        )
+      : null;
+
+    intersectionObserver?.observe(canvas);
+
+    const handleVisibilityChange = (): void => {
+      documentVisible = document.visibilityState !== "hidden";
+      syncAnimation();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     const tick = (now: number): void => {
       if (disposed) {
         return;
       }
-      drawHeroFrame(context, width, height, now, seed, prefersReducedMotion, tone);
+      if (!shouldAnimate()) {
+        animationFrame = 0;
+        return;
+      }
+      if (lastDrawAt === 0 || now - lastDrawAt >= 1000 / HERO_MAX_FPS) {
+        lastDrawAt = now;
+        draw(now);
+      }
       animationFrame = window.requestAnimationFrame(tick);
     };
 
-    if (!prefersReducedMotion) {
-      animationFrame = window.requestAnimationFrame(tick);
-    }
+    scheduleResize();
 
     return () => {
       disposed = true;
-      window.cancelAnimationFrame(animationFrame);
+      stopAnimation();
+      if (resizeFrame) {
+        window.cancelAnimationFrame(resizeFrame);
+      }
       resizeObserver?.disconnect();
-      window.removeEventListener("resize", resize);
+      intersectionObserver?.disconnect();
+      if (!resizeObserver) {
+        window.removeEventListener("resize", scheduleResize);
+      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [prefersReducedMotion, seed, tone]);
 

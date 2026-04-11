@@ -766,6 +766,100 @@ def _fallback_black_hole_spec(draft: MissionDraftV1, config: dict[str, Any], can
     }
 
 
+def _normalized_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _normalize_black_hole_child_task(task: dict[str, Any], fallback_task: dict[str, Any], working_dir: str | None) -> dict[str, Any]:
+    normalized = dict(fallback_task)
+    if isinstance(task.get("id"), str) and task["id"].strip():
+        normalized["id"] = task["id"].strip()
+    if isinstance(task.get("title"), str) and task["title"].strip():
+        normalized["title"] = task["title"].strip()
+    if isinstance(task.get("description"), str) and task["description"].strip():
+        normalized["description"] = task["description"].strip()
+
+    acceptance_criteria = _normalized_string_list(task.get("acceptance_criteria"))
+    if acceptance_criteria:
+        normalized["acceptance_criteria"] = acceptance_criteria
+
+    dependencies = _normalized_string_list(task.get("dependencies"))
+    normalized["dependencies"] = dependencies
+
+    if isinstance(task.get("working_dir"), str) and task["working_dir"].strip():
+        normalized["working_dir"] = task["working_dir"].strip()
+    elif working_dir:
+        normalized["working_dir"] = working_dir
+
+    try:
+        normalized["max_retries"] = max(1, int(task.get("max_retries") or normalized.get("max_retries") or 2))
+    except (TypeError, ValueError):
+        normalized["max_retries"] = int(fallback_task.get("max_retries") or 2)
+
+    output_artifacts = _normalized_string_list(task.get("output_artifacts"))
+    if output_artifacts:
+        normalized["output_artifacts"] = output_artifacts
+
+    execution = task.get("execution")
+    if isinstance(execution, dict) and execution:
+        normalized["execution"] = execution
+    model = task.get("model")
+    if isinstance(model, str) and model.strip():
+        normalized["model"] = model.strip()
+    return normalized
+
+
+def _normalize_black_hole_child_spec(
+    draft: MissionDraftV1,
+    config: dict[str, Any],
+    candidate: dict[str, Any],
+    spec_dict: dict[str, Any] | None,
+) -> dict[str, Any]:
+    fallback = _fallback_black_hole_spec(draft, config, candidate)
+    raw_spec = dict(spec_dict or {})
+    nested = raw_spec.get("draft_spec")
+    if isinstance(nested, dict):
+        missing_required = any(key not in raw_spec for key in ("name", "goal", "definition_of_done", "tasks"))
+        if missing_required:
+            raw_spec = dict(nested)
+
+    normalized = dict(fallback)
+    normalized["name"] = str(raw_spec.get("name") or fallback["name"]).strip() or fallback["name"]
+    normalized["goal"] = str(raw_spec.get("goal") or fallback["goal"]).strip() or fallback["goal"]
+
+    definition_of_done = _normalized_string_list(raw_spec.get("definition_of_done"))
+    normalized["definition_of_done"] = definition_of_done or list(fallback["definition_of_done"])
+
+    working_dir = str(raw_spec.get("working_dir") or fallback.get("working_dir") or "").strip()
+    normalized["working_dir"] = working_dir or None
+
+    caps = dict(fallback.get("caps") or {})
+    raw_caps = raw_spec.get("caps")
+    if isinstance(raw_caps, dict):
+        caps.update({key: value for key, value in raw_caps.items() if value is not None})
+    caps["max_concurrent_workers"] = 1
+    normalized["caps"] = caps
+
+    execution_defaults = raw_spec.get("execution_defaults")
+    normalized["execution_defaults"] = execution_defaults if isinstance(execution_defaults, dict) else dict(fallback.get("execution_defaults") or {})
+
+    fallback_task = dict((fallback.get("tasks") or [{}])[0])
+    raw_tasks = raw_spec.get("tasks")
+    if isinstance(raw_tasks, list):
+        candidate_tasks = [dict(task) for task in raw_tasks if isinstance(task, dict)]
+    else:
+        candidate_tasks = []
+    task_source = candidate_tasks[0] if candidate_tasks else fallback_task
+    normalized["tasks"] = [_normalize_black_hole_child_task(task_source, fallback_task, normalized["working_dir"])]
+
+    project_memory_file = raw_spec.get("project_memory_file")
+    if isinstance(project_memory_file, str) and project_memory_file.strip():
+        normalized["project_memory_file"] = project_memory_file.strip()
+    return normalized
+
+
 def _black_hole_planner_prompt(
     draft: MissionDraftV1,
     config: dict[str, Any],
@@ -865,6 +959,7 @@ def _synthesize_black_hole_child_plan(
             if planner_error
             else "Planner output was invalid; using a deterministic single-task fallback mission scoped to the selected candidate."
         )
+    spec_dict = _normalize_black_hole_child_spec(draft, config, candidate, spec_dict)
     run = _record_step(
         run,
         name="planner_synthesis",
@@ -932,6 +1027,8 @@ def _synthesize_black_hole_child_plan(
     run = _record_step(run, name="resolver", status="started", message="Resolving critic findings")
     if technical.get("issues") or practical.get("issues") or validation.get("issues"):
         spec_dict, assistant_message, resolver_usage = _resolve_findings(draft, spec_dict, technical, practical)
+        spec_dict = _normalize_black_hole_child_spec(draft, config, candidate, spec_dict)
+        validation = _mission_plan_validation(spec_dict)
     else:
         resolver_usage = TokenEvent(0, 0, 0.0)
     version = store.create_version(
