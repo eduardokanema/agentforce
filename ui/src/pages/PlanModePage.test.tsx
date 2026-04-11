@@ -2,7 +2,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { MissionDraft, Model } from '../lib/types';
+import type { BlackHoleCampaignState, MissionDraft, Model } from '../lib/types';
 import PlanModePage from './PlanModePage';
 
 function flushPromises(): Promise<void> {
@@ -71,6 +71,74 @@ function makeDraft(overrides: Partial<MissionDraft> = {}): MissionDraft {
     },
     draft_notes: [],
     ...overrides,
+  };
+}
+
+function makeBlackHoleState(): BlackHoleCampaignState {
+  return {
+    draft_id: 'draft-123',
+    config: {
+      mode: 'black_hole',
+      objective: 'Refactor until no Python function exceeds 300 lines.',
+      analyzer: 'python_fn_length',
+      scope: 'repo',
+      global_acceptance: [],
+      loop_limits: {
+        max_loops: 8,
+        max_no_progress: 2,
+        function_line_limit: 300,
+      },
+      gate_policy: {
+        require_test_delta: true,
+        public_surface_policy: 'justify',
+      },
+      docs_manifest_path: null,
+      notes: '',
+    },
+    campaign: {
+      id: 'campaign-1',
+      draft_id: 'draft-123',
+      status: 'child_mission_running',
+      created_at: '2026-04-11T00:00:00Z',
+      updated_at: '2026-04-11T00:10:00Z',
+      current_loop: 2,
+      max_loops: 8,
+      max_no_progress: 2,
+      no_progress_count: 0,
+      active_child_mission_id: 'mission-1',
+      active_plan_run_id: 'run-99',
+      last_metric: {
+        threshold: 300,
+        violations: 4,
+        overflow_total: 180,
+        max_line_count: 412,
+      },
+      last_delta: 34,
+      stop_reason: '',
+      config_snapshot: {},
+      tokens_in: 1200,
+      tokens_out: 3400,
+      cost_usd: 0.221,
+    },
+    loops: [
+      {
+        campaign_id: 'campaign-1',
+        loop_no: 1,
+        status: 'completed',
+        created_at: '2026-04-11T00:00:00Z',
+        completed_at: '2026-04-11T00:04:00Z',
+        candidate_id: 'app.py:big_fn:12',
+        candidate_summary: 'app.py:12-355 spans 344 lines',
+        metric_before: { violations: 5, max_line_count: 344 },
+        metric_after: { violations: 4, max_line_count: 330 },
+        normalized_delta: 22,
+        plan_run_id: 'run-1',
+        plan_version_id: 'version-1',
+        mission_id: 'mission-1',
+        review_summary: 'Child mission completed with all tasks review-approved.',
+        cost_usd: 0.111,
+      },
+    ],
   };
 }
 
@@ -895,6 +963,48 @@ describe('PlanModePage', () => {
 
     expect(container.textContent).not.toContain('Planning History');
     expect(container.querySelector('input[aria-label="Mission name"]')).toBeTruthy();
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('renders the black-hole hero, config panel, and ledger when a campaign is active', async () => {
+    const blackHoleState = makeBlackHoleState();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft({
+          validation: {
+            ...makeDraft().validation,
+            black_hole_config: blackHoleState.config,
+          },
+        })), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123/black-hole') {
+        return new Response(JSON.stringify(blackHoleState), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    expect(container.textContent).toContain('Black Hole Campaign Telemetry');
+    expect(container.textContent).toContain('Black Hole Campaign');
+    expect(container.textContent).toContain('Loop Ledger');
+    expect(container.textContent).toContain('Candidate-by-candidate provenance');
+    expect(container.textContent).toContain('loop 02');
 
     act(() => {
       root.unmount();

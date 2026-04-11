@@ -10,3 +10,4 @@ ui/dist/
 graphify-out/
 tsc*.txt
 plans/
+.subagents/

@@ -8,10 +8,15 @@ import uuid
 import yaml
 
 from agentforce.core.spec import Caps, MissionSpec
+from agentforce.server.black_hole_runs import BlackHoleCampaignStore, is_terminal_campaign_status
 from agentforce.server import state_io, ws
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunStore
-from agentforce.server.planning_runtime import create_plan_run_for_draft, discover_preflight_questions
+from agentforce.server.planning_runtime import (
+    create_plan_run_for_draft,
+    discover_preflight_questions,
+    enqueue_black_hole_campaign,
+)
 
 # Set by the server when a MissionDaemon is active; None means ad-hoc threads.
 _active_daemon = None
@@ -23,6 +28,10 @@ def _store() -> PlanDraftStore:
 
 def _plan_store() -> PlanRunStore:
     return PlanRunStore()
+
+
+def _black_hole_store() -> BlackHoleCampaignStore:
+    return BlackHoleCampaignStore()
 
 
 def _effective_daemon():
@@ -78,6 +87,16 @@ def _draft_payload(draft: MissionDraftV1) -> dict:
     payload["preflight_questions"] = list(payload.get("validation", {}).get("preflight_questions") or [])
     payload["preflight_answers"] = dict(payload.get("validation", {}).get("preflight_answers") or {})
     return payload
+
+
+def _black_hole_payload(draft: MissionDraftV1) -> dict:
+    summary = _black_hole_store().summarize(draft.id)
+    return {
+        "draft_id": draft.id,
+        "config": dict(draft.validation.get("black_hole_config") or {}) or None,
+        "campaign": summary.get("campaign"),
+        "loops": summary.get("loops") or [],
+    }
 
 
 def _count_workspace_files(workspace_path: str) -> int:
@@ -159,6 +178,52 @@ def _preflight_prompt(draft: MissionDraftV1) -> str:
     if not lines:
         return str(draft.draft_spec.get("goal") or "")
     return f"{draft.draft_spec.get('goal') or ''}\n\nPreflight clarifications:\n" + "\n".join(lines)
+
+
+def _normalize_black_hole_config(draft: MissionDraftV1, body: dict) -> dict:
+    existing = dict(draft.validation.get("black_hole_config") or {})
+    raw = dict(body.get("config") or body or {})
+    loop_limits = {
+        **dict(existing.get("loop_limits") or {}),
+        **dict(raw.get("loop_limits") or {}),
+    }
+    gate_policy = {
+        **dict(existing.get("gate_policy") or {}),
+        **dict(raw.get("gate_policy") or {}),
+    }
+    config = {
+        "mode": "black_hole",
+        "objective": str(raw.get("objective") or existing.get("objective") or draft.draft_spec.get("goal") or "").strip(),
+        "analyzer": str(raw.get("analyzer") or existing.get("analyzer") or "python_fn_length").strip() or "python_fn_length",
+        "scope": str(raw.get("scope") or existing.get("scope") or "repo").strip() or "repo",
+        "global_acceptance": list(raw.get("global_acceptance") or existing.get("global_acceptance") or []),
+        "loop_limits": {
+            "max_loops": max(1, int(loop_limits.get("max_loops") or 8)),
+            "max_no_progress": max(1, int(loop_limits.get("max_no_progress") or 2)),
+            "function_line_limit": max(50, int(loop_limits.get("function_line_limit") or 300)),
+        },
+        "gate_policy": {
+            "require_test_delta": gate_policy.get("require_test_delta", True) is not False,
+            "public_surface_policy": str(gate_policy.get("public_surface_policy") or "justify").strip() or "justify",
+        },
+        "docs_manifest_path": str(raw.get("docs_manifest_path") or existing.get("docs_manifest_path") or "").strip() or None,
+        "notes": str(raw.get("notes") or existing.get("notes") or "").strip(),
+    }
+    if not config["objective"]:
+        raise ValueError("black hole objective is required")
+    if config["analyzer"] == "docs_section_coverage" and not config["docs_manifest_path"]:
+        raise ValueError("docs_section_coverage requires docs_manifest_path")
+    return config
+
+
+def _black_hole_profile_snapshot(draft: MissionDraftV1, config: dict) -> dict:
+    return {
+        **config,
+        "profile_snapshot": {
+            "planning_profiles": dict(draft.validation.get("planning_profiles") or {}),
+            "execution_defaults": dict(draft.draft_spec.get("execution_defaults") or {}),
+        },
+    }
 
 
 def _create_draft(body: dict) -> tuple[int, dict]:
@@ -463,6 +528,131 @@ def _start_draft(draft_id: str) -> tuple[int, dict]:
     return 200, {"mission_id": mission_id, "draft_id": draft_id, "status": "started"}
 
 
+def _start_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
+    draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
+    if draft.status != "draft":
+        return 409, {"error": f"Draft status is {draft.status!r}, expected 'draft'"}
+    if str(draft.validation.get("preflight_status") or "") == "pending":
+        return 409, {"error": "preflight questions must be answered before black-hole launch"}
+
+    expected_revision = body.get("expected_revision")
+    if expected_revision is not None and not isinstance(expected_revision, int):
+        return 400, {"error": "expected_revision must be an integer when provided"}
+
+    try:
+        config = _normalize_black_hole_config(draft, body)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+
+    snapshot = _black_hole_profile_snapshot(draft, config)
+    updated = draft.copy_with(
+        validation={**draft.validation, "black_hole_config": config},
+        activity_log=list(draft.activity_log) + [{"type": "black_hole_configured"}],
+    )
+    revision = draft.revision if expected_revision is None else expected_revision
+    save_result = _store().save(updated, expected_revision=revision)
+    if save_result.status != "saved" or save_result.draft is None:
+        current = save_result.draft
+        return 409, {
+            "error": "draft revision conflict",
+            "revision": current.revision if current is not None else None,
+        }
+
+    try:
+        campaign = _black_hole_store().create_campaign(
+            str(uuid.uuid4()),
+            draft_id=draft_id,
+            max_loops=int(config["loop_limits"]["max_loops"]),
+            max_no_progress=int(config["loop_limits"]["max_no_progress"]),
+            config_snapshot=snapshot,
+        )
+    except ValueError as exc:
+        return 409, {"error": str(exc)}
+
+    enqueue_black_hole_campaign(campaign.id, draft_id=draft_id)
+    ws.broadcast({"type": "black_hole_campaign_updated", "draft_id": draft_id, "campaign": campaign.to_dict()})
+    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+    state_io._broadcast_mission_list_refresh()
+    return 200, {
+        "draft_id": draft_id,
+        "campaign_id": campaign.id,
+        "status": campaign.status,
+        "revision": save_result.draft.revision,
+    }
+
+
+def _get_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
+    draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
+    return 200, _black_hole_payload(draft)
+
+
+def _pause_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
+    draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
+    campaign = _black_hole_store().latest_for_draft(draft_id)
+    if campaign is None:
+        return 404, {"error": "black-hole campaign not found"}
+    if is_terminal_campaign_status(campaign.status):
+        return 409, {"error": f"campaign already ended with status {campaign.status!r}"}
+    campaign = campaign.copy_with(status="paused", stop_reason="Paused by operator.")
+    _black_hole_store().save_campaign(campaign)
+    ws.broadcast({"type": "black_hole_campaign_updated", "draft_id": draft_id, "campaign": campaign.to_dict()})
+    return 200, {"draft_id": draft_id, "campaign_id": campaign.id, "status": campaign.status}
+
+
+def _resume_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
+    draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
+    campaign = _black_hole_store().latest_for_draft(draft_id)
+    if campaign is None:
+        return 404, {"error": "black-hole campaign not found"}
+    if is_terminal_campaign_status(campaign.status):
+        return 409, {"error": f"campaign already ended with status {campaign.status!r}"}
+    try:
+        config = _normalize_black_hole_config(draft, body) if body else dict(draft.validation.get("black_hole_config") or {})
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+    updated_draft = draft
+    if config:
+        updated_draft = draft.copy_with(
+            validation={**draft.validation, "black_hole_config": config},
+            activity_log=list(draft.activity_log) + [{"type": "black_hole_resumed"}],
+        )
+        save_result = _store().save(updated_draft, expected_revision=draft.revision)
+        if save_result.status == "saved" and save_result.draft is not None:
+            updated_draft = save_result.draft
+    campaign = campaign.copy_with(
+        status="evaluating_workspace",
+        stop_reason="",
+        config_snapshot=_black_hole_profile_snapshot(updated_draft, dict(updated_draft.validation.get("black_hole_config") or {})),
+    )
+    _black_hole_store().save_campaign(campaign)
+    ws.broadcast({"type": "black_hole_campaign_updated", "draft_id": draft_id, "campaign": campaign.to_dict()})
+    enqueue_black_hole_campaign(campaign.id, draft_id=draft_id)
+    return 200, {"draft_id": draft_id, "campaign_id": campaign.id, "status": campaign.status}
+
+
+def _stop_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
+    _draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
+    campaign = _black_hole_store().latest_for_draft(draft_id)
+    if campaign is None:
+        return 404, {"error": "black-hole campaign not found"}
+    if is_terminal_campaign_status(campaign.status):
+        return 200, {"draft_id": draft_id, "campaign_id": campaign.id, "status": campaign.status}
+    campaign = campaign.copy_with(status="cancelled", stop_reason="Stopped by operator.")
+    _black_hole_store().save_campaign(campaign)
+    ws.broadcast({"type": "black_hole_campaign_updated", "draft_id": draft_id, "campaign": campaign.to_dict()})
+    return 200, {"draft_id": draft_id, "campaign_id": campaign.id, "status": campaign.status}
+
+
 def _retry_plan_run(run_id: str) -> tuple[int, dict]:
     run = _plan_store().load_run(run_id)
     if run is None:
@@ -556,6 +746,8 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
         if error is not None:
             return error
         return 200, {"draft_id": draft.id, "plan_runs": [run.to_dict() for run in _plan_store().list_runs_for_draft(draft.id)]}
+    if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "black-hole":
+        return _get_black_hole_campaign(parts[3])
     if len(parts) == 4 and parts[1] == "plan" and parts[2] == "runs":
         run = _plan_store().load_run(parts[3])
         if run is None:
@@ -573,6 +765,9 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
     if len(parts) == 3 and parts[1] == "plan" and parts[2] == "drafts":
         return _create_draft(handler._read_json_body())
 
+    if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "black-hole":
+        return _start_black_hole_campaign(parts[3], handler._read_json_body())
+
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "messages":
         return _stream_turn(handler, parts[3], handler._read_json_body())
 
@@ -586,6 +781,12 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
         return _start_draft(parts[3])
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "runs" and parts[4] == "retry":
         return _retry_plan_run(parts[3])
+    if len(parts) == 6 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "black-hole" and parts[5] == "pause":
+        return _pause_black_hole_campaign(parts[3])
+    if len(parts) == 6 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "black-hole" and parts[5] == "resume":
+        return _resume_black_hole_campaign(parts[3], handler._read_json_body())
+    if len(parts) == 6 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "black-hole" and parts[5] == "stop":
+        return _stop_black_hole_campaign(parts[3])
 
     return 404, {"error": "Not found"}
 

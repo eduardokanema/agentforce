@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agentforce.daemon import DaemonAlreadyRunning, DaemonCallbacks, DaemonLock, MissionDaemon
+from agentforce.daemon import DaemonAlreadyRunning, DaemonCallbacks, DaemonJob, DaemonLock, MissionDaemon
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +548,27 @@ def test_websocket_on_complete_callback(tmp_path):
     d.stop()
 
 
+def test_black_hole_job_dispatch_callback(tmp_path):
+    completed = []
+    d = MissionDaemon(
+        state_dir=tmp_path,
+        callbacks=DaemonCallbacks(on_complete=completed.append),
+        poll_interval=0.05,
+        max_drain_seconds=1,
+    )
+    with patch("agentforce.server.planning_runtime.run_black_hole_campaign", return_value=None):
+        d.enqueue_job(DaemonJob(job_id="bh-001", job_type="black_hole_campaign", payload={"draft_id": "draft-001"}))
+        d.start()
+        time.sleep(0.3)
+        assert completed[0] == {
+            "type": "daemon:completed",
+            "job_id": "bh-001",
+            "job_type": "black_hole_campaign",
+            "draft_id": "draft-001",
+        }
+    d.stop()
+
+
 def test_websocket_on_fail_callback(tmp_path):
     """on_fail receives {"type": "daemon:failed", "error": ..., "mission_id": ...} on failure."""
     failed = []
@@ -609,6 +630,36 @@ def test_broadcast_wired_in_daemon_routes(tmp_path, monkeypatch):
     with open(source) as fh:
         content = fh.read()
     assert "import ws" not in content, "daemon.py must not import ws directly"
+
+
+def test_black_hole_daemon_completion_requeues_campaign(tmp_path, monkeypatch):
+    import agentforce.server.handler as handler_mod
+    from agentforce.server.black_hole_runs import BlackHoleCampaignStore
+    from agentforce.server.routes import daemon as daemon_routes
+
+    monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", tmp_path)
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", tmp_path)
+
+    store = BlackHoleCampaignStore(tmp_path / "black_hole")
+    campaign = store.create_campaign(
+        "campaign-001",
+        draft_id="draft-001",
+        max_loops=4,
+        max_no_progress=2,
+        config_snapshot={"objective": "demo", "analyzer": "python_fn_length", "loop_limits": {"max_loops": 4, "max_no_progress": 2, "function_line_limit": 300}},
+    )
+    store.save_campaign(campaign.copy_with(status="child_mission_running", active_child_mission_id="mission-abc"))
+
+    requeued: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "agentforce.server.planning_runtime.enqueue_black_hole_campaign",
+        lambda campaign_id, *, draft_id=None: requeued.append((campaign_id, draft_id)),
+    )
+    monkeypatch.setattr(handler_mod, "_daemon", None, raising=False)
+
+    daemon_routes._ws_on_complete({"type": "daemon:completed", "mission_id": "mission-abc"})
+
+    assert requeued == [("campaign-001", "draft-001")]
 
 
 # ---------------------------------------------------------------------------

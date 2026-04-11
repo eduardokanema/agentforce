@@ -532,6 +532,73 @@ def test_api_plan_drafts_list_filtering(tmp_path, monkeypatch):
     assert len(body_all) == 3
     assert {b["status"] for b in body_all} == {"draft", "finalized", "cancelled"}
 
+
+def test_api_plan_black_hole_campaign_lifecycle(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    from agentforce.server.routes import plan as plan_routes
+
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.create("draft-black-hole", **_draft_payload("Black Hole Draft"))
+    monkeypatch.setattr(plan_routes, "_store", lambda: store)
+
+    enqueued: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        plan_routes,
+        "enqueue_black_hole_campaign",
+        lambda campaign_id, *, draft_id=None: enqueued.append((campaign_id, draft_id)),
+    )
+
+    get_handler = _make_handler("/api/plan/drafts/draft-black-hole/black-hole")
+    get_handler.do_GET()
+    assert get_handler.send_response.call_args.args == (200,)
+    assert _response_body(get_handler)["campaign"] is None
+
+    start_handler = _make_handler("/api/plan/drafts/draft-black-hole/black-hole")
+    _json_request(
+        start_handler,
+        {
+            "expected_revision": draft.revision,
+            "config": {
+                "objective": "Refactor until no Python function exceeds 300 lines.",
+                "analyzer": "python_fn_length",
+                "loop_limits": {
+                    "max_loops": 4,
+                    "max_no_progress": 2,
+                    "function_line_limit": 300,
+                },
+            },
+        },
+    )
+    start_handler.do_POST()
+
+    assert start_handler.send_response.call_args.args == (200,)
+    start_body = _response_body(start_handler)
+    assert start_body["draft_id"] == "draft-black-hole"
+    assert enqueued and enqueued[0][1] == "draft-black-hole"
+
+    refreshed_get = _make_handler("/api/plan/drafts/draft-black-hole/black-hole")
+    refreshed_get.do_GET()
+    refreshed_body = _response_body(refreshed_get)
+    assert refreshed_body["config"]["objective"].startswith("Refactor until no Python function")
+    assert refreshed_body["campaign"]["status"] == "evaluating_workspace"
+    assert refreshed_body["campaign"]["max_loops"] == 4
+
+    pause_handler = _make_handler("/api/plan/drafts/draft-black-hole/black-hole/pause")
+    _json_request(pause_handler, {})
+    pause_handler.do_POST()
+    assert _response_body(pause_handler)["status"] == "paused"
+
+    resume_handler = _make_handler("/api/plan/drafts/draft-black-hole/black-hole/resume")
+    _json_request(resume_handler, {})
+    resume_handler.do_POST()
+    assert _response_body(resume_handler)["status"] == "evaluating_workspace"
+    assert len(enqueued) == 2
+
+    stop_handler = _make_handler("/api/plan/drafts/draft-black-hole/black-hole/stop")
+    _json_request(stop_handler, {})
+    stop_handler.do_POST()
+    assert _response_body(stop_handler)["status"] == "cancelled"
+
     list_none_handler = _make_handler("/api/plan/drafts?include_terminal=false")
     list_none_handler.do_GET()
     body_none = _response_body(list_none_handler)

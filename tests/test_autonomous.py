@@ -410,6 +410,185 @@ def test_autonomous_waits_through_retry_backoff_and_redispatches(tmp_path, monke
     assert final_state.get_task("01").status == "review_approved"
 
 
+def test_autonomous_telemetry_counts_approved_tasks_from_persisted_state(tmp_path, monkeypatch):
+    """Mission telemetry should count approved tasks from persisted state, not only in-run task metrics."""
+    from agentforce.autonomous import run_autonomous
+    from agentforce.core.spec import MissionSpec, TaskSpec, TaskStatus
+    from agentforce.core.state import MissionState, TaskState
+
+    mission_id = "mission-telemetry-approved-counts"
+    state_root = tmp_path / ".agentforce" / "state"
+    memory_root = tmp_path / ".agentforce" / "memory"
+    telemetry_root = tmp_path / ".agentforce" / "telemetry"
+    state_root.mkdir(parents=True, exist_ok=True)
+    memory_root.mkdir(parents=True, exist_ok=True)
+    telemetry_root.mkdir(parents=True, exist_ok=True)
+
+    spec = MissionSpec(
+        name="Telemetry counts",
+        goal="Count approved tasks from state",
+        definition_of_done=["done"],
+        tasks=[
+            TaskSpec(id="01", title="First", description="Do it", acceptance_criteria=["done"]),
+            TaskSpec(id="02", title="Second", description="Do it", acceptance_criteria=["done"]),
+        ],
+    )
+    state = MissionState(mission_id=mission_id, spec=spec, working_dir=str(tmp_path))
+    state.task_states["01"] = TaskState(
+        task_id="01",
+        status=TaskStatus.REVIEW_APPROVED,
+        retries=0,
+        lifetime_retries=0,
+    )
+    state.task_states["02"] = TaskState(
+        task_id="02",
+        status=TaskStatus.REVIEW_APPROVED,
+        retries=0,
+        lifetime_retries=2,
+    )
+    state_file = state_root / f"{mission_id}.json"
+    state.save(state_file)
+
+    monkeypatch.setattr("agentforce.autonomous.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._ensure_pkg", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._detect_agent", lambda: "codex")
+
+    success = run_autonomous(
+        mission_id,
+        workdir=str(tmp_path),
+        agent="codex",
+        model="gpt-5.4",
+        variant="medium",
+        max_ticks=1,
+    )
+
+    telemetry = json.loads((telemetry_root / f"{mission_id}.json").read_text())
+
+    assert success is True
+    assert telemetry["approved_on_first_try"] == 1
+    assert telemetry["approved_with_retries"] == 1
+
+
+def test_autonomous_prepends_injected_instruction_to_worker_context(tmp_path, monkeypatch):
+    """Dispatch should prepend queued user instruction to worker context."""
+    from agentforce.autonomous import run_autonomous
+    from agentforce.core.spec import MissionSpec, TaskSpec
+    from agentforce.core.state import MissionState, TaskState
+
+    mission_id = "mission-inject-queue"
+    state_root = tmp_path / ".agentforce" / "state"
+    memory_root = tmp_path / ".agentforce" / "memory"
+    state_root.mkdir(parents=True, exist_ok=True)
+    memory_root.mkdir(parents=True, exist_ok=True)
+
+    spec = MissionSpec(
+        name="Inject queue",
+        goal="Apply injected message",
+        definition_of_done=["done"],
+        tasks=[TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["done"])],
+    )
+    state = MissionState(mission_id=mission_id, spec=spec, working_dir=str(tmp_path))
+    state.task_states["01"] = TaskState(task_id="01")
+    state_file = state_root / f"{mission_id}.json"
+    state.save(state_file)
+
+    monkeypatch.setattr("agentforce.autonomous.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._ensure_pkg", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._detect_agent", lambda: "codex")
+    monkeypatch.setattr(
+        "agentforce.autonomous.check_inject_queue",
+        lambda _mission_id, _task_id: "Use tighter acceptance criteria",
+    )
+
+    captured = {}
+
+    def fake_run_agent(prompt, workdir, timeout=300, agent="auto", model=None, stream_path=None, variant=None, session_id=None):
+        captured["prompt"] = prompt
+        return True, "worker ok", "", "session-1", None
+
+    monkeypatch.setattr("agentforce.autonomous._run_agent", fake_run_agent)
+
+    def fake_apply_worker_result(self, task_id, success, output="", error=""):
+        self.state.task_states[task_id].status = "review_approved"
+
+    monkeypatch.setattr("agentforce.core.engine.MissionEngine.apply_worker_result", fake_apply_worker_result)
+
+    run_autonomous(
+        mission_id,
+        workdir=str(tmp_path),
+        agent="codex",
+        model="gpt-5.4",
+        variant="medium",
+        max_ticks=3,
+    )
+
+    assert captured["prompt"].startswith("[USER INSTRUCTION] Use tighter acceptance criteria\n\n")
+
+
+def test_autonomous_reviewer_session_expiry_redispatches_with_fresh_session(tmp_path, monkeypatch):
+    """Reviewer session-expiry errors should clear cached reviewer session ids before redispatch."""
+    from agentforce.autonomous import run_autonomous
+    from agentforce.core.spec import MissionSpec, TaskSpec
+    from agentforce.core.state import MissionState, TaskState
+
+    mission_id = "mission-reviewer-session-expiry"
+    state_root = tmp_path / ".agentforce" / "state"
+    memory_root = tmp_path / ".agentforce" / "memory"
+    state_root.mkdir(parents=True, exist_ok=True)
+    memory_root.mkdir(parents=True, exist_ok=True)
+
+    spec = MissionSpec(
+        name="Reviewer session expiry",
+        goal="Redispatch reviewer with fresh session",
+        definition_of_done=["done"],
+        tasks=[TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["done"])],
+    )
+    state = MissionState(mission_id=mission_id, spec=spec, working_dir=str(tmp_path))
+    state.task_states["01"] = TaskState(task_id="01")
+    state_file = state_root / f"{mission_id}.json"
+    state.save(state_file)
+
+    monkeypatch.setattr("agentforce.autonomous.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._ensure_pkg", lambda: tmp_path)
+    monkeypatch.setattr("agentforce.autonomous._detect_agent", lambda: "codex")
+
+    reviewer_session_ids = []
+    attempts = {"reviewer": 0}
+
+    def fake_run_agent(prompt, workdir, timeout=300, agent="auto", model=None, stream_path=None, variant=None, session_id=None):
+        if "RESPOND WITH VALID JSON ONLY" in prompt:
+            attempts["reviewer"] += 1
+            reviewer_session_ids.append(session_id)
+            if attempts["reviewer"] == 1:
+                return False, "", "thread/resume expired", "reviewer-session-old", None
+            return True, json.dumps({
+                "approved": True,
+                "score": 9,
+                "feedback": "Looks good",
+                "blocking_issues": [],
+                "criteria_results": {"security": "met"},
+            }), "", "reviewer-session-new", None
+
+        return True, "worker ok", "", "worker-session", None
+
+    monkeypatch.setattr("agentforce.autonomous._run_agent", fake_run_agent)
+
+    run_autonomous(
+        mission_id,
+        workdir=str(tmp_path),
+        agent="codex",
+        model="gpt-5.4",
+        variant="medium",
+        max_ticks=6,
+    )
+
+    final_state = MissionState.load(state_file)
+
+    assert attempts["reviewer"] == 2
+    assert reviewer_session_ids == [None, None]
+    assert final_state.get_task("01").status == "review_approved"
+
+
 # ---------------------------------------------------------------------------
 # Hard-block tests (security / TDD per-criterion blocking)
 # ---------------------------------------------------------------------------

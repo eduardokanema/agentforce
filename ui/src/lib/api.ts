@@ -1,5 +1,7 @@
 import type {
   AppConfig,
+  BlackHoleCampaignState,
+  BlackHoleConfig,
   Connector,
   DaemonStatus,
   DefaultCaps,
@@ -311,6 +313,65 @@ export function createPlanDraft(payload: {
 
 export function getPlanDraft(id: string): Promise<MissionDraft> {
   return requestJson<MissionDraft>(`/api/plan/drafts/${encodeURIComponent(id)}`);
+}
+
+export function getBlackHoleCampaign(id: string): Promise<BlackHoleCampaignState> {
+  return requestJson<BlackHoleCampaignState>(`/api/plan/drafts/${encodeURIComponent(id)}/black-hole`);
+}
+
+export function createBlackHoleCampaign(
+  id: string,
+  expectedRevision: number,
+  config: BlackHoleConfig,
+): Promise<{ draft_id: string; campaign_id: string; status: string; revision: number }> {
+  return requestJson<{ draft_id: string; campaign_id: string; status: string; revision: number }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/black-hole`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_revision: expectedRevision, config }),
+    },
+  );
+}
+
+export function pauseBlackHoleCampaign(
+  id: string,
+): Promise<{ draft_id: string; campaign_id: string; status: string }> {
+  return requestJson<{ draft_id: string; campaign_id: string; status: string }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/black-hole/pause`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function resumeBlackHoleCampaign(
+  id: string,
+  config?: BlackHoleConfig,
+): Promise<{ draft_id: string; campaign_id: string; status: string }> {
+  return requestJson<{ draft_id: string; campaign_id: string; status: string }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/black-hole/resume`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config ? { config } : {}),
+    },
+  );
+}
+
+export function stopBlackHoleCampaign(
+  id: string,
+): Promise<{ draft_id: string; campaign_id: string; status: string }> {
+  return requestJson<{ draft_id: string; campaign_id: string; status: string }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/black-hole/stop`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    },
+  );
 }
 
 export function patchPlanDraftSpec(

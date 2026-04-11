@@ -348,6 +348,9 @@ class MissionDaemon:
             elif job.job_type == "plan_run":
                 from agentforce.server.planning_runtime import run_plan_run
                 run_plan_run(job.job_id)
+            elif job.job_type == "black_hole_campaign":
+                from agentforce.server.planning_runtime import run_black_hole_campaign
+                run_black_hole_campaign(job.job_id)
             else:
                 raise RuntimeError(f"Unsupported daemon job type: {job.job_type}")
         except SystemExit:

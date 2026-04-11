@@ -20,6 +20,12 @@ def _ws_on_start(event: dict) -> None:
 
 def _ws_on_complete(event: dict) -> None:
     ws.broadcast(event)
+    try:
+        from agentforce.server.planning_runtime import handle_black_hole_daemon_completion
+
+        handle_black_hole_daemon_completion(event)
+    except Exception:
+        pass
 
 
 def _ws_on_fail(event: dict) -> None:

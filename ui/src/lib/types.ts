@@ -165,6 +165,83 @@ export interface PlanningSummary {
   validation?: Record<string, unknown>;
 }
 
+export interface BlackHoleLoopLimits {
+  max_loops: number;
+  max_no_progress: number;
+  function_line_limit?: number | null;
+}
+
+export interface BlackHoleGatePolicy {
+  require_test_delta?: boolean;
+  public_surface_policy?: string;
+}
+
+export interface BlackHoleConfig {
+  mode: 'black_hole';
+  objective: string;
+  analyzer: string;
+  scope?: string;
+  global_acceptance?: string[];
+  loop_limits: BlackHoleLoopLimits;
+  gate_policy?: BlackHoleGatePolicy;
+  docs_manifest_path?: string | null;
+  notes?: string;
+  profile_snapshot?: {
+    planning_profiles?: PlanningProfileSet | null;
+    execution_defaults?: ExecutionConfig | null;
+  } | null;
+}
+
+export interface BlackHoleCampaign {
+  id: string;
+  draft_id: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  current_loop: number;
+  max_loops: number;
+  max_no_progress: number;
+  no_progress_count: number;
+  active_child_mission_id?: string | null;
+  active_plan_run_id?: string | null;
+  last_metric?: Record<string, unknown>;
+  last_delta?: number;
+  stop_reason?: string;
+  config_snapshot?: Record<string, unknown>;
+  tokens_in?: number;
+  tokens_out?: number;
+  cost_usd?: number;
+}
+
+export interface BlackHoleLoop {
+  campaign_id: string;
+  loop_no: number;
+  status: string;
+  created_at: string;
+  completed_at?: string | null;
+  candidate_id?: string;
+  candidate_summary?: string;
+  candidate_payload?: Record<string, unknown>;
+  metric_before?: Record<string, unknown>;
+  metric_after?: Record<string, unknown>;
+  normalized_delta?: number;
+  plan_run_id?: string | null;
+  plan_version_id?: string | null;
+  mission_id?: string | null;
+  review_summary?: string;
+  gate_reason?: string;
+  tokens_in?: number;
+  tokens_out?: number;
+  cost_usd?: number;
+}
+
+export interface BlackHoleCampaignState {
+  draft_id: string;
+  config?: BlackHoleConfig | null;
+  campaign?: BlackHoleCampaign | null;
+  loops: BlackHoleLoop[];
+}
+
 export interface PreflightQuestion {
   id: string;
   prompt: string;

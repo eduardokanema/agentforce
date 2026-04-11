@@ -2,12 +2,21 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from agentforce.core.spec import MissionSpec
 from agentforce.core.token_event import TokenEvent
+from agentforce.server.black_hole_analyzers import evaluate_black_hole_analyzer, normalized_progress_delta
+from agentforce.server.black_hole_runs import (
+    BlackHoleCampaignRecord,
+    BlackHoleCampaignStore,
+    BlackHoleLoopRecord,
+    is_terminal_campaign_status,
+)
 from agentforce.server import state_io, ws
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunRecord, PlanRunStore, PlanStepRecord
@@ -627,3 +636,631 @@ def mark_version_launched(version_id: str, mission_id: str) -> None:
     run = store.load_run(version.source_run_id)
     if run is not None:
         store.save_run(run.copy_with(launched_mission_id=mission_id))
+
+
+def _black_hole_store() -> BlackHoleCampaignStore:
+    return BlackHoleCampaignStore()
+
+
+def _effective_daemon():
+    try:
+        from agentforce.server import handler as _handler
+
+        daemon = getattr(_handler, "_daemon", None)
+        if daemon is None:
+            return None
+        try:
+            return daemon if daemon.status().get("running") else None
+        except Exception:
+            return daemon
+    except Exception:
+        return None
+
+
+def _emit_black_hole(event_type: str, payload: dict[str, Any]) -> None:
+    ws.broadcast({"type": event_type, **payload})
+
+
+def _broadcast_black_hole_campaign(campaign: BlackHoleCampaignRecord) -> None:
+    _emit_black_hole(
+        "black_hole_campaign_updated",
+        {
+            "draft_id": campaign.draft_id,
+            "campaign": campaign.to_dict(),
+        },
+    )
+
+
+def _broadcast_black_hole_loop(draft_id: str, loop: BlackHoleLoopRecord) -> None:
+    _emit_black_hole(
+        "black_hole_loop_recorded",
+        {
+            "draft_id": draft_id,
+            "campaign_id": loop.campaign_id,
+            "loop": loop.to_dict(),
+        },
+    )
+
+
+def enqueue_black_hole_campaign(campaign_id: str, *, draft_id: str | None = None) -> None:
+    daemon = _effective_daemon()
+    if daemon is not None:
+        from agentforce.daemon import DaemonJob
+
+        daemon.enqueue_job(
+            DaemonJob(
+                job_id=campaign_id,
+                job_type="black_hole_campaign",
+                payload={"draft_id": draft_id} if draft_id else {},
+            )
+        )
+        return
+
+    def _runner() -> None:
+        try:
+            run_black_hole_campaign(campaign_id)
+        except Exception:
+            pass
+
+    threading.Thread(target=_runner, daemon=True, name=f"agentforce-black-hole-{campaign_id}").start()
+
+
+def handle_black_hole_daemon_completion(event: dict[str, Any]) -> None:
+    mission_id = str(event.get("mission_id") or "").strip()
+    if not mission_id:
+        return
+    campaign = _black_hole_store().find_by_active_child_mission(mission_id)
+    if campaign is None:
+        return
+    enqueue_black_hole_campaign(campaign.id, draft_id=campaign.draft_id)
+
+
+def _fallback_black_hole_spec(draft: MissionDraftV1, config: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(candidate.get("payload") or {})
+    threshold = int(dict(config.get("loop_limits") or {}).get("function_line_limit") or 300)
+    working_dir = draft.workspace_paths[0] if draft.workspace_paths else draft.draft_spec.get("working_dir")
+    function_name = str(payload.get("function_name") or candidate.get("id") or "candidate")
+    file_path = str(payload.get("path") or "")
+    line_count = int(payload.get("line_count") or 0)
+    description = (
+        f"Refactor only `{function_name}` in `{file_path}` so it is <= {threshold} lines.\n\n"
+        f"Current length: {line_count} lines.\n"
+        "Keep the change scoped to the selected candidate, add or update focused tests when feasible, "
+        "and avoid public API changes unless they are clearly justified."
+    )
+    return {
+        "name": f"Black Hole Loop {function_name}"[:80],
+        "goal": str(config.get("objective") or draft.draft_spec.get("goal") or "").strip() or "Execute one black-hole loop",
+        "working_dir": working_dir,
+        "definition_of_done": [
+            f"The selected candidate is within the configured analyzer limit ({threshold} lines).",
+            "Tests that cover the touched behavior are added or updated when feasible.",
+            "Any public-surface change is explicitly justified in the worker summary.",
+        ],
+        "caps": {
+            "max_concurrent_workers": 1,
+            "max_retries_global": 2,
+            "max_retries_per_task": 2,
+            "max_wall_time_minutes": 90,
+            "max_human_interventions": 2,
+            "max_tokens_per_task": 100000,
+        },
+        "execution_defaults": draft.draft_spec.get("execution_defaults") or {},
+        "tasks": [
+            {
+                "id": "black_hole_loop",
+                "title": f"Refactor {function_name}",
+                "description": description,
+                "acceptance_criteria": [
+                    f"`{function_name}` ends at or below {threshold} lines.",
+                    f"`{file_path}` is updated only as much as needed for the selected refactor target.",
+                    "Tests are added or updated when feasible and their command/outcome is reported.",
+                    "The worker summary explicitly states whether any public classes or public APIs changed and why.",
+                ],
+                "dependencies": [],
+                "working_dir": working_dir,
+                "max_retries": 2,
+                "output_artifacts": [file_path] if file_path else [],
+            }
+        ],
+    }
+
+
+def _black_hole_planner_prompt(
+    draft: MissionDraftV1,
+    config: dict[str, Any],
+    analyzer_result: dict[str, Any],
+    candidate: dict[str, Any],
+    loop_no: int,
+) -> str:
+    return (
+        "You are synthesizing one AgentForce mission for a black-hole campaign loop.\n"
+        "Return valid JSON only with keys 'assistant_message' and 'draft_spec'.\n"
+        "'draft_spec' must be a complete MissionSpec-shaped object with EXACTLY one task and caps.max_concurrent_workers=1.\n"
+        "Do not plan the whole repository. Scope the task to the selected candidate only.\n"
+        "Make acceptance criteria measurable and include explicit test expectations when feasible.\n"
+        "Public classes or APIs should stay unchanged unless absolutely necessary; if a change may be required, say so in the task description.\n\n"
+        f"Campaign objective:\n{config.get('objective') or draft.draft_spec.get('goal') or ''}\n\n"
+        f"Loop number: {loop_no}\n"
+        f"Analyzer summary:\n{json.dumps(analyzer_result, indent=2, sort_keys=True)}\n\n"
+        f"Selected candidate:\n{json.dumps(candidate, indent=2, sort_keys=True)}\n\n"
+        f"Workspace:\n{json.dumps(draft.workspace_paths, indent=2)}\n\n"
+        f"Execution defaults:\n{json.dumps(draft.draft_spec.get('execution_defaults') or {}, indent=2, sort_keys=True)}\n"
+    )
+
+
+def _parse_black_hole_planner_output(output: str) -> tuple[dict[str, Any], str]:
+    text = output.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(line for line in lines if not line.startswith("```")).strip()
+    try:
+        payload = json.loads(text)
+    except Exception:
+        payload = _extract_json_object_candidate(
+            text,
+            required_keys=("assistant_message", "draft_spec"),
+        )
+    if not isinstance(payload, dict):
+        raise ValueError("Planner output was not valid JSON")
+    spec_dict = payload.get("draft_spec")
+    if not isinstance(spec_dict, dict):
+        raise ValueError("Planner output missing draft_spec")
+    return spec_dict, str(payload.get("assistant_message") or "Black-hole child mission synthesized.")
+
+
+def _safe_profile_invoke(profile: PlanningProfile, prompt: str, workdir: str | None) -> tuple[str, TokenEvent | None, str | None]:
+    try:
+        output, usage = _invoke_profile(profile, prompt, workdir)
+        return output, usage, None
+    except Exception as exc:
+        return "", None, str(exc)
+
+
+def _synthesize_black_hole_child_plan(
+    campaign: BlackHoleCampaignRecord,
+    draft: MissionDraftV1,
+    config: dict[str, Any],
+    analyzer_result: dict[str, Any],
+    candidate: dict[str, Any],
+    loop_no: int,
+) -> tuple[PlanRunRecord, Any, dict[str, Any], list[str], str]:
+    store = _plan_store()
+    run = store.create_run(
+        str(uuid.uuid4()),
+        draft_id=draft.id,
+        base_revision=draft.revision,
+        trigger_kind="black_hole_loop",
+        trigger_message=f"Black-hole loop {loop_no}: {candidate.get('summary') or candidate.get('title') or candidate.get('id') or ''}",
+    )
+    _emit(
+        "plan_run_queued",
+        {
+            "draft_id": draft.id,
+            "plan_run_id": run.id,
+            "base_revision": run.base_revision,
+            "message": run.trigger_message,
+        },
+    )
+    run = run.copy_with(status="running", started_at=run.created_at)
+    store.save_run(run)
+    _emit("plan_run_started", {"draft_id": draft.id, "plan_run_id": run.id, "base_revision": run.base_revision})
+
+    planner_profile = _resolve_profile(draft, "planner")
+    technical_profile = _resolve_profile(draft, "critic_technical")
+    practical_profile = _resolve_profile(draft, "critic_practical")
+
+    run = _record_step(run, name="planner_synthesis", status="started", message="Generating black-hole child mission")
+    planner_text, planner_usage, planner_error = _safe_profile_invoke(
+        planner_profile,
+        _black_hole_planner_prompt(draft, config, analyzer_result, candidate, loop_no),
+        draft.draft_spec.get("working_dir"),
+    )
+    try:
+        spec_dict, assistant_message = _parse_black_hole_planner_output(planner_text)
+    except Exception:
+        spec_dict = _fallback_black_hole_spec(draft, config, candidate)
+        assistant_message = (
+            "Planner output was unavailable; using a deterministic single-task fallback mission scoped to the selected candidate."
+            if planner_error
+            else "Planner output was invalid; using a deterministic single-task fallback mission scoped to the selected candidate."
+        )
+    run = _record_step(
+        run,
+        name="planner_synthesis",
+        status="completed",
+        message=assistant_message,
+        summary=assistant_message,
+        token_event=planner_usage,
+        metadata={"profile": planner_profile.__dict__, "planner_error": planner_error or ""},
+    )
+
+    run = _record_step(run, name="mission_plan_pass", status="started", message="Applying mission-plan checks")
+    validation = _mission_plan_validation(spec_dict)
+    run = _record_step(
+        run,
+        name="mission_plan_pass",
+        status="completed",
+        message="Mission-plan checks complete",
+        summary="; ".join(validation.get("issues") or validation.get("warnings") or ["No issues"]),
+        metadata=validation,
+    )
+
+    technical: dict[str, Any] = {"summary": "", "issues": [], "suggestions": []}
+    run = _record_step(run, name="technical_critic", status="started", message="Running technical adversary review")
+    technical_text, technical_usage, technical_error = _safe_profile_invoke(
+        technical_profile,
+        _critic_prompt("technical", str(config.get("objective") or draft.draft_spec.get("goal") or ""), spec_dict),
+        draft.draft_spec.get("working_dir"),
+    )
+    if technical_text:
+        technical = _parse_critic_output(technical_text)
+    elif technical_error:
+        technical = {"summary": technical_error, "issues": [], "suggestions": []}
+    run = _record_step(
+        run,
+        name="technical_critic",
+        status="completed",
+        message="Technical adversary review complete",
+        summary=technical.get("summary") or "Technical review skipped",
+        token_event=technical_usage,
+        metadata=technical,
+    )
+
+    practical: dict[str, Any] = {"summary": "", "issues": [], "suggestions": []}
+    run = _record_step(run, name="practical_critic", status="started", message="Running practical adversary review")
+    practical_text, practical_usage, practical_error = _safe_profile_invoke(
+        practical_profile,
+        _critic_prompt("practical", str(config.get("objective") or draft.draft_spec.get("goal") or ""), spec_dict),
+        draft.draft_spec.get("working_dir"),
+    )
+    if practical_text:
+        practical = _parse_critic_output(practical_text)
+    elif practical_error:
+        practical = {"summary": practical_error, "issues": [], "suggestions": []}
+    run = _record_step(
+        run,
+        name="practical_critic",
+        status="completed",
+        message="Practical adversary review complete",
+        summary=practical.get("summary") or "Practical review skipped",
+        token_event=practical_usage,
+        metadata=practical,
+    )
+
+    changelog = _resolver_changelog(validation, technical, practical)
+    run = _record_step(run, name="resolver", status="started", message="Resolving critic findings")
+    if technical.get("issues") or practical.get("issues") or validation.get("issues"):
+        spec_dict, assistant_message, resolver_usage = _resolve_findings(draft, spec_dict, technical, practical)
+    else:
+        resolver_usage = TokenEvent(0, 0, 0.0)
+    version = store.create_version(
+        str(uuid.uuid4()),
+        draft_id=draft.id,
+        source_run_id=run.id,
+        revision_base=draft.revision,
+        draft_spec_snapshot=spec_dict,
+        changelog=changelog,
+        validation={
+            "mission_plan": validation,
+            "technical": technical,
+            "practical": practical,
+            "black_hole_campaign_id": campaign.id,
+            "black_hole_loop_no": loop_no,
+        },
+    )
+    run = _record_step(
+        run,
+        name="resolver",
+        status="completed",
+        message="Reviewed version created",
+        summary=" ".join(changelog),
+        token_event=resolver_usage,
+        metadata={"version_id": version.id},
+    )
+    run = run.copy_with(
+        status="completed",
+        completed_at=_now_iso(),
+        result_version_id=version.id,
+        promoted_version_id=version.id,
+        changelog=changelog,
+    )
+    store.save_run(run)
+    _emit(
+        "plan_version_created",
+        {
+            "draft_id": draft.id,
+            "plan_run_id": run.id,
+            "plan_version_id": version.id,
+            "changelog": changelog,
+        },
+    )
+    return run, version, spec_dict, changelog, assistant_message
+
+
+def _launch_black_hole_mission(
+    draft: MissionDraftV1,
+    spec_dict: dict[str, Any],
+    *,
+    loop_no: int,
+    plan_run_id: str,
+    plan_version_id: str,
+) -> str:
+    from agentforce.server.routes.missions import _make_mission_state_from_spec
+    from agentforce.server.routes.plan import _launch_mission
+
+    spec = MissionSpec.from_dict(spec_dict)
+    issues = spec.validate(stage="launch")
+    if issues:
+        raise RuntimeError(issues[0])
+    state = _make_mission_state_from_spec(spec)
+    state.source_plan_run_id = plan_run_id
+    state.source_plan_version_id = plan_version_id
+    state.source_draft_id = draft.id
+    state.log_event("mission_started", details=f"Started via black-hole campaign loop {loop_no}")
+    state_dir = state_io.get_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state.save(state_dir / f"{state.mission_id}.json")
+    mark_version_launched(plan_version_id, state.mission_id)
+    _launch_mission(state.mission_id)
+    return state.mission_id
+
+
+def _recalculate_campaign_totals(store: BlackHoleCampaignStore, campaign: BlackHoleCampaignRecord) -> BlackHoleCampaignRecord:
+    loops = store.list_loops(campaign.id)
+    return campaign.copy_with(
+        tokens_in=sum(loop.tokens_in for loop in loops),
+        tokens_out=sum(loop.tokens_out for loop in loops),
+        cost_usd=round(sum(loop.cost_usd for loop in loops), 6),
+    )
+
+
+def _mission_review_summary(mission_state) -> str:
+    needs_human = mission_state.needs_human()
+    if needs_human:
+        return f"Child mission is waiting on human input for {', '.join(needs_human)}."
+    if mission_state.is_failed():
+        return "Child mission finished with failed task state or caps hit."
+    if mission_state.is_done():
+        return "Child mission completed with all tasks review-approved."
+    return "Child mission completed without a terminal success signal."
+
+
+def run_black_hole_campaign(campaign_id: str) -> None:
+    campaign_store = _black_hole_store()
+    draft_store = _draft_store()
+    campaign = campaign_store.load_campaign(campaign_id)
+    if campaign is None or is_terminal_campaign_status(campaign.status) or campaign.status == "paused":
+        return
+    draft = draft_store.load(campaign.draft_id)
+    if draft is None:
+        campaign = campaign.copy_with(status="evaluation_failed", stop_reason="Draft not found")
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+
+    config = dict(campaign.config_snapshot or draft.validation.get("black_hole_config") or {})
+    if str(draft.validation.get("preflight_status") or "") == "pending":
+        campaign = campaign.copy_with(status="preflight_pending", stop_reason="Answer preflight questions before starting the campaign.")
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+
+    try:
+        analyzer_result = evaluate_black_hole_analyzer(draft.workspace_paths, config)
+    except Exception as exc:
+        campaign = campaign.copy_with(status="evaluation_failed", stop_reason=str(exc))
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+    analyzer_payload = analyzer_result.to_dict()
+
+    if campaign.active_child_mission_id:
+        mission_state = state_io._load_state(campaign.active_child_mission_id)
+        if mission_state is None:
+            campaign = campaign.copy_with(status="launch_failed", stop_reason="Active child mission state was not found on disk.")
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
+        if not mission_state.finished_at and not mission_state.completed_at and not mission_state.is_failed() and not mission_state.needs_human():
+            campaign = campaign.copy_with(status="child_mission_running", last_metric=analyzer_payload["metric"])
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
+
+        current_loop = campaign_store.load_loop(campaign.id, campaign.current_loop)
+        if current_loop is None:
+            campaign = campaign.copy_with(status="evaluation_failed", stop_reason="Active loop provenance is missing.")
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
+
+        mission_summary = _mission_review_summary(mission_state)
+        delta = normalized_progress_delta(current_loop.metric_before, analyzer_payload["metric"], analyzer_result.analyzer)
+        run = _plan_store().load_run(current_loop.plan_run_id or "") if current_loop.plan_run_id else None
+        updated_loop = current_loop.copy_with(
+            status="completed" if analyzer_result.success else ("waiting_human" if mission_state.needs_human() or mission_state.is_failed() else "reviewed"),
+            completed_at=_now_iso(),
+            metric_after=analyzer_payload["metric"],
+            normalized_delta=delta,
+            review_summary=mission_summary,
+            tokens_in=(run.tokens_in if run is not None else 0) + int(getattr(mission_state, "tokens_in", 0) or 0),
+            tokens_out=(run.tokens_out if run is not None else 0) + int(getattr(mission_state, "tokens_out", 0) or 0),
+            cost_usd=round((run.cost_usd if run is not None else 0.0) + float(getattr(mission_state, "cost_usd", 0.0) or 0.0), 6),
+            gate_reason=mission_summary if mission_state.needs_human() or mission_state.is_failed() else "",
+        )
+        campaign_store.save_loop(updated_loop)
+        _broadcast_black_hole_loop(draft.id, updated_loop)
+
+        if mission_state.needs_human() or mission_state.is_failed():
+            campaign = _recalculate_campaign_totals(
+                campaign_store,
+                campaign.copy_with(
+                    status="waiting_human",
+                    active_child_mission_id=None,
+                    active_plan_run_id=None,
+                    last_metric=analyzer_payload["metric"],
+                    last_delta=delta,
+                    stop_reason=mission_summary,
+                    no_progress_count=(campaign.no_progress_count + 1) if delta <= 0 else 0,
+                ),
+            )
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
+
+        if analyzer_result.success:
+            campaign = _recalculate_campaign_totals(
+                campaign_store,
+                campaign.copy_with(
+                    status="succeeded",
+                    active_child_mission_id=None,
+                    active_plan_run_id=None,
+                    last_metric=analyzer_payload["metric"],
+                    last_delta=delta,
+                    stop_reason=analyzer_result.summary,
+                    no_progress_count=0,
+                ),
+            )
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
+
+        no_progress_count = (campaign.no_progress_count + 1) if delta <= 0 else 0
+        if no_progress_count >= campaign.max_no_progress:
+            campaign = _recalculate_campaign_totals(
+                campaign_store,
+                campaign.copy_with(
+                    status="no_progress_limit",
+                    active_child_mission_id=None,
+                    active_plan_run_id=None,
+                    last_metric=analyzer_payload["metric"],
+                    last_delta=delta,
+                    stop_reason="Campaign stopped after repeated non-positive progress.",
+                    no_progress_count=no_progress_count,
+                ),
+            )
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
+
+        campaign = _recalculate_campaign_totals(
+            campaign_store,
+            campaign.copy_with(
+                status="evaluating_workspace",
+                active_child_mission_id=None,
+                active_plan_run_id=None,
+                last_metric=analyzer_payload["metric"],
+                last_delta=delta,
+                no_progress_count=no_progress_count,
+                stop_reason="",
+            ),
+        )
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+
+    else:
+        if analyzer_result.success:
+            campaign = campaign.copy_with(
+                status="succeeded",
+                last_metric=analyzer_payload["metric"],
+                stop_reason=analyzer_result.summary,
+            )
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
+
+    if campaign.current_loop >= campaign.max_loops:
+        campaign = campaign.copy_with(
+            status="max_loops_reached",
+            stop_reason=f"Maximum loop count reached ({campaign.max_loops}).",
+            last_metric=analyzer_payload["metric"],
+        )
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+
+    if not analyzer_result.candidates:
+        campaign = campaign.copy_with(
+            status="succeeded",
+            stop_reason=analyzer_result.summary,
+            last_metric=analyzer_payload["metric"],
+        )
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+
+    next_loop_no = campaign_store.next_loop_number(campaign.id)
+    candidate = analyzer_result.candidates[0].to_dict()
+    loop = BlackHoleLoopRecord(
+        campaign_id=campaign.id,
+        loop_no=next_loop_no,
+        status="candidate_locked",
+        created_at=_now_iso(),
+        candidate_id=str(candidate.get("id") or ""),
+        candidate_summary=str(candidate.get("summary") or candidate.get("title") or ""),
+        candidate_payload=dict(candidate.get("payload") or {}),
+        metric_before=analyzer_payload["metric"],
+    )
+    campaign_store.save_loop(loop)
+    _broadcast_black_hole_loop(draft.id, loop)
+
+    campaign = campaign.copy_with(status="candidate_locked", last_metric=analyzer_payload["metric"])
+    campaign_store.save_campaign(campaign)
+    _broadcast_black_hole_campaign(campaign)
+
+    try:
+        plan_run, version, spec_dict, changelog, _assistant_message = _synthesize_black_hole_child_plan(
+            campaign,
+            draft,
+            config,
+            analyzer_payload,
+            candidate,
+            next_loop_no,
+        )
+        mission_id = _launch_black_hole_mission(
+            draft,
+            spec_dict,
+            loop_no=next_loop_no,
+            plan_run_id=plan_run.id,
+            plan_version_id=version.id,
+        )
+    except Exception as exc:
+        failed_loop = loop.copy_with(
+            status="launch_failed",
+            completed_at=_now_iso(),
+            gate_reason=str(exc),
+            review_summary=str(exc),
+        )
+        campaign_store.save_loop(failed_loop)
+        _broadcast_black_hole_loop(draft.id, failed_loop)
+        campaign = campaign.copy_with(status="launch_failed", stop_reason=str(exc), last_metric=analyzer_payload["metric"])
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+
+    launched_loop = loop.copy_with(
+        status="child_mission_running",
+        mission_id=mission_id,
+        plan_run_id=plan_run.id,
+        plan_version_id=version.id,
+        review_summary="Child mission launched.",
+        tokens_in=plan_run.tokens_in,
+        tokens_out=plan_run.tokens_out,
+        cost_usd=plan_run.cost_usd,
+    )
+    campaign_store.save_loop(launched_loop)
+    _broadcast_black_hole_loop(draft.id, launched_loop)
+    campaign = _recalculate_campaign_totals(
+        campaign_store,
+        campaign.copy_with(
+            status="child_mission_running",
+            current_loop=next_loop_no,
+            active_child_mission_id=mission_id,
+            active_plan_run_id=plan_run.id,
+            last_metric=analyzer_payload["metric"],
+            stop_reason="",
+        ),
+    )
+    campaign_store.save_campaign(campaign)
+    _broadcast_black_hole_campaign(campaign)

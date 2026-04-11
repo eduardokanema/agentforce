@@ -4,6 +4,9 @@ import FileBrowser from "../components/FileBrowser";
 import ModelSelector from "../components/ModelSelector";
 import SpaceProgress from "../components/SpaceProgress";
 import DraftSummaryPanel from "../components/planning/DraftSummaryPanel";
+import BlackHoleConfigPanel from "../components/planning/BlackHoleConfigPanel";
+import BlackHoleHero from "../components/planning/BlackHoleHero";
+import BlackHoleLedger from "../components/planning/BlackHoleLedger";
 import CockpitSupportDrawer from "../components/planning/CockpitSupportDrawer";
 import ExecutionProfileControls from "../components/planning/ExecutionProfileControls";
 import FlightPlanProgressRail from "../components/planning/FlightPlanProgressRail";
@@ -15,13 +18,18 @@ import PlanningSubstepTracker from "../components/planning/PlanningSubstepTracke
 import TaskTimelinePanel from "../components/planning/TaskTimelinePanel";
 import ValidationBoard from "../components/planning/ValidationBoard";
 import {
+  createBlackHoleCampaign,
   createPlanDraft,
+  getBlackHoleCampaign,
   getModels,
   getPlanDraft,
   patchPlanDraftSpec,
+  pauseBlackHoleCampaign,
+  resumeBlackHoleCampaign,
   retryPlanRun,
   sendPlanDraftMessage,
   startPlanDraft,
+  stopBlackHoleCampaign,
   submitPlanDraftPreflight,
 } from "../lib/api";
 import {
@@ -31,6 +39,8 @@ import {
 } from "../lib/planFlow";
 import { collectAdvisoryFlightChecks } from "../lib/planChecks";
 import type {
+  BlackHoleCampaignState,
+  BlackHoleConfig,
   ExecutionProfile,
   MissionDraft,
   MissionSpec,
@@ -40,7 +50,12 @@ import type {
   PlanVersion,
   PreflightAnswer,
 } from "../lib/types";
-import { wsClient, type PlanningEvent } from "../lib/ws";
+import {
+  wsClient,
+  type BlackHoleCampaignUpdatedEvent,
+  type BlackHoleLoopRecordedEvent,
+  type PlanningEvent,
+} from "../lib/ws";
 
 const PLANNING_PROFILE_KEYS = [
   { key: "planner", label: "Planner" },
@@ -166,6 +181,110 @@ function getProfileValue(draft: MissionDraft | null, key: string): ExecutionProf
     model: stored.model ?? "",
     thinking: stored.thinking ?? "medium",
   };
+}
+
+function defaultBlackHoleConfig(draft: MissionDraft): BlackHoleConfig {
+  return {
+    mode: "black_hole",
+    objective: draft.draft_spec.goal || firstTurnPrompt(draft) || "Iteratively improve the repository until the acceptance criteria is satisfied.",
+    analyzer: "python_fn_length",
+    scope: "repo",
+    global_acceptance: [],
+    loop_limits: {
+      max_loops: 8,
+      max_no_progress: 2,
+      function_line_limit: 300,
+    },
+    gate_policy: {
+      require_test_delta: true,
+      public_surface_policy: "justify",
+    },
+    docs_manifest_path: null,
+    notes: "",
+  };
+}
+
+function normalizeBlackHoleConfig(value: unknown, draft: MissionDraft): BlackHoleConfig {
+  const defaults = defaultBlackHoleConfig(draft);
+  if (!value || typeof value !== "object") {
+    return defaults;
+  }
+  const candidate = value as Record<string, unknown>;
+  const loopLimits = candidate.loop_limits && typeof candidate.loop_limits === "object"
+    ? candidate.loop_limits as Record<string, unknown>
+    : {};
+  const gatePolicy = candidate.gate_policy && typeof candidate.gate_policy === "object"
+    ? candidate.gate_policy as Record<string, unknown>
+    : {};
+  return {
+    ...defaults,
+    mode: "black_hole",
+    objective: typeof candidate.objective === "string" && candidate.objective.trim() ? candidate.objective : defaults.objective,
+    analyzer: typeof candidate.analyzer === "string" && candidate.analyzer.trim() ? candidate.analyzer : defaults.analyzer,
+    scope: typeof candidate.scope === "string" && candidate.scope.trim() ? candidate.scope : defaults.scope,
+    global_acceptance: Array.isArray(candidate.global_acceptance) ? candidate.global_acceptance.map(String) : defaults.global_acceptance,
+    loop_limits: {
+      max_loops: typeof loopLimits.max_loops === "number" ? loopLimits.max_loops : defaults.loop_limits.max_loops,
+      max_no_progress: typeof loopLimits.max_no_progress === "number" ? loopLimits.max_no_progress : defaults.loop_limits.max_no_progress,
+      function_line_limit: typeof loopLimits.function_line_limit === "number"
+        ? loopLimits.function_line_limit
+        : defaults.loop_limits.function_line_limit,
+    },
+    gate_policy: {
+      require_test_delta: typeof gatePolicy.require_test_delta === "boolean"
+        ? gatePolicy.require_test_delta
+        : defaults.gate_policy?.require_test_delta,
+      public_surface_policy: typeof gatePolicy.public_surface_policy === "string"
+        ? gatePolicy.public_surface_policy
+        : defaults.gate_policy?.public_surface_policy,
+    },
+    docs_manifest_path: typeof candidate.docs_manifest_path === "string" && candidate.docs_manifest_path.trim()
+      ? candidate.docs_manifest_path
+      : null,
+    notes: typeof candidate.notes === "string" ? candidate.notes : defaults.notes,
+  };
+}
+
+function hasPersistedBlackHoleConfig(draft: MissionDraft | null): boolean {
+  return Boolean(draft && draft.validation && typeof draft.validation.black_hole_config === "object" && draft.validation.black_hole_config);
+}
+
+function blackHoleMetricLabel(config: BlackHoleConfig | null): string {
+  if (!config) {
+    return "Campaign metric";
+  }
+  if (config.analyzer === "docs_section_coverage") {
+    return "Missing manifest paths";
+  }
+  return `Functions > ${config.loop_limits.function_line_limit ?? 300} lines`;
+}
+
+function blackHoleMetricValue(
+  config: BlackHoleConfig | null,
+  metric: Record<string, unknown> | undefined,
+): string | number {
+  if (!metric) {
+    return "—";
+  }
+  if (config?.analyzer === "docs_section_coverage") {
+    const missing = metric.missing_paths;
+    return typeof missing === "number" ? missing : "—";
+  }
+  const violations = metric.violations;
+  return typeof violations === "number" ? violations : "—";
+}
+
+function blackHoleHeroDescription(config: BlackHoleConfig | null, campaign: BlackHoleCampaignState["campaign"]): string {
+  if (campaign?.stop_reason) {
+    return campaign.stop_reason;
+  }
+  if (!config) {
+    return "The accretion disk stays alive between loops so the current campaign state is always visible.";
+  }
+  if (config.analyzer === "docs_section_coverage") {
+    return "The lensed arcs track documentation coverage gaps while the central ring reflects the currently targeted section.";
+  }
+  return `The bright crescent reflects the hottest refactor target while the outer arcs stay warped around the current ${config.loop_limits.function_line_limit ?? 300}-line limit.`;
 }
 
 function formatCurrency(value: number | undefined): string {
@@ -1253,6 +1372,8 @@ export default function PlanModePage() {
     normalizePlanningProfiles(readStoredJson<Record<string, unknown>>(PLANMODE_PERSISTED_PROFILES_KEY, getDefaultPlanProfiles())),
   );
   const [draft, setDraft] = useState<MissionDraft | null>(null);
+  const [blackHoleState, setBlackHoleState] = useState<BlackHoleCampaignState | null>(null);
+  const [blackHoleConfigDraft, setBlackHoleConfigDraft] = useState<BlackHoleConfig | null>(null);
   const [followUpMessage, setFollowUpMessage] = useState("");
   const [liveEvents, setLiveEvents] = useState<PlannerStreamEventView[]>([]);
   const [selectedPhase, setSelectedPhase] = useState<CockpitPhaseId>("briefing");
@@ -1266,6 +1387,7 @@ export default function PlanModePage() {
   const [streaming, setStreaming] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [submittingPreflight, setSubmittingPreflight] = useState(false);
+  const [syncingBlackHole, setSyncingBlackHole] = useState(false);
   const [preflightAnswers, setPreflightAnswers] = useState<Record<string, PreflightAnswer>>({});
   const [pageError, setPageError] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
@@ -1283,7 +1405,22 @@ export default function PlanModePage() {
     setPageError(null);
     try {
       const loaded = await getPlanDraft(nextDraftId);
+      const persistedBlackHole = hasPersistedBlackHoleConfig(loaded)
+        ? await getBlackHoleCampaign(nextDraftId)
+        : {
+            draft_id: nextDraftId,
+            config: null,
+            campaign: null,
+            loops: [],
+          };
       setDraft(loaded);
+      setBlackHoleState(persistedBlackHole);
+      setBlackHoleConfigDraft(
+        normalizeBlackHoleConfig(
+          persistedBlackHole.config ?? loaded.validation?.black_hole_config,
+          loaded,
+        ),
+      );
       setStreaming(planningBusy(latestRun(loaded)));
       setPreflightAnswers(loaded.preflight_answers ?? {});
     } catch (caught) {
@@ -1382,6 +1519,8 @@ export default function PlanModePage() {
   useEffect(() => {
     if (!draftId) {
       setDraft(null);
+      setBlackHoleState(null);
+      setBlackHoleConfigDraft(null);
       setLiveEvents([]);
       setAutoFollowPhase(true);
       setSelectedPhase("briefing");
@@ -1415,6 +1554,10 @@ export default function PlanModePage() {
       void loadDraft(draftId);
     };
 
+    const blackHoleHandler = (_event: BlackHoleCampaignUpdatedEvent | BlackHoleLoopRecordedEvent): void => {
+      void loadDraft(draftId);
+    };
+
     wsClient.on("plan_run_queued", handler);
     wsClient.on("plan_run_started", handler);
     wsClient.on("plan_step_started", handler);
@@ -1424,6 +1567,8 @@ export default function PlanModePage() {
     wsClient.on("plan_run_stale", handler);
     wsClient.on("plan_run_failed", handler);
     wsClient.on("plan_cost_update", handler);
+    wsClient.on("black_hole_campaign_updated", blackHoleHandler);
+    wsClient.on("black_hole_loop_recorded", blackHoleHandler);
 
     return () => {
       wsClient.off("plan_run_queued", handler);
@@ -1435,6 +1580,8 @@ export default function PlanModePage() {
       wsClient.off("plan_run_stale", handler);
       wsClient.off("plan_run_failed", handler);
       wsClient.off("plan_cost_update", handler);
+      wsClient.off("black_hole_campaign_updated", blackHoleHandler);
+      wsClient.off("black_hole_loop_recorded", blackHoleHandler);
     };
   }, [draftId]);
 
@@ -1599,6 +1746,79 @@ export default function PlanModePage() {
     }
   };
 
+  const handleStartBlackHole = async (): Promise<void> => {
+    if (!draft || !blackHoleConfigDraft) {
+      return;
+    }
+    setSyncingBlackHole(true);
+    setPageError(null);
+    setConflictMessage(null);
+    try {
+      await createBlackHoleCampaign(draft.id, draft.revision, blackHoleConfigDraft);
+      await loadDraft(draft.id);
+    } catch (caught) {
+      setPageError(
+        caught instanceof Error ? caught.message : "Failed to start black-hole campaign.",
+      );
+    } finally {
+      setSyncingBlackHole(false);
+    }
+  };
+
+  const handlePauseBlackHole = async (): Promise<void> => {
+    if (!draft) {
+      return;
+    }
+    setSyncingBlackHole(true);
+    setPageError(null);
+    try {
+      await pauseBlackHoleCampaign(draft.id);
+      await loadDraft(draft.id);
+    } catch (caught) {
+      setPageError(
+        caught instanceof Error ? caught.message : "Failed to pause black-hole campaign.",
+      );
+    } finally {
+      setSyncingBlackHole(false);
+    }
+  };
+
+  const handleResumeBlackHole = async (): Promise<void> => {
+    if (!draft) {
+      return;
+    }
+    setSyncingBlackHole(true);
+    setPageError(null);
+    try {
+      await resumeBlackHoleCampaign(draft.id, blackHoleConfigDraft ?? undefined);
+      await loadDraft(draft.id);
+    } catch (caught) {
+      setPageError(
+        caught instanceof Error ? caught.message : "Failed to resume black-hole campaign.",
+      );
+    } finally {
+      setSyncingBlackHole(false);
+    }
+  };
+
+  const handleStopBlackHole = async (): Promise<void> => {
+    if (!draft) {
+      return;
+    }
+    setSyncingBlackHole(true);
+    setPageError(null);
+    try {
+      await stopBlackHoleCampaign(draft.id);
+      await loadDraft(draft.id);
+    } catch (caught) {
+      setPageError(
+        caught instanceof Error ? caught.message : "Failed to stop black-hole campaign.",
+      );
+    } finally {
+      setSyncingBlackHole(false);
+    }
+  };
+
   const validationIssues = draftValidationIssues(draft);
   const advisoryIssues = useMemo(
     () =>
@@ -1622,6 +1842,11 @@ export default function PlanModePage() {
     }),
     [draft, conflictMessage, validationIssues],
   );
+  const blackHoleCampaign = blackHoleState?.campaign ?? null;
+  const blackHoleLoops = blackHoleState?.loops ?? [];
+  const blackHoleActive = Boolean(blackHoleCampaign || hasPersistedBlackHoleConfig(draft));
+  const latestBlackHoleLoop = blackHoleLoops[blackHoleLoops.length - 1];
+  const blackHoleMetricName = blackHoleMetricLabel(blackHoleConfigDraft);
 
   useEffect(() => {
     const selected = planFlow.phases.find((phase) => phase.id === selectedPhase);
@@ -1902,24 +2127,40 @@ export default function PlanModePage() {
         }}
       />
 
-      <PhaseHero
-        phaseLabel={selectedPhaseState.label}
-        selectedPhaseStatus={selectedPhaseState.status}
-        currentPhaseId={planFlow.currentPhaseId}
-        nextAction={heroAction}
-        activeSummary={selectedPhaseState.summary}
-        currentRun={planFlow.currentRun}
-        currentVersion={planFlow.latestVersion}
-        completedPhases={completedPhaseCount}
-        completedSubsteps={completedSubsteps}
-        latestRunIssue={selectedPhase === planFlow.currentPhaseId ? planFlow.latestRunIssue : null}
-        launchReadinessSummary={planFlow.launchReadiness.summary}
-        latestFailed={latestFailed}
-        retryingRunId={retryingRunId}
-        onRetryLatestRun={(runId) => {
-          void handleRetryRun(runId);
-        }}
-      />
+      {blackHoleActive ? (
+        <BlackHoleHero
+          campaignState={blackHoleCampaign?.status ?? "orbit_ready"}
+          campaignStatus={blackHoleCampaign?.status}
+          loopNumber={blackHoleCampaign?.current_loop ?? 0}
+          metricLabel={blackHoleMetricName}
+          metricBefore={blackHoleMetricValue(blackHoleConfigDraft, latestBlackHoleLoop?.metric_before as Record<string, unknown> | undefined)}
+          metricAfter={blackHoleMetricValue(
+            blackHoleConfigDraft,
+            ((blackHoleCampaign?.last_metric as Record<string, unknown> | undefined) ?? (latestBlackHoleLoop?.metric_after as Record<string, unknown> | undefined)),
+          )}
+          title="Black Hole Campaign Telemetry"
+          description={blackHoleHeroDescription(blackHoleConfigDraft, blackHoleCampaign)}
+        />
+      ) : (
+        <PhaseHero
+          phaseLabel={selectedPhaseState.label}
+          selectedPhaseStatus={selectedPhaseState.status}
+          currentPhaseId={planFlow.currentPhaseId}
+          nextAction={heroAction}
+          activeSummary={selectedPhaseState.summary}
+          currentRun={planFlow.currentRun}
+          currentVersion={planFlow.latestVersion}
+          completedPhases={completedPhaseCount}
+          completedSubsteps={completedSubsteps}
+          latestRunIssue={selectedPhase === planFlow.currentPhaseId ? planFlow.latestRunIssue : null}
+          launchReadinessSummary={planFlow.launchReadiness.summary}
+          latestFailed={latestFailed}
+          retryingRunId={retryingRunId}
+          onRetryLatestRun={(runId) => {
+            void handleRetryRun(runId);
+          }}
+        />
+      )}
 
       {!draft ? (
         <section className="rounded-[1.15rem] border border-border bg-card p-5">
@@ -2049,6 +2290,32 @@ export default function PlanModePage() {
               activePanel={activeSupportPanel}
               onToggle={toggleSupportPanel}
             />
+            {blackHoleConfigDraft ? (
+              <div className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(16rem,0.95fr)]">
+                <BlackHoleConfigPanel
+                  config={blackHoleConfigDraft}
+                  campaign={blackHoleCampaign}
+                  busy={syncingBlackHole}
+                  onChange={setBlackHoleConfigDraft}
+                  onStart={() => {
+                    void handleStartBlackHole();
+                  }}
+                  onPause={() => {
+                    void handlePauseBlackHole();
+                  }}
+                  onResume={() => {
+                    void handleResumeBlackHole();
+                  }}
+                  onStop={() => {
+                    void handleStopBlackHole();
+                  }}
+                />
+                <BlackHoleLedger
+                  campaign={blackHoleCampaign}
+                  loops={blackHoleLoops}
+                />
+              </div>
+            ) : null}
             <PhaseViewport
               selectedPhase={selectedPhase}
               draft={draft}

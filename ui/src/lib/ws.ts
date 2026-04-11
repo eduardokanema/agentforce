@@ -1,4 +1,4 @@
-import type { MissionState, MissionSummary } from './types';
+import type { BlackHoleCampaign, BlackHoleLoop, MissionState, MissionSummary } from './types';
 
 export interface MissionListEvent {
   type: 'mission_list';
@@ -127,6 +127,19 @@ export interface DraftUpdatedEvent {
   status?: string;
 }
 
+export interface BlackHoleCampaignUpdatedEvent {
+  type: 'black_hole_campaign_updated';
+  draft_id: string;
+  campaign: BlackHoleCampaign;
+}
+
+export interface BlackHoleLoopRecordedEvent {
+  type: 'black_hole_loop_recorded';
+  draft_id: string;
+  campaign_id: string;
+  loop: BlackHoleLoop;
+}
+
 type WsInboundEvent =
   | MissionListEvent
   | MissionListUpdateEvent
@@ -141,7 +154,9 @@ type WsInboundEvent =
   | TaskStreamEvent
   | TaskAttemptStartEvent
   | PlanningEvent
-  | DraftUpdatedEvent;
+  | DraftUpdatedEvent
+  | BlackHoleCampaignUpdatedEvent
+  | BlackHoleLoopRecordedEvent;
 
 type WsEventType = WsInboundEvent['type'];
 type WsEventHandler<K extends WsEventType> = (event: Extract<WsInboundEvent, { type: K }>) => void;
@@ -275,6 +290,17 @@ function isInboundEvent(value: unknown): value is WsInboundEvent {
       return isString(value.draft_id) && isString(value.plan_run_id);
     case 'draft_updated':
       return isString(value.draft_id);
+    case 'black_hole_campaign_updated':
+      return isString(value.draft_id)
+        && isRecord(value.campaign)
+        && isString(value.campaign.id)
+        && isString(value.campaign.status);
+    case 'black_hole_loop_recorded':
+      return isString(value.draft_id)
+        && isString(value.campaign_id)
+        && isRecord(value.loop)
+        && isNumber(value.loop.loop_no)
+        && isString(value.loop.status);
     default:
       return false;
   }

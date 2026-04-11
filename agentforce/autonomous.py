@@ -280,6 +280,558 @@ def _next_retry_delay_seconds(engine) -> float | None:
     return min(remaining_delays)
 
 
+def _status_value(status) -> str:
+    return getattr(status, "value", status)
+
+
+def _task_retry_count(task_state) -> int:
+    lifetime_retries = getattr(task_state, "lifetime_retries", 0)
+    if isinstance(lifetime_retries, int) and lifetime_retries > 0:
+        return lifetime_retries
+    retries = getattr(task_state, "retries", 0)
+    return retries if isinstance(retries, int) else 0
+
+
+def _resolve_role_default(persisted_defaults, role: str, agent: str, model: str | None, variant: str | None):
+    persisted = getattr(persisted_defaults, role)
+    resolved_agent = (
+        agent if agent != "auto"
+        else (persisted.agent if persisted and persisted.agent else None)
+    )
+    if resolved_agent is None:
+        resolved_agent = _detect_agent()
+    return normalize_runtime_profile(
+        agent=resolved_agent,
+        model=model or (persisted.model if persisted and persisted.model else None),
+        thinking=variant or (persisted.thinking if persisted and persisted.thinking else _DEFAULT_VARIANT),
+    )
+
+
+def _resolve_execution_defaults(engine, agent: str, model: str | None, variant: str | None):
+    from agentforce.core.spec import ExecutionConfig
+
+    persisted_defaults = engine.state.resolved_execution_defaults()
+    worker_runtime = _resolve_role_default(persisted_defaults, "worker", agent, model, variant)
+    reviewer_runtime = _resolve_role_default(persisted_defaults, "reviewer", agent, model, variant)
+    engine.state.execution_defaults = ExecutionConfig(
+        worker=worker_runtime,
+        reviewer=reviewer_runtime,
+    )
+    engine._sync_execution_telemetry()
+    engine.state.caps_hit = {}
+    return worker_runtime, reviewer_runtime
+
+
+def _apply_extend_caps(engine) -> None:
+    # Raise all caps well above current counters so none trigger this run.
+    # The stored mission state (counters, started_at) is not modified.
+    caps = engine.state.caps
+    caps.max_wall_time_minutes = 0
+    caps.max_retries_global = max(caps.max_retries_global, engine.state.total_retries + 100)
+    caps.max_human_interventions = max(
+        caps.max_human_interventions,
+        engine.state.total_human_interventions + 100,
+    )
+    print("  ⟳ Caps ignored for this run (wall-time disabled, retry/intervention limits raised).")
+
+
+def _reset_resumable_tasks(engine) -> None:
+    from agentforce.core.spec import TaskStatus
+
+    reset_any = False
+    for task_state in engine.state.task_states.values():
+        if task_state.status == TaskStatus.IN_PROGRESS:
+            task_state.status = TaskStatus.RETRY if task_state.retries > 0 else TaskStatus.PENDING
+            task_state.bump()
+            engine.state.log_event(
+                "task_reset",
+                task_state.task_id,
+                "Interrupted IN_PROGRESS task reset on resume",
+            )
+            reset_any = True
+        elif task_state.status == TaskStatus.REVIEWING:
+            task_state.status = TaskStatus.COMPLETED
+            task_state.review_feedback = ""
+            task_state.bump()
+            engine.state.log_event(
+                "task_reset",
+                task_state.task_id,
+                "Interrupted REVIEWING task reset on resume",
+            )
+            reset_any = True
+        elif task_state.status == TaskStatus.FAILED and not task_state.human_intervention_needed:
+            task_state.retries = 0
+            task_state.status = TaskStatus.PENDING
+            task_state.error_message = ""
+            task_state.bump()
+            engine.state.log_event(
+                "task_reset",
+                task_state.task_id,
+                "FAILED task reset for re-run",
+            )
+            reset_any = True
+    if reset_any:
+        engine.state.total_retries = 0
+
+
+def _print_startup_banner(engine, workdir: str, resolved_agent: str, model: str | None, variant: str | None, eff_pool: int) -> None:
+    print(f"\n=== Autonomous Mission Runner ===")
+    print(f"Mission : {engine.spec.name} [{engine.state.mission_id}]")
+    print(f"Tasks   : {len(engine.spec.tasks)}")
+    print(f"Agent   : {resolved_agent}  model={model}  variant={variant}")
+    print(f"Workers : up to {engine.state.caps.max_concurrent_workers} concurrent  (thread pool: {eff_pool})")
+    print(f"Workdir : {workdir}")
+    print()
+
+
+def _seed_ledger_from_state(ledger, task_states: dict) -> None:
+    for task_state in task_states.values():
+        if task_state.tokens_in or task_state.tokens_out or task_state.cost_usd:
+            ledger.add(task_state.task_id, task_state.tokens_in, task_state.tokens_out, task_state.cost_usd)
+
+
+def _count_review_approved_tasks(task_states: dict[str, object]) -> int:
+    from agentforce.core.spec import TaskStatus
+
+    return sum(
+        1
+        for task_state in task_states.values()
+        if _status_value(task_state.status) == TaskStatus.REVIEW_APPROVED.value
+    )
+
+
+def _count_approved_tasks(task_states: dict[str, object]) -> tuple[int, int]:
+    from agentforce.core.spec import TaskStatus
+
+    approved_on_first_try = 0
+    approved_with_retries = 0
+    for task_state in task_states.values():
+        if _status_value(task_state.status) != TaskStatus.REVIEW_APPROVED.value:
+            continue
+        if _task_retry_count(task_state) > 0:
+            approved_with_retries += 1
+        else:
+            approved_on_first_try += 1
+    return approved_on_first_try, approved_with_retries
+
+
+def _build_mission_metrics(engine, task_metrics: dict[str, object], completed_at: str):
+    from agentforce.core.spec import TaskStatus
+    from agentforce.telemetry import MissionMetrics
+
+    approved_on_first_try, approved_with_retries = _count_approved_tasks(engine.state.task_states)
+    for task_id, task_metric in task_metrics.items():
+        task_state = engine.state.get_task(task_id)
+        if task_state:
+            task_metric.retries = _task_retry_count(task_state)
+
+    mission_metrics = MissionMetrics(
+        mission_id=engine.state.mission_id,
+        mission_name=engine.spec.name,
+        started_at=engine.state.started_at,
+        completed_at=completed_at,
+        total_duration_s=engine.state.active_wall_time_seconds,
+        total_tasks=len(engine.spec.tasks),
+        approved_on_first_try=approved_on_first_try,
+        approved_with_retries=approved_with_retries,
+        failed=sum(
+            1
+            for task_state in engine.state.task_states.values()
+            if _status_value(task_state.status) == TaskStatus.FAILED.value
+        ),
+        total_retries=engine.state.total_retries,
+        total_human_interventions=engine.state.total_human_interventions,
+        worker_tasks=sum(task_metric.worker_attempts for task_metric in task_metrics.values()),
+        reviewer_tasks=sum(task_metric.review_attempts for task_metric in task_metrics.values()),
+        task_metrics={task_id: task_metric.to_dict() for task_id, task_metric in task_metrics.items()},
+    )
+
+    scores = [task_metric.review_score for task_metric in task_metrics.values() if task_metric.review_score > 0]
+    if scores:
+        mission_metrics.avg_review_score = sum(scores) / len(scores)
+        mission_metrics.min_review_score = min(scores)
+        mission_metrics.max_review_score = max(scores)
+
+    return mission_metrics
+
+
+class _AutonomousRunner:
+    def __init__(
+        self,
+        engine,
+        workdir: str,
+        resolved_agent: str,
+        model: str | None,
+        variant: str | None,
+        eff_pool: int,
+        ledger,
+        task_metrics_cls,
+        task_status_cls,
+    ) -> None:
+        self.engine = engine
+        self.workdir = workdir
+        self.resolved_agent = resolved_agent
+        self.model = model
+        self.variant = variant
+        self.eff_pool = eff_pool
+        self.ledger = ledger
+        self.TaskMetrics = task_metrics_cls
+        self.TaskStatus = task_status_cls
+        self.task_metrics: dict[str, object] = {}
+        self.in_flight: dict[str, tuple[Future, object]] = {}
+        self.session_ids: dict[str, str] = {}
+        self.tick = 0
+        self.idle_ticks = 0
+        self.executor: ThreadPoolExecutor | None = None
+
+    def _set_task_metric_retries(self, task_id: str, task_state) -> None:
+        task_metric = self.task_metrics.get(task_id)
+        if task_metric and task_state:
+            task_metric.retries = _task_retry_count(task_state)
+
+    def _sync_mission_totals(self) -> None:
+        totals = self.ledger.mission_totals()
+        self.engine.state.tokens_in = totals["tokens_in"]
+        self.engine.state.tokens_out = totals["tokens_out"]
+        self.engine.state.cost_usd = totals["cost_usd"]
+
+    def _apply_task_totals(self, task_id: str, task_state) -> tuple[int, int, float]:
+        totals = self.ledger.task_totals(task_id)
+        delta_tokens_in = totals["tokens_in"] - (task_state.tokens_in or 0)
+        delta_tokens_out = totals["tokens_out"] - (task_state.tokens_out or 0)
+        delta_cost_usd = totals["cost_usd"] - (task_state.cost_usd or 0.0)
+        task_state.tokens_in = totals["tokens_in"]
+        task_state.tokens_out = totals["tokens_out"]
+        task_state.cost_usd = totals["cost_usd"]
+        self._sync_mission_totals()
+        self._set_task_metric_retries(task_id, task_state)
+        return delta_tokens_in, delta_tokens_out, delta_cost_usd
+
+    def _mark_worker_started(self, task_id: str) -> None:
+        task_metric = self.task_metrics.setdefault(
+            task_id,
+            self.TaskMetrics(
+                task_id=task_id,
+                task_title=self.engine._get_task_spec(task_id).title,
+                mission_id=self.engine.state.mission_id,
+                worker_started=datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        task_metric.worker_attempts += 1
+
+    def _mark_reviewer_started(self, task_id: str) -> None:
+        task_metric = self.task_metrics.setdefault(
+            task_id,
+            self.TaskMetrics(
+                task_id=task_id,
+                task_title=self.engine._get_task_spec(task_id).title,
+                mission_id=self.engine.state.mission_id,
+            ),
+        )
+        task_metric.reviewer_started = datetime.now(timezone.utc).isoformat()
+        task_metric.review_attempts += 1
+
+    def _submit(self, action) -> None:
+        key = f"{action.task_id}.{action.role}"
+        if key in self.in_flight:
+            return
+
+        role = action.role
+        task_id = action.task_id
+        timeout = getattr(action, "timeout", 300 if role == "worker" else 120)
+        effective_agent = getattr(action, "agent", None) or self.resolved_agent
+        effective_model = getattr(action, "model", None) or self.model
+        effective_variant = getattr(action, "thinking", None) or self.variant
+        session_id = _get_or_create_session_id(self.session_ids, task_id, role)
+
+        stream_path = _stream_path(self.engine.state.mission_id, task_id)
+        if role == "worker":
+            stream_path.write_text(f"=== WORKER [{task_id}] STARTED ===\n", encoding="utf-8")
+            self._mark_worker_started(task_id)
+        elif role == "reviewer":
+            with open(stream_path, "a", encoding="utf-8") as stream_file:
+                stream_file.write(f"\n=== REVIEWER [{task_id}] STARTED ===\n")
+            self._mark_reviewer_started(task_id)
+
+        inject_message = check_inject_queue(self.engine.state.mission_id, task_id)
+        if inject_message:
+            injected_line = f"[USER INSTRUCTION] {inject_message}"
+            print(injected_line)
+            with open(stream_path, "a", encoding="utf-8") as stream_file:
+                stream_file.write(injected_line + "\n")
+                stream_file.flush()
+            action.context = f"{injected_line}\n\n{action.context}"
+
+        future = self.executor.submit(
+            _run_agent,
+            action.context,
+            self.workdir,
+            timeout,
+            effective_agent,
+            effective_model,
+            stream_path,
+            effective_variant,
+            session_id,
+        )
+        self.in_flight[key] = (future, action)
+        print(f"  ↑ [{role}] task {task_id} dispatched")
+
+    def _handle_worker_completion(self, task_id: str, success: bool, output: str, error: str, token_event) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        task_metric = self.task_metrics.get(task_id)
+        if task_metric and task_metric.worker_started:
+            task_metric.worker_finished = now
+            task_metric.worker_duration_s = (
+                datetime.fromisoformat(now) - datetime.fromisoformat(task_metric.worker_started)
+            ).total_seconds()
+
+        print(f"  ↓ [worker] task {task_id}  success={success}  output={len(output)}B")
+        if error and "timed out" in error:
+            print(f"    timed out — retrying without consuming a retry slot")
+            task_state = self.engine.state.get_task(task_id)
+            if task_state:
+                task_state.status = self.TaskStatus.RETRY
+                if output:
+                    task_state.timeout_output = output
+                self._set_task_metric_retries(task_id, task_state)
+            self.engine._save()
+            return
+
+        if error:
+            print(f"    error: {error[:200]}")
+
+        _record_usage(self.ledger, task_id, output)
+        if token_event is not None:
+            self.ledger.add(task_id, token_event.tokens_in, token_event.tokens_out, token_event.cost_usd)
+
+        task_state = self.engine.state.get_task(task_id)
+        if task_state:
+            delta_tokens_in, delta_tokens_out, delta_cost_usd = self._apply_task_totals(task_id, task_state)
+            if success:
+                task_state.attempt_history.append({
+                    "attempt_number": len(task_state.attempt_history) + 1,
+                    "output": output,
+                    "tokens_in": delta_tokens_in,
+                    "tokens_out": delta_tokens_out,
+                    "cost_usd": round(delta_cost_usd, 6),
+                })
+
+        self.engine.apply_worker_result(task_id, success, output, error)
+        self._set_task_metric_retries(task_id, self.engine.state.get_task(task_id))
+        self.engine._save()
+
+    def _handle_reviewer_completion(self, task_id: str, success: bool, output: str, error: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        task_metric = self.task_metrics.get(task_id)
+        if task_metric and task_metric.reviewer_started:
+            task_metric.reviewer_finished = now
+            task_metric.reviewer_duration_s = (
+                datetime.fromisoformat(now) - datetime.fromisoformat(task_metric.reviewer_started)
+            ).total_seconds()
+
+        if not success and error and "timed out" in error:
+            print(f"  ↓ [reviewer] task {task_id}  timed out — re-dispatching reviewer")
+            task_state = self.engine.state.get_task(task_id)
+            if task_state:
+                task_state.status = self.TaskStatus.COMPLETED
+                self._set_task_metric_retries(task_id, task_state)
+            self.engine._save()
+            return
+
+        if not success and error and ("no rollout found" in error or "thread/resume" in error):
+            print(f"  ↓ [reviewer] task {task_id}  session expired — clearing session and re-dispatching reviewer")
+            self.session_ids.pop(f"{task_id}_reviewer", None)
+            task_state = self.engine.state.get_task(task_id)
+            if task_state:
+                task_state.status = self.TaskStatus.COMPLETED
+                self._set_task_metric_retries(task_id, task_state)
+            self.engine._save()
+            return
+
+        if success and output:
+            try:
+                review = _parse_reviewer_output(output)
+            except ValueError as exc:
+                message = str(exc)
+                print(f"  [CRITICAL] task {task_id}: {message}")
+                print(f"    Reviewer produced unreadable output — marking task as permanently failed.")
+                task_spec = self.engine._get_task_spec(task_id)
+                task_state = self.engine.state.get_task(task_id)
+                if task_state and task_spec:
+                    task_state.retries = task_spec.max_retries
+                    self._set_task_metric_retries(task_id, task_state)
+                self.engine.apply_reviewer_result(task_id, False, message, 0, [])
+                self._set_task_metric_retries(task_id, self.engine.state.get_task(task_id))
+                self.engine._save()
+                return
+        else:
+            review = {"approved": False, "feedback": f"Reviewer error: {error}", "score": 0}
+
+        review = _enforce_review_thresholds(review)
+        approved = review.get("approved", False)
+        score = review.get("score", 0)
+        feedback = review.get("feedback", "")
+        blocking_issues = review.get("blocking_issues", [])
+
+        if task_metric:
+            task_metric.review_score = score
+            task_metric.review_approved = approved
+            task_metric.review_issues_count = len(blocking_issues)
+
+        task_state = self.engine.state.get_task(task_id)
+        if task_state and _apply_hard_blocks(review, task_state):
+            print(f"  ↓ [reviewer] task {task_id}  HARD BLOCK: {task_state.hard_block_reason}")
+            self.engine.state.log_event("hard_block", task_id, task_state.hard_block_reason)
+            _record_usage(self.ledger, task_id, output if success else "")
+            delta_tokens_in, delta_tokens_out, delta_cost_usd = self._apply_task_totals(task_id, task_state)
+            if task_state.attempt_history:
+                last_attempt = task_state.attempt_history[-1]
+                last_attempt["review"] = task_state.hard_block_reason
+                last_attempt["score"] = 0
+                last_attempt["tokens_in"] = last_attempt.get("tokens_in", 0) + delta_tokens_in
+                last_attempt["tokens_out"] = last_attempt.get("tokens_out", 0) + delta_tokens_out
+                last_attempt["cost_usd"] = round(last_attempt.get("cost_usd", 0.0) + delta_cost_usd, 6)
+            self.engine._save()
+            return
+
+        print(f"  ↓ [reviewer] task {task_id}  approved={approved}  score={score}")
+        if not approved and feedback:
+            print(f"    feedback: {feedback[:200]}")
+        _record_usage(self.ledger, task_id, output if success else "")
+        if task_state:
+            delta_tokens_in, delta_tokens_out, delta_cost_usd = self._apply_task_totals(task_id, task_state)
+            if task_state.attempt_history:
+                last_attempt = task_state.attempt_history[-1]
+                last_attempt["review"] = feedback
+                last_attempt["score"] = score
+                last_attempt["tokens_in"] = last_attempt.get("tokens_in", 0) + delta_tokens_in
+                last_attempt["tokens_out"] = last_attempt.get("tokens_out", 0) + delta_tokens_out
+                last_attempt["cost_usd"] = round(last_attempt.get("cost_usd", 0.0) + delta_cost_usd, 6)
+
+        self.engine.apply_reviewer_result(task_id, approved, feedback, score, blocking_issues)
+        self._set_task_metric_retries(task_id, self.engine.state.get_task(task_id))
+        self.engine._save()
+
+    def _collect(self) -> None:
+        done_keys = [key for key, (future, _) in self.in_flight.items() if future.done()]
+        for key in done_keys:
+            future, action = self.in_flight.pop(key)
+            role = action.role
+            task_id = action.task_id
+
+            try:
+                success, output, error, returned_session_id, token_event = future.result()
+            except Exception as exc:
+                from agentforce.core.token_event import TokenEvent
+
+                success, output, error, returned_session_id, token_event = (
+                    False,
+                    "",
+                    str(exc),
+                    None,
+                    TokenEvent(0, 0, 0.0),
+                )
+
+            if returned_session_id:
+                if role == "worker" and task_id not in self.session_ids:
+                    self.session_ids[task_id] = returned_session_id
+                elif role == "reviewer" and f"{task_id}_reviewer" not in self.session_ids:
+                    self.session_ids[f"{task_id}_reviewer"] = returned_session_id
+
+            if role == "worker":
+                self._handle_worker_completion(task_id, success, output, error, token_event)
+            elif role == "reviewer":
+                self._handle_reviewer_completion(task_id, success, output, error)
+
+    def _handle_human_intervention(self, action) -> None:
+        print(f"  ⚠ Human intervention [{action.task_id}]: {getattr(action, 'message', '')[:120]}")
+        if getattr(action, "kind", "") == "destructive_action":
+            options = getattr(action, "options", []) or []
+            for option in options:
+                print(f"    - {option.get('id')}: {option.get('label')}")
+            print("    Waiting for operator decision in Mission Control.")
+            self.engine._save()
+            return
+
+        print(f"    Auto-resolving with reviewer context.")
+        self.engine.apply_human_resolution(
+            action.task_id,
+            getattr(action, "message", "Fix the blocking issues listed above."),
+        )
+        self.engine._save()
+
+    def _process_actions(self, actions) -> None:
+        for action in actions:
+            role = getattr(action, "role", "")
+            if role in ("worker", "reviewer") and hasattr(action, "context"):
+                self._submit(action)
+            elif hasattr(action, "message"):
+                self._handle_human_intervention(action)
+
+    def _handle_idle_state(self, actions) -> bool:
+        if not actions and not self.in_flight:
+            next_retry_delay = _next_retry_delay_seconds(self.engine)
+            if next_retry_delay is not None:
+                self.idle_ticks = 0
+                if self.tick % 5 == 0 or next_retry_delay <= 2:
+                    print(f"  waiting for retry backoff ({next_retry_delay:.1f}s remaining)")
+                return False
+            self.idle_ticks += 1
+            if self.idle_ticks >= 3:
+                print(f"\n  No actions and nothing in flight — stopping.")
+                return True
+        else:
+            self.idle_ticks = 0
+        return False
+
+    def _print_active_agents(self) -> None:
+        active = len(self.in_flight)
+        if self.tick % 5 == 0 and active:
+            print(f"  [tick {self.tick}] {active} agent(s) running: {list(self.in_flight)}")
+
+    def _pause_if_needed(self) -> None:
+        if is_paused(self.engine.state.mission_id):
+            print(f"  ⏸  Mission paused. Remove pause file or run: mission resume {self.engine.state.mission_id}")
+            self.engine.state.reset_active_tick_clock()
+            self.engine._save()
+            while is_paused(self.engine.state.mission_id):
+                time.sleep(2)
+            print(f"  ▶  Mission resumed.")
+
+    def _should_stop(self) -> bool:
+        if self.engine.is_done() and not self.in_flight:
+            print(f"\n✓ Mission complete! ({self.tick} ticks)")
+            return True
+
+        if self.engine.is_failed() and not self.in_flight:
+            if "budget" in self.engine.state.caps_hit:
+                total_cost = sum(task_state.cost_usd for task_state in self.engine.state.task_states.values())
+                cap = self.engine.state.caps.max_cost_usd
+                print(f"\nBudget cap exceeded: ${total_cost:.4f} >= max_cost_usd=${cap:.2f}. Halting.")
+            else:
+                print(f"\n✗ Mission failed. ({self.tick} ticks)")
+            return True
+
+        return False
+
+    def run(self, max_ticks: int) -> int:
+        with ThreadPoolExecutor(max_workers=self.eff_pool) as executor:
+            self.executor = executor
+            while self.tick < max_ticks:
+                self.tick += 1
+                self._collect()
+                if self._should_stop():
+                    break
+                actions = self.engine.tick()
+                self._process_actions(actions)
+                if self._handle_idle_state(actions):
+                    break
+                self._print_active_agents()
+                self._pause_if_needed()
+                time.sleep(2)
+        return self.tick
+
+
 def run_autonomous(
     mission_id: str,
     workdir: str = None,
@@ -298,10 +850,9 @@ def run_autonomous(
     """
     _ensure_pkg()
     from agentforce.core.engine import MissionEngine
-    from agentforce.core.spec import ExecutionConfig, ExecutionProfile, TaskSpec
     from agentforce.core.token_ledger import TokenLedger
     from agentforce.memory import Memory
-    from agentforce.telemetry import TelemetryStore, TaskMetrics, MissionMetrics
+    from agentforce.telemetry import TelemetryStore, TaskMetrics
 
     state_file = Path.home() / ".agentforce" / "state" / f"{mission_id}.json"
     if not state_file.exists():
@@ -312,408 +863,42 @@ def run_autonomous(
 
     memory = Memory(Path.home() / ".agentforce" / "memory")
     engine = MissionEngine.load(state_file, memory)
-    persisted_defaults = engine.state.resolved_execution_defaults()
-
-    def _resolve_role_default(role: str) -> ExecutionProfile:
-        persisted = getattr(persisted_defaults, role)
-        resolved_agent = (
-            agent if agent != "auto"
-            else (persisted.agent if persisted and persisted.agent else None)
-        )
-        if resolved_agent is None:
-            resolved_agent = _detect_agent()
-        return normalize_runtime_profile(
-            agent=resolved_agent,
-            model=model or (persisted.model if persisted and persisted.model else None),
-            thinking=variant or (persisted.thinking if persisted and persisted.thinking else _DEFAULT_VARIANT),
-        )
-
-    worker_runtime = _resolve_role_default("worker")
-    reviewer_runtime = _resolve_role_default("reviewer")
-
-    engine.state.execution_defaults = ExecutionConfig(
-        worker=worker_runtime,
-        reviewer=reviewer_runtime,
-    )
-    engine._sync_execution_telemetry()
-    engine.state.caps_hit = {}
+    worker_runtime, reviewer_runtime = _resolve_execution_defaults(engine, agent, model, variant)
 
     resolved_agent = worker_runtime.agent
     eff_model = worker_runtime.model
     eff_variant = worker_runtime.thinking
 
     if extend_caps:
-        # Raise all caps well above current counters so none trigger this run.
-        # The stored mission state (counters, started_at) is not modified.
-        c = engine.state.caps
-        c.max_wall_time_minutes = 0          # 0 = disabled in wall_time_exceeded()
-        c.max_retries_global = max(c.max_retries_global, engine.state.total_retries + 100)
-        c.max_human_interventions = max(c.max_human_interventions, engine.state.total_human_interventions + 100)
-        print("  ⟳ Caps ignored for this run (wall-time disabled, retry/intervention limits raised).")
+        _apply_extend_caps(engine)
 
-    # On every resume: reset tasks that were interrupted or exhausted so they
-    # can make progress again. IN_PROGRESS tasks belong to a dead process.
-    # FAILED tasks get a fresh attempt (retries reset) so re-running the CLI is
-    # enough to retry without manual intervention.
-    _reset = False
-    for ts in engine.state.task_states.values():
-        if ts.status == TaskStatus.IN_PROGRESS:
-            ts.status = TaskStatus.RETRY if ts.retries > 0 else TaskStatus.PENDING
-            ts.bump()
-            engine.state.log_event("task_reset", ts.task_id, "Interrupted IN_PROGRESS task reset on resume")
-            _reset = True
-        elif ts.status == TaskStatus.REVIEWING:
-            # Reviewer was in-flight when the process died — re-queue for review.
-            ts.status = TaskStatus.COMPLETED
-            ts.review_feedback = ""
-            ts.bump()
-            engine.state.log_event("task_reset", ts.task_id, "Interrupted REVIEWING task reset on resume")
-            _reset = True
-        elif ts.status == TaskStatus.FAILED and not ts.human_intervention_needed:
-            ts.retries = 0
-            ts.status = TaskStatus.PENDING
-            ts.error_message = ""
-            ts.bump()
-            engine.state.log_event("task_reset", ts.task_id, "FAILED task reset for re-run")
-            _reset = True
-    if _reset:
-        engine.state.total_retries = 0
+    _reset_resumable_tasks(engine)
 
     engine._save()
     tele_store = TelemetryStore(_agentforce_home() / "telemetry")
-    start = datetime.now(timezone.utc)
 
     eff_pool = max(pool_size, engine.state.caps.max_concurrent_workers * 2 + 2)
-    print(f"\n=== Autonomous Mission Runner ===")
-    print(f"Mission : {engine.spec.name} [{engine.state.mission_id}]")
-    print(f"Tasks   : {len(engine.spec.tasks)}")
-    print(f"Agent   : {resolved_agent}  model={eff_model}  variant={eff_variant}")
-    print(f"Workers : up to {engine.state.caps.max_concurrent_workers} concurrent  (thread pool: {eff_pool})")
-    print(f"Workdir : {workdir or engine.state.working_dir}")
-    print()
+    _wdir = workdir or engine.state.working_dir
+    _print_startup_banner(engine, _wdir, resolved_agent, eff_model, eff_variant, eff_pool)
 
     ledger = TokenLedger()
-    # Pre-seed from persisted task costs so cross-session totals accumulate correctly
-    for _ts in engine.state.task_states.values():
-        if _ts.tokens_in or _ts.tokens_out or _ts.cost_usd:
-            ledger.add(_ts.task_id, _ts.tokens_in, _ts.tokens_out, _ts.cost_usd)
-
-    task_metrics: dict[str, TaskMetrics] = {}
-    # in_flight maps "task_id.role" → (Future, action)
-    in_flight: dict[str, tuple[Future, object]] = {}
-    # session_ids maps task_id → opencode session ID for caching across retries
-    session_ids: dict[str, str] = {}
-
-    _wdir = workdir or engine.state.working_dir
-
-    def _submit(action) -> None:
-        """Submit an action to the thread pool (non-blocking)."""
-        key = f"{action.task_id}.{action.role}"
-        if key in in_flight:
-            return
-        role = action.role
-        tid = action.task_id
-        timeout = getattr(action, "timeout", 300 if role == "worker" else 120)
-        effective_agent = getattr(action, "agent", None) or resolved_agent
-        effective_model = getattr(action, "model", None) or eff_model
-        effective_variant = getattr(action, "thinking", None) or eff_variant
-
-        # Reuse session for the same task across retries (enables caching)
-        session_id = _get_or_create_session_id(session_ids, tid, role)
-
-        sp = _stream_path(engine.state.mission_id, tid)
-        if role == "worker":
-            sp.write_text(f"=== WORKER [{tid}] STARTED ===\n", encoding="utf-8")
-            task_metrics.setdefault(tid, TaskMetrics(
-                task_id=tid,
-                task_title=engine._get_task_spec(tid).title,
-                mission_id=engine.state.mission_id,
-                worker_started=datetime.now(timezone.utc).isoformat(),
-            ))
-            task_metrics[tid].worker_attempts += 1
-        elif role == "reviewer":
-            with open(sp, "a", encoding="utf-8") as _sf:
-                _sf.write(f"\n=== REVIEWER [{tid}] STARTED ===\n")
-            task_metrics.setdefault(tid, TaskMetrics(
-                task_id=tid,
-                task_title=engine._get_task_spec(tid).title,
-                mission_id=engine.state.mission_id,
-            ))
-            task_metrics[tid].reviewer_started = datetime.now(timezone.utc).isoformat()
-            task_metrics[tid].review_attempts += 1
-
-        inject_message = check_inject_queue(engine.state.mission_id, tid)
-        if inject_message:
-            injected_line = f"[USER INSTRUCTION] {inject_message}"
-            print(injected_line)
-            with open(sp, "a", encoding="utf-8") as _sf:
-                _sf.write(injected_line + "\n")
-                _sf.flush()
-            action.context = f"{injected_line}\n\n{action.context}"
-
-        fut = executor.submit(
-            _run_agent, action.context, _wdir, timeout,
-            effective_agent, effective_model, sp, effective_variant, session_id,
-        )
-        in_flight[key] = (fut, action)
-        print(f"  ↑ [{role}] task {tid} dispatched")
-
-    def _collect() -> None:
-        """Harvest any completed futures and apply results to the engine."""
-        done_keys = [k for k, (f, _) in in_flight.items() if f.done()]
-        for key in done_keys:
-            fut, action = in_flight.pop(key)
-            role = action.role
-            tid = action.task_id
-
-            try:
-                success, output, error, returned_sid, token_event = fut.result()
-            except Exception as exc:
-                from agentforce.core.token_event import TokenEvent
-                success, output, error, returned_sid, token_event = False, "", str(exc), None, TokenEvent(0, 0, 0.0)
-
-            # Store returned connector session/thread IDs for reuse on retries.
-            if returned_sid:
-                if role == "worker" and tid not in session_ids:
-                    session_ids[tid] = returned_sid
-                elif role == "reviewer" and f"{tid}_reviewer" not in session_ids:
-                    session_ids[f"{tid}_reviewer"] = returned_sid
-
-            if role == "worker":
-                now = datetime.now(timezone.utc).isoformat()
-                tm = task_metrics.get(tid)
-                if tm and tm.worker_started:
-                    tm.worker_finished = now
-                    tm.worker_duration_s = (
-                        datetime.fromisoformat(now) - datetime.fromisoformat(tm.worker_started)
-                    ).total_seconds()
-                print(f"  ↓ [worker] task {tid}  success={success}  output={len(output)}B")
-                if error and "timed out" in error:
-                    print(f"    timed out — retrying without consuming a retry slot")
-                    ts = engine.state.get_task(tid)
-                    if ts:
-                        ts.status = TaskStatus.RETRY
-                        if output:
-                            ts.timeout_output = output
-                    engine._save()
-                    continue
-                if error:
-                    print(f"    error: {error[:200]}")
-                _record_usage(ledger, tid, output)
-                if token_event is not None:
-                    ledger.add(tid, token_event.tokens_in, token_event.tokens_out, token_event.cost_usd)
-                ts = engine.state.get_task(tid)
-                if ts:
-                    t = ledger.task_totals(tid)
-                    # Compute per-attempt delta before overwriting cumulative totals
-                    attempt_tokens_in = t["tokens_in"] - (ts.tokens_in or 0)
-                    attempt_tokens_out = t["tokens_out"] - (ts.tokens_out or 0)
-                    attempt_cost_usd = t["cost_usd"] - (ts.cost_usd or 0.0)
-                    ts.tokens_in = t["tokens_in"]
-                    ts.tokens_out = t["tokens_out"]
-                    ts.cost_usd = t["cost_usd"]
-                    if success:
-                        ts.attempt_history.append({
-                            "attempt_number": len(ts.attempt_history) + 1,
-                            "output": output,
-                            "tokens_in": attempt_tokens_in,
-                            "tokens_out": attempt_tokens_out,
-                            "cost_usd": round(attempt_cost_usd, 6),
-                        })
-                mt = ledger.mission_totals()
-                engine.state.tokens_in = mt["tokens_in"]
-                engine.state.tokens_out = mt["tokens_out"]
-                engine.state.cost_usd = mt["cost_usd"]
-                engine.apply_worker_result(tid, success, output, error)
-                engine._save()
-
-            elif role == "reviewer":
-                now = datetime.now(timezone.utc).isoformat()
-                tm = task_metrics.get(tid)
-                if tm and tm.reviewer_started:
-                    tm.reviewer_finished = now
-                    tm.reviewer_duration_s = (
-                        datetime.fromisoformat(now) - datetime.fromisoformat(tm.reviewer_started)
-                    ).total_seconds()
-
-                if not success and error and "timed out" in error:
-                    print(f"  ↓ [reviewer] task {tid}  timed out — re-dispatching reviewer")
-                    ts = engine.state.get_task(tid)
-                    if ts:
-                        ts.status = TaskStatus.COMPLETED  # triggers reviewer re-dispatch
-                    engine._save()
-                    continue
-
-                if not success and error and ("no rollout found" in error or "thread/resume" in error):
-                    print(f"  ↓ [reviewer] task {tid}  session expired — clearing session and re-dispatching reviewer")
-                    session_ids.pop(f"{tid}_reviewer", None)  # force a fresh session next dispatch
-                    ts = engine.state.get_task(tid)
-                    if ts:
-                        ts.status = TaskStatus.COMPLETED  # triggers reviewer re-dispatch
-                    engine._save()
-                    continue
-
-                if success and output:
-                    try:
-                        review = _parse_reviewer_output(output)
-                    except ValueError as exc:
-                        msg = str(exc)
-                        print(f"  [CRITICAL] task {tid}: {msg}")
-                        print(f"    Reviewer produced unreadable output — marking task as permanently failed.")
-                        task_spec = engine._get_task_spec(tid)
-                        ts = engine.state.get_task(tid)
-                        if ts and task_spec:
-                            ts.retries = task_spec.max_retries  # exhaust retries
-                        engine.apply_reviewer_result(tid, False, msg, 0, [])
-                        engine._save()
-                        continue
-                else:
-                    review = {"approved": False, "feedback": f"Reviewer error: {error}", "score": 0}
-
-                review = _enforce_review_thresholds(review)
-                approved = review.get("approved", False)
-                score = review.get("score", 0)
-                feedback = review.get("feedback", "")
-                blocking = review.get("blocking_issues", [])
-
-                if tm:
-                    tm.review_score = score
-                    tm.review_approved = approved
-                    tm.review_issues_count = len(blocking)
-
-                # Hard-block check: Security/TDD below threshold → NEEDS_HUMAN immediately
-                ts = engine.state.get_task(tid)
-                if ts and _apply_hard_blocks(review, ts):
-                    print(f"  ↓ [reviewer] task {tid}  HARD BLOCK: {ts.hard_block_reason}")
-                    engine.state.log_event("hard_block", tid, ts.hard_block_reason)
-                    _record_usage(ledger, tid, output if success else "")
-                    if ts:
-                        t = ledger.task_totals(tid)
-                        reviewer_cost_delta = t["cost_usd"] - (ts.cost_usd or 0.0)
-                        reviewer_tokens_in_delta = t["tokens_in"] - (ts.tokens_in or 0)
-                        reviewer_tokens_out_delta = t["tokens_out"] - (ts.tokens_out or 0)
-                        ts.tokens_in = t["tokens_in"]
-                        ts.tokens_out = t["tokens_out"]
-                        ts.cost_usd = t["cost_usd"]
-                        if ts.attempt_history:
-                            last = ts.attempt_history[-1]
-                            last["review"] = ts.hard_block_reason
-                            last["score"] = 0
-                            last["tokens_in"] = last.get("tokens_in", 0) + reviewer_tokens_in_delta
-                            last["tokens_out"] = last.get("tokens_out", 0) + reviewer_tokens_out_delta
-                            last["cost_usd"] = round(last.get("cost_usd", 0.0) + reviewer_cost_delta, 6)
-                    mt = ledger.mission_totals()
-                    engine.state.tokens_in = mt["tokens_in"]
-                    engine.state.tokens_out = mt["tokens_out"]
-                    engine.state.cost_usd = mt["cost_usd"]
-                    engine._save()
-                    continue
-
-                print(f"  ↓ [reviewer] task {tid}  approved={approved}  score={score}")
-                if not approved and feedback:
-                    print(f"    feedback: {feedback[:200]}")
-                _record_usage(ledger, tid, output if success else "")
-                if ts:
-                    t = ledger.task_totals(tid)
-                    # Add reviewer cost delta to the last attempt entry
-                    reviewer_cost_delta = t["cost_usd"] - (ts.cost_usd or 0.0)
-                    reviewer_tokens_in_delta = t["tokens_in"] - (ts.tokens_in or 0)
-                    reviewer_tokens_out_delta = t["tokens_out"] - (ts.tokens_out or 0)
-                    ts.tokens_in = t["tokens_in"]
-                    ts.tokens_out = t["tokens_out"]
-                    ts.cost_usd = t["cost_usd"]
-                    if ts.attempt_history:
-                        last = ts.attempt_history[-1]
-                        last["review"] = feedback
-                        last["score"] = score
-                        last["tokens_in"] = last.get("tokens_in", 0) + reviewer_tokens_in_delta
-                        last["tokens_out"] = last.get("tokens_out", 0) + reviewer_tokens_out_delta
-                        last["cost_usd"] = round(last.get("cost_usd", 0.0) + reviewer_cost_delta, 6)
-                mt = ledger.mission_totals()
-                engine.state.tokens_in = mt["tokens_in"]
-                engine.state.tokens_out = mt["tokens_out"]
-                engine.state.cost_usd = mt["cost_usd"]
-                engine.apply_reviewer_result(tid, approved, feedback, score, blocking)
-                engine._save()
-
-    tick = 0
-    idle_ticks = 0
-
-    with ThreadPoolExecutor(max_workers=eff_pool) as executor:
-        while tick < max_ticks:
-            tick += 1
-
-            # Collect finished work first (non-blocking)
-            _collect()
-
-            # Terminal conditions
-            if engine.is_done() and not in_flight:
-                print(f"\n✓ Mission complete! ({tick} ticks)")
-                break
-            if engine.is_failed() and not in_flight:
-                if "budget" in engine.state.caps_hit:
-                    total_cost = sum(ts.cost_usd for ts in engine.state.task_states.values())
-                    cap = engine.state.caps.max_cost_usd
-                    print(f"\nBudget cap exceeded: ${total_cost:.4f} >= max_cost_usd=${cap:.2f}. Halting.")
-                else:
-                    print(f"\n✗ Mission failed. ({tick} ticks)")
-                break
-
-            # Get new actions from the engine
-            actions = engine.tick()
-
-            for action in actions:
-                role = getattr(action, "role", "")
-                if role in ("worker", "reviewer") and hasattr(action, "context"):
-                    _submit(action)
-                elif hasattr(action, "message"):  # HumanIntervention
-                    print(f"  ⚠ Human intervention [{action.task_id}]: {getattr(action, 'message', '')[:120]}")
-                    if getattr(action, "kind", "") == "destructive_action":
-                        options = getattr(action, "options", []) or []
-                        for option in options:
-                            print(f"    - {option.get('id')}: {option.get('label')}")
-                        print("    Waiting for operator decision in Mission Control.")
-                        engine._save()
-                        continue
-                    print(f"    Auto-resolving with reviewer context.")
-                    engine.apply_human_resolution(
-                        action.task_id, getattr(action, "message", "Fix the blocking issues listed above.")
-                    )
-                    engine._save()
-
-            if not actions and not in_flight:
-                next_retry_delay = _next_retry_delay_seconds(engine)
-                if next_retry_delay is not None:
-                    idle_ticks = 0
-                    if tick % 5 == 0 or next_retry_delay <= 2:
-                        print(f"  waiting for retry backoff ({next_retry_delay:.1f}s remaining)")
-                else:
-                    idle_ticks += 1
-                    if idle_ticks >= 3:
-                        print(f"\n  No actions and nothing in flight — stopping.")
-                        break
-            else:
-                idle_ticks = 0
-
-            # Print after _submit so newly dispatched tasks are counted
-            active = len(in_flight)
-            if tick % 5 == 0 and active:
-                print(f"  [tick {tick}] {active} agent(s) running: {list(in_flight)}")
-
-            # Pause support: block here while pause file exists
-            if is_paused(engine.state.mission_id):
-                print(f"  ⏸  Mission paused. Remove pause file or run: mission resume {engine.state.mission_id}")
-                engine.state.reset_active_tick_clock()
-                engine._save()
-                while is_paused(engine.state.mission_id):
-                    time.sleep(2)
-                print(f"  ▶  Mission resumed.")
-
-            time.sleep(2)  # supervisor poll interval
+    _seed_ledger_from_state(ledger, engine.state.task_states)
+    runner = _AutonomousRunner(
+        engine=engine,
+        workdir=_wdir,
+        resolved_agent=resolved_agent,
+        model=eff_model,
+        variant=eff_variant,
+        eff_pool=eff_pool,
+        ledger=ledger,
+        task_metrics_cls=TaskMetrics,
+        task_status_cls=TaskStatus,
+    )
+    tick = runner.run(max_ticks)
 
     # Warn if we exited only because the tick limit was reached
     if tick >= max_ticks and not engine.is_done() and not engine.is_failed():
-        approved = sum(1 for ts in engine.state.task_states.values() if ts.status == "approved")
+        approved = _count_review_approved_tasks(engine.state.task_states)
         total = len(engine.spec.tasks)
         print(
             f"\n⚠  Tick limit ({max_ticks}) reached — mission is NOT complete.\n"
@@ -726,38 +911,7 @@ def run_autonomous(
 
     # Build final metrics
     end = datetime.now(timezone.utc)
-    mission_metrics = MissionMetrics(
-        mission_id=engine.state.mission_id,
-        mission_name=engine.spec.name,
-        started_at=engine.state.started_at,
-        completed_at=end.isoformat(),
-        total_duration_s=engine.state.active_wall_time_seconds,
-        total_tasks=len(engine.spec.tasks),
-        approved_on_first_try=sum(
-            1 for tm in task_metrics.values()
-            if tm.review_approved and tm.retries == 0
-        ),
-        approved_with_retries=sum(
-            1 for tm in task_metrics.values()
-            if tm.review_approved and tm.retries > 0
-        ),
-        failed=sum(
-            1 for ts in engine.state.task_states.values()
-            if ts.status == "failed"
-        ),
-        total_retries=engine.state.total_retries,
-        total_human_interventions=engine.state.total_human_interventions,
-        worker_tasks=sum(tm.worker_attempts for tm in task_metrics.values()),
-        reviewer_tasks=sum(tm.review_attempts for tm in task_metrics.values()),
-        task_metrics={k: v.to_dict() for k, v in task_metrics.items()},
-    )
-
-    scores = [tm.review_score for tm in task_metrics.values() if tm.review_score > 0]
-    if scores:
-        mission_metrics.avg_review_score = sum(scores) / len(scores)
-        mission_metrics.min_review_score = min(scores)
-        mission_metrics.max_review_score = max(scores)
-
+    mission_metrics = _build_mission_metrics(engine, runner.task_metrics, end.isoformat())
     tele_store.save_mission(mission_metrics)
 
     report = engine.report()
