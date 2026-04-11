@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import Terminal from './Terminal';
 import { getTaskAttempts } from '../lib/api';
+import { renderMarkdown } from '../lib/markdown';
 import type { TaskAttempt } from '../lib/types';
 
 export interface RetryHistoryProps {
@@ -22,12 +22,12 @@ function getScoreClasses(score: number): string {
 }
 
 function summarizeReview(review: string): string {
-  const trimmed = review.trim();
-  if (trimmed.length <= 150) {
+  const trimmed = review.trim().replace(/\s+/g, ' ');
+  if (trimmed.length <= 140) {
     return trimmed;
   }
 
-  return `${trimmed.slice(0, 150).trimEnd()}…`;
+  return `${trimmed.slice(0, 140).trimEnd()}…`;
 }
 
 export default function RetryHistory({ missionId, taskId, currentRetryCount }: RetryHistoryProps) {
@@ -83,14 +83,21 @@ export default function RetryHistory({ missionId, taskId, currentRetryCount }: R
     return <p className="rounded-lg border border-border bg-card px-4 py-3 text-dim">First attempt — no history</p>;
   }
 
-  const currentAttempt = attempts[selectedAttempt] ?? attempts[attempts.length - 1];
+  const historicalReviews = attempts.slice(0, -1).filter((attempt) => (attempt.review?.trim() ?? '') !== '');
+
+  if (historicalReviews.length === 0) {
+    return <p className="rounded-lg border border-border bg-card px-4 py-3 text-dim">No prior reviewer outcomes yet</p>;
+  }
+
+  const currentAttempt = historicalReviews[selectedAttempt] ?? historicalReviews[historicalReviews.length - 1];
   const currentReview = currentAttempt.review?.trim() ?? '';
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
       <div className="mb-3 flex flex-wrap gap-2">
-        {attempts.map((attempt, index) => {
+        {historicalReviews.map((attempt, index) => {
           const selected = index === selectedAttempt;
+          const score = attempt.score ?? 0;
 
           return (
             <button
@@ -104,10 +111,10 @@ export default function RetryHistory({ missionId, taskId, currentRetryCount }: R
                 .join(' ')}
               onClick={() => setSelectedAttempt(index)}
             >
-              {`Attempt ${attempt.attempt_number ?? index + 1}`}
-              {attempt.cost_usd != null && attempt.cost_usd > 0 ? (
-                <span className="ml-1.5 opacity-70">${attempt.cost_usd.toFixed(4)}</span>
-              ) : null}
+              {`Review ${attempt.attempt_number ?? index + 1}`}
+              <span className={['ml-1.5 inline-flex rounded-full border px-1.5 py-0.5 text-[10px]', getScoreClasses(score)].join(' ')}>
+                {score}/10
+              </span>
             </button>
           );
         })}
@@ -127,21 +134,39 @@ export default function RetryHistory({ missionId, taskId, currentRetryCount }: R
         </div>
       ) : null}
 
-      <Terminal lines={(currentAttempt.output ?? '').split('\n')} done={true} />
-
-      {currentReview ? (
-        <div className="mt-3 rounded border border-border bg-surface p-3">
-          <div className="mb-2 flex items-center gap-2">
-            <span className={['inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold', getScoreClasses(currentAttempt.score ?? 0)].join(' ')}>
-              {`${currentAttempt.score ?? 0}/10`}
-            </span>
-            <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
-              Previous review
-            </span>
-          </div>
-          <p className="text-[12px] leading-5 text-dim">{summarizeReview(currentReview)}</p>
+      <div className="rounded-lg border border-border bg-surface p-3">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-cyan/30 bg-cyan/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-cyan">
+            reviewer outcome
+          </span>
+          <span className={['inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold', getScoreClasses(currentAttempt.score ?? 0)].join(' ')}>
+            {`${currentAttempt.score ?? 0}/10`}
+          </span>
+          <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+            attempt {currentAttempt.attempt_number}
+          </span>
         </div>
-      ) : null}
+        <p className="text-[12px] leading-5 text-dim">{summarizeReview(currentReview)}</p>
+      </div>
+
+      <details className="mt-3 rounded-lg border border-border bg-surface p-3">
+        <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+          Worker attempt output
+        </summary>
+        <pre className="mt-3 max-h-[320px] overflow-y-auto whitespace-pre-wrap break-words rounded border border-border bg-card px-3 py-2 font-mono text-[12px] leading-6 text-text">
+          {currentAttempt.output || 'No worker output captured.'}
+        </pre>
+      </details>
+
+      <details className="mt-3 rounded-lg border border-border bg-surface p-3">
+        <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+          Reviewer feedback
+        </summary>
+        <div
+          className="prose-like mt-3 text-[13px] leading-6 text-dim"
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(currentReview || 'No review feedback captured.') }}
+        />
+      </details>
     </div>
   );
 }

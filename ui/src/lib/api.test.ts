@@ -7,6 +7,7 @@ import {
   injectPrompt,
   markTaskFailed,
   resolveHumanBlock,
+  retryPlanRun,
   retryTask,
   stopTask,
   testConnector,
@@ -144,5 +145,22 @@ describe('connectors API client', () => {
         body: JSON.stringify({ failed: true }),
       },
     );
+  });
+
+  it('posts plan run retries to the retry endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ draft_id: 'draft-1', plan_run_id: 'run-2', status: 'queued' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await retryPlanRun('run-1');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/plan/runs/run-1/retry', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+    });
   });
 });

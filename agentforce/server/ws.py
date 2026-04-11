@@ -8,10 +8,13 @@ import struct
 import threading
 from typing import Any
 
+from agentforce.core.event_bus import EVENT_BUS
+
 _WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 _LOCK = threading.Lock()
 _SUBSCRIBERS: dict[str, set["WsConnection"]] = {}
+_BUS_BOUND = False
 
 
 def _ws_handshake(handler) -> bool:
@@ -210,6 +213,29 @@ def broadcast_mission(mission_id: str, state_dict: dict) -> None:
     _broadcast_to_subscribers(mission_id, message)
 
 
+def broadcast_mission_task_update(mission_id: str, task_id: str, task: dict) -> None:
+    message = json.dumps(
+        {
+            "type": "mission_task_update",
+            "mission_id": mission_id,
+            "task_id": task_id,
+            "task": task,
+        }
+    )
+    _broadcast_to_subscribers(mission_id, message)
+
+
+def broadcast_mission_event_log(mission_id: str, entry: dict) -> None:
+    message = json.dumps(
+        {
+            "type": "mission_event_logged",
+            "mission_id": mission_id,
+            "entry": entry,
+        }
+    )
+    _broadcast_to_subscribers(mission_id, message)
+
+
 def broadcast_stream_line(mission_id: str, task_id: str, line: str, seq: int) -> None:
     message = json.dumps(
         {
@@ -229,6 +255,18 @@ def broadcast_task_stream_done(mission_id: str, task_id: str) -> None:
             "type": "task_stream_done",
             "mission_id": mission_id,
             "task_id": task_id,
+        }
+    )
+    _broadcast_to_subscribers(mission_id, message)
+
+
+def broadcast_task_stream_event(mission_id: str, task_id: str, event: dict) -> None:
+    message = json.dumps(
+        {
+            "type": "task_stream_event",
+            "mission_id": mission_id,
+            "task_id": task_id,
+            "event": event,
         }
     )
     _broadcast_to_subscribers(mission_id, message)
@@ -288,3 +326,57 @@ def broadcast_task_attempt_start(mission_id: str, task_id: str, attempt_number: 
         }
     )
     _broadcast_to_subscribers(mission_id, message)
+
+
+def _bind_event_bus() -> None:
+    global _BUS_BOUND
+    if _BUS_BOUND:
+        return
+
+    EVENT_BUS.subscribe(
+        "mission.snapshot",
+        lambda payload: broadcast_mission(payload["mission_id"], payload["state"]),
+    )
+    EVENT_BUS.subscribe(
+        "mission.list_snapshot",
+        lambda payload: broadcast_mission_list(payload["missions"]),
+    )
+    EVENT_BUS.subscribe(
+        "mission.task_updated",
+        lambda payload: broadcast_mission_task_update(payload["mission_id"], payload["task_id"], payload["task"]),
+    )
+    EVENT_BUS.subscribe(
+        "mission.event_logged",
+        lambda payload: broadcast_mission_event_log(payload["mission_id"], payload["entry"]),
+    )
+    EVENT_BUS.subscribe(
+        "mission.cost_updated",
+        lambda payload: broadcast_mission_cost_update(
+            payload["mission_id"],
+            payload["tokens_in"],
+            payload["tokens_out"],
+            payload["cost_usd"],
+        ),
+    )
+    EVENT_BUS.subscribe(
+        "task.cost_updated",
+        lambda payload: broadcast_task_cost_update(
+            payload["mission_id"],
+            payload["task_id"],
+            payload["tokens_in"],
+            payload["tokens_out"],
+            payload["cost_usd"],
+        ),
+    )
+    EVENT_BUS.subscribe(
+        "task.attempt_started",
+        lambda payload: broadcast_task_attempt_start(
+            payload["mission_id"],
+            payload["task_id"],
+            payload["attempt_number"],
+        ),
+    )
+    _BUS_BOUND = True
+
+
+_bind_event_bus()

@@ -5,6 +5,23 @@ import type { MissionState } from '../lib/types';
 
 const wsHarness = vi.hoisted(() => {
   const stateHandlers = new Set<(event: { type: 'mission_state'; mission_id: string; state: MissionState }) => void>();
+  const taskHandlers = new Set<(event: {
+    type: 'mission_task_update';
+    mission_id: string;
+    task_id: string;
+    task: MissionState['task_states'][string];
+  }) => void>();
+  const taskAttemptHandlers = new Set<(event: {
+    type: 'task_attempt_start';
+    mission_id: string;
+    task_id: string;
+    attempt_number: number;
+  }) => void>();
+  const eventLogHandlers = new Set<(event: {
+    type: 'mission_event_logged';
+    mission_id: string;
+    entry: { timestamp: string; event_type: string; details: string; task_id?: string | null };
+  }) => void>();
   const costHandlers = new Set<(event: {
     type: 'mission_cost_update';
     mission_id: string;
@@ -24,11 +41,43 @@ const wsHarness = vi.hoisted(() => {
 
   return {
     stateHandlers,
+    taskHandlers,
+    taskAttemptHandlers,
+    eventLogHandlers,
     costHandlers,
     taskCostHandlers,
     subscribe,
     emit(event: { type: 'mission_state'; mission_id: string; state: MissionState }) {
       for (const handler of stateHandlers) {
+        handler(event);
+      }
+    },
+    emitTask(event: {
+      type: 'mission_task_update';
+      mission_id: string;
+      task_id: string;
+      task: MissionState['task_states'][string];
+    }) {
+      for (const handler of taskHandlers) {
+        handler(event);
+      }
+    },
+    emitTaskAttempt(event: {
+      type: 'task_attempt_start';
+      mission_id: string;
+      task_id: string;
+      attempt_number: number;
+    }) {
+      for (const handler of taskAttemptHandlers) {
+        handler(event);
+      }
+    },
+    emitLog(event: {
+      type: 'mission_event_logged';
+      mission_id: string;
+      entry: { timestamp: string; event_type: string; details: string; task_id?: string | null };
+    }) {
+      for (const handler of eventLogHandlers) {
         handler(event);
       }
     },
@@ -57,6 +106,9 @@ const wsHarness = vi.hoisted(() => {
     },
     reset() {
       stateHandlers.clear();
+      taskHandlers.clear();
+      taskAttemptHandlers.clear();
+      eventLogHandlers.clear();
       costHandlers.clear();
       taskCostHandlers.clear();
       subscribe.mockClear();
@@ -118,6 +170,12 @@ vi.mock('../lib/ws', () => ({
     on(type: string, handler: (event: { type: 'mission_state'; mission_id: string; state: MissionState }) => void) {
       if (type === 'mission_state') {
         wsHarness.stateHandlers.add(handler);
+      } else if (type === 'mission_task_update') {
+        wsHarness.taskHandlers.add(handler as never);
+      } else if (type === 'task_attempt_start') {
+        wsHarness.taskAttemptHandlers.add(handler as never);
+      } else if (type === 'mission_event_logged') {
+        wsHarness.eventLogHandlers.add(handler as never);
       } else if (type === 'mission_cost_update') {
         wsHarness.costHandlers.add(handler as never);
       } else if (type === 'task_cost_update') {
@@ -127,6 +185,12 @@ vi.mock('../lib/ws', () => ({
     off(type: string, handler: (event: { type: 'mission_state'; mission_id: string; state: MissionState }) => void) {
       if (type === 'mission_state') {
         wsHarness.stateHandlers.delete(handler);
+      } else if (type === 'mission_task_update') {
+        wsHarness.taskHandlers.delete(handler as never);
+      } else if (type === 'task_attempt_start') {
+        wsHarness.taskAttemptHandlers.delete(handler as never);
+      } else if (type === 'mission_event_logged') {
+        wsHarness.eventLogHandlers.delete(handler as never);
       } else if (type === 'mission_cost_update') {
         wsHarness.costHandlers.delete(handler as never);
       } else if (type === 'task_cost_update') {
@@ -147,6 +211,7 @@ function TestHarness({ missionId }: { missionId: string }) {
         ? 'loading'
         : error ?? [
             mission?.spec.name ?? 'empty',
+            mission?.task_states['task-1']?.status ?? 'missing',
             mission?.tokens_in ?? 0,
             mission?.tokens_out ?? 0,
             mission?.cost_usd ?? 0,
@@ -229,6 +294,96 @@ describe('useMission', () => {
     expect(container.textContent).toContain('42');
     expect(container.textContent).toContain('11');
     expect(container.textContent).toContain('3');
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('applies granular task and event-log websocket updates', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(<TestHarness missionId="mission-123" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    act(() => {
+      wsHarness.emitTask({
+        type: 'mission_task_update',
+        mission_id: 'mission-123',
+        task_id: 'task-1',
+        task: {
+          ...mission.task_states['task-1'],
+          status: 'in_progress',
+          tokens_in: 9,
+          tokens_out: 4,
+          cost_usd: 0.25,
+        },
+      });
+      wsHarness.emitLog({
+        type: 'mission_event_logged',
+        mission_id: 'mission-123',
+        entry: {
+          timestamp: '2024-01-01T00:00:01Z',
+          event_type: 'task_dispatched',
+          task_id: 'task-1',
+          details: 'Worker dispatched',
+        },
+      });
+    });
+
+    expect(container.textContent).toContain('9');
+    expect(container.textContent).toContain('4');
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('keeps the task in progress when a task attempt starts', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(<TestHarness missionId="mission-123" />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    act(() => {
+      wsHarness.emitTask({
+        type: 'mission_task_update',
+        mission_id: 'mission-123',
+        task_id: 'task-1',
+        task: {
+          ...mission.task_states['task-1'],
+          status: 'in_progress',
+          worker_output: 'stale output',
+          error_message: 'old error',
+          human_intervention_needed: true,
+        },
+      });
+      wsHarness.emitTaskAttempt({
+        type: 'task_attempt_start',
+        mission_id: 'mission-123',
+        task_id: 'task-1',
+        attempt_number: 2,
+      });
+    });
+
+    expect(container.textContent).toContain('Mission Alpha');
+    expect(container.textContent).toContain('in_progress');
 
     act(() => {
       root.unmount();

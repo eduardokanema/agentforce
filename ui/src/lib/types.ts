@@ -252,6 +252,7 @@ export interface MissionState {
   active_wall_time_seconds?: number;
   event_log?: EventLogEntry[];
   completed_at?: string | null;
+  finished_at?: string | null;
   caps_hit?: Record<string, string>;
   execution_defaults?: ExecutionConfig | null;
   execution?: ExecutionMetadata | null;
@@ -304,7 +305,7 @@ export interface TelemetryData {
   cost_over_time: TelemetryCostPoint[];
 }
 
-export type MissionSummaryStatus = 'active' | 'in_progress' | 'complete' | 'completed' | 'review_approved' | 'failed' | 'needs_human' | 'draft';
+export type MissionSummaryStatus = 'active' | 'in_progress' | 'complete' | 'completed' | 'review_approved' | 'failed' | 'needs_human' | 'draft' | 'finished';
 
 export interface DraftSummary {
   id: string;

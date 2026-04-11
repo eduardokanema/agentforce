@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agentforce.core.engine import MissionEngine
 from agentforce.memory import Memory
+from agentforce.streaming import StreamRecorder, load_stream_events
 
 from .. import state_io
 from .providers import _now_iso
@@ -103,6 +104,29 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
                 })
         return 200, records
 
+    if len(parts) == 6 and parts[1] == "mission" and parts[3] == "task" and parts[5] == "stream_events":
+        mission_id, task_id = parts[2], parts[4]
+        state = _load_state(mission_id)
+        if not state:
+            return 404, {"error": f"Mission {mission_id!r} not found"}
+        task_state = state.task_states.get(task_id)
+        if not task_state:
+            return 404, {"error": f"Task {task_id!r} not found in mission {mission_id!r}"}
+        raw_after_seq = query.get("after_seq", "0")
+        try:
+            after_seq = int(raw_after_seq or 0)
+        except (TypeError, ValueError):
+            return 400, {"error": "after_seq must be an integer"}
+        events = load_stream_events(
+            mission_id,
+            task_id,
+            after_seq=after_seq,
+            stream_dir=state_io.get_agentforce_home() / "streams",
+        )
+        done = state_io._task_status_value(task_state) in {"completed", "review_approved", "review_rejected", "failed", "needs_human", "blocked"}
+        last_seq = int(events[-1]["seq"]) if events else after_seq
+        return 200, {"events": events, "done": done, "last_seq": last_seq}
+
     return 404, {"error": "Not found"}
 
 
@@ -154,6 +178,8 @@ def _post_task_inject(handler, mission_id: str, task_id: str, body: dict) -> tup
     inject_path.parent.mkdir(parents=True, exist_ok=True)
     with open(inject_path, "w", encoding="utf-8") as fh:
         _jsonlib.dump({"message": message, "timestamp": _now_iso()}, fh)
+    recorder = StreamRecorder(mission_id, task_id, provider="operator", stream_dir=state_io.get_agentforce_home() / "streams")
+    recorder.user_instruction(message)
     return 200, {"delivered": True}
 
 
@@ -205,6 +231,8 @@ def _post_task_change_model(mission_id: str, task_id: str, body: dict) -> tuple[
     reviewer_model = body.get("reviewer_model")
     worker_agent = body.get("worker_agent")
     reviewer_agent = body.get("reviewer_agent")
+    worker_thinking = body.get("worker_thinking")
+    reviewer_thinking = body.get("reviewer_thinking")
     if not isinstance(worker_model, str) and isinstance(legacy_model, str):
         worker_model = legacy_model
     if not isinstance(worker_model, str):
@@ -215,12 +243,18 @@ def _post_task_change_model(mission_id: str, task_id: str, body: dict) -> tuple[
         worker_agent = None
     if not isinstance(reviewer_agent, str):
         reviewer_agent = None
+    if not isinstance(worker_thinking, str):
+        worker_thinking = None
+    if not isinstance(reviewer_thinking, str):
+        reviewer_thinking = None
     worker_model = worker_model.strip() if worker_model else None
     reviewer_model = reviewer_model.strip() if reviewer_model else None
     worker_agent = worker_agent.strip() if worker_agent else None
     reviewer_agent = reviewer_agent.strip() if reviewer_agent else None
-    if not worker_model and not reviewer_model and not worker_agent and not reviewer_agent:
-        return 400, {"error": "worker_model, reviewer_model, worker_agent, or reviewer_agent is required"}
+    worker_thinking = worker_thinking.strip() if worker_thinking else None
+    reviewer_thinking = reviewer_thinking.strip() if reviewer_thinking else None
+    if not worker_model and not reviewer_model and not worker_agent and not reviewer_agent and not worker_thinking and not reviewer_thinking:
+        return 400, {"error": "worker_model, reviewer_model, worker_agent, reviewer_agent, worker_thinking, or reviewer_thinking is required"}
 
     engine = _load_engine(mission_id)
     if not engine:
@@ -235,6 +269,8 @@ def _post_task_change_model(mission_id: str, task_id: str, body: dict) -> tuple[
             reviewer_model=reviewer_model,
             worker_agent=worker_agent,
             reviewer_agent=reviewer_agent,
+            worker_thinking=worker_thinking,
+            reviewer_thinking=reviewer_thinking,
         )
     except ValueError as exc:
         return 409, {"error": str(exc)}
@@ -252,8 +288,10 @@ def _post_task_change_model(mission_id: str, task_id: str, body: dict) -> tuple[
     return 200, {
         "worker_agent": worker_agent,
         "worker_model": worker_model,
+        "worker_thinking": worker_thinking,
         "reviewer_agent": reviewer_agent,
         "reviewer_model": reviewer_model,
+        "reviewer_thinking": reviewer_thinking,
         "retried": retried,
     }
 

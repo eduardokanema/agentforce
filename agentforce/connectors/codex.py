@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 from agentforce.core.token_event import TokenEvent
+from agentforce.streaming import StreamRecorder
 
 
 def available() -> bool:
@@ -121,7 +122,7 @@ def run(
 
         timer = threading.Timer(timeout, _kill)
         timer.start()
-        sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
+        recorder = StreamRecorder.from_raw_stream_path(stream_path, provider="codex")
         try:
             for raw in proc.stdout:
                 raw_stripped = raw.strip()
@@ -137,30 +138,51 @@ def run(
                         usage = event.get("usage", {})
                         tokens_in += usage.get("input_tokens", 0)
                         tokens_out += usage.get("output_tokens", 0)
+                        if recorder:
+                            recorder.usage(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=0.0)
                     else:
                         formatted = _format_event(event)
                         if formatted is not None:
                             text_parts.append(formatted)
-                            if sf:
-                                sf.write(formatted + "\n")
-                                sf.flush()
+                        if recorder:
+                            event_type = event.get("type", "")
+                            item = event.get("item", {}) if isinstance(event.get("item"), dict) else {}
+                            item_type = item.get("type", "")
+                            call_id = item.get("id") or item.get("uuid") or item.get("command") or f"{event_type}:{len(text_parts)}"
+                            if event_type == "item.started" and item_type == "command_execution":
+                                command = item.get("command", "")
+                                recorder.tool_start(call_id, command or "command", command=command, raw_line=formatted)
+                            elif event_type == "item.completed" and item_type == "command_execution":
+                                out = item.get("aggregated_output", "").strip()
+                                if out:
+                                    recorder.tool_output(call_id, out)
+                                recorder.tool_end(call_id, exit_code=item.get("exit_code"), success=item.get("exit_code") == 0, raw_line=formatted)
+                            elif event_type == "item.completed" and item_type == "agent_message":
+                                text = item.get("text", "")
+                                if text:
+                                    recorder.text_delta(text, role="assistant")
+                            elif formatted is not None:
+                                recorder.raw_line(formatted, role="system", meta={"provider_event_type": event_type, "item_type": item_type})
+                            else:
+                                recorder.raw_line(raw_stripped, role="system", meta={"provider_event_type": event_type, "item_type": item_type})
                 except (json.JSONDecodeError, AttributeError):
                     # Non-JSON line (banner, error) — pass through as-is
                     text_parts.append(raw_stripped)
-                    if sf:
-                        sf.write(raw_stripped + "\n")
-                        sf.flush()
+                    if recorder:
+                        recorder.raw_line(raw_stripped, role="system", meta={"provider_event_type": "non_json"})
             proc.wait()
         finally:
             timer.cancel()
-            if sf:
-                sf.close()
 
         token_event = TokenEvent(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=0.0)
         if timed_out:
+            if recorder:
+                recorder.error("codex timed out")
             return False, "\n".join(text_parts).strip(), "codex timed out", returned_thread_id, token_event
 
         error = proc.stderr.read().strip()
+        if error and recorder:
+            recorder.error(error)
         success = proc.returncode == 0
         return success, "\n".join(text_parts).strip(), error, returned_thread_id, token_event
 

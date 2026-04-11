@@ -31,7 +31,7 @@ def test_list_all_empty(tmp_path):
     assert store.list_all() == []
 
 
-def test_list_all_filtering_and_sorting(tmp_path):
+def test_list_all_excludes_terminal_drafts_by_default(tmp_path):
     store = plan_drafts.PlanDraftStore(tmp_path / "drafts")
 
     store.create("d1", **_draft_payload_with_meta("Draft 1", "Goal 1"))
@@ -46,20 +46,26 @@ def test_list_all_filtering_and_sorting(tmp_path):
     store.create("d4", **payload4)
 
     drafts = store.list_all()
-    assert len(drafts) == 2
     assert {d.id for d in drafts} == {"d1", "d2"}
 
-    drafts_all = store.list_all(include_terminal=True)
-    assert len(drafts_all) == 4
 
-    for d in drafts_all:
-        assert hasattr(d, "name")
-        assert hasattr(d, "goal")
-        assert d.name == f"Draft {d.id[1:]}"
-        assert d.goal == f"Goal {d.id[1:]}"
-        assert hasattr(d, "updated_at")
-        assert d.updated_at is not None
-        assert isinstance(d.updated_at, datetime)
+def test_list_all_includes_terminal_drafts_when_requested(tmp_path):
+    store = plan_drafts.PlanDraftStore(tmp_path / "drafts")
+
+    draft_payload = _draft_payload_with_meta("Draft", "Goal")
+    store.create("draft", **draft_payload)
+
+    finalized_payload = _draft_payload_with_meta("Finalized", "Done")
+    finalized_payload["status"] = "finalized"
+    store.create("finalized", **finalized_payload)
+
+    cancelled_payload = _draft_payload_with_meta("Cancelled", "Stopped")
+    cancelled_payload["status"] = "cancelled"
+    store.create("cancelled", **cancelled_payload)
+
+    drafts_all = store.list_all(include_terminal=True)
+    assert {draft.id for draft in drafts_all} == {"draft", "finalized", "cancelled"}
+    assert {draft.status for draft in drafts_all} == {"draft", "finalized", "cancelled"}
 
 
 def test_list_all_sorting_by_activity_log(tmp_path):
@@ -80,25 +86,56 @@ def test_list_all_sorting_by_activity_log(tmp_path):
     assert drafts[0].updated_at > drafts[1].updated_at
 
 
-def test_list_all_uses_nested_spec_last_activity_and_mtime_fallback(tmp_path):
+def test_list_all_extracts_name_and_goal_from_nested_draft_spec(tmp_path):
     drafts_dir = tmp_path / "drafts"
     drafts_dir.mkdir()
     store = plan_drafts.PlanDraftStore(drafts_dir)
 
-    old_timestamp = "2026-01-03T00:00:00+00:00"
-    last_timestamp = "2026-01-01T00:00:00+00:00"
-    stale_top_level_payload = {
+    payload = {
         **_draft_payload_with_meta("Nested name", "Nested goal"),
         "id": "stale-top-level",
         "revision": 1,
         "name": "Stale top-level name",
         "goal": "Stale top-level goal",
         "updated_at": "2025-01-01T00:00:00+00:00",
+        "activity_log": [{"timestamp": "2026-01-01T00:00:00+00:00"}],
+    }
+
+    path = drafts_dir / "stale-top-level.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    [draft] = store.list_all(include_terminal=True)
+    assert draft.name == "Nested name"
+    assert draft.goal == "Nested goal"
+
+
+def test_list_all_uses_last_activity_timestamp_for_updated_at(tmp_path):
+    drafts_dir = tmp_path / "drafts"
+    drafts_dir.mkdir()
+    store = plan_drafts.PlanDraftStore(drafts_dir)
+
+    payload = {
+        **_draft_payload_with_meta("Nested name", "Nested goal"),
+        "id": "stale-top-level",
+        "revision": 1,
+        "updated_at": "2025-01-01T00:00:00+00:00",
         "activity_log": [
-            {"timestamp": old_timestamp},
-            {"timestamp": last_timestamp},
+            {"timestamp": "2026-01-03T00:00:00+00:00"},
+            {"timestamp": "2026-01-01T00:00:00+00:00"},
         ],
     }
+
+    path = drafts_dir / "stale-top-level.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    [draft] = store.list_all(include_terminal=True)
+    assert draft.updated_at == datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+
+
+def test_list_all_falls_back_to_mtime_when_activity_log_is_absent(tmp_path):
+    drafts_dir = tmp_path / "drafts"
+    drafts_dir.mkdir()
+    store = plan_drafts.PlanDraftStore(drafts_dir)
 
     fallback_payload = {
         **_draft_payload_with_meta("Mtime name", "Mtime goal"),
@@ -108,22 +145,13 @@ def test_list_all_uses_nested_spec_last_activity_and_mtime_fallback(tmp_path):
         "activity_log": [],
     }
 
-    stale_path = drafts_dir / "stale-top-level.json"
     fallback_path = drafts_dir / "mtime-fallback.json"
-    stale_path.write_text(json.dumps(stale_top_level_payload), encoding="utf-8")
     fallback_path.write_text(json.dumps(fallback_payload), encoding="utf-8")
     fallback_mtime = datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp()
     os.utime(fallback_path, (fallback_mtime, fallback_mtime))
 
-    drafts = store.list_all(include_terminal=True)
-
-    assert [draft.id for draft in drafts] == ["mtime-fallback", "stale-top-level"]
-    stale_draft = next(draft for draft in drafts if draft.id == "stale-top-level")
-    fallback_draft = next(draft for draft in drafts if draft.id == "mtime-fallback")
-    assert stale_draft.name == "Nested name"
-    assert stale_draft.goal == "Nested goal"
-    assert stale_draft.updated_at == datetime.fromisoformat(last_timestamp)
-    assert fallback_draft.updated_at == datetime.fromtimestamp(fallback_mtime, tz=timezone.utc)
+    [draft] = store.list_all(include_terminal=True)
+    assert draft.updated_at == datetime.fromtimestamp(fallback_mtime, tz=timezone.utc)
 
 
 def _draft_payload() -> dict:

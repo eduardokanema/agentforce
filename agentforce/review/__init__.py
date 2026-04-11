@@ -3,6 +3,7 @@ from .collector import MetricsCollector
 from .reviewer import MissionReviewer
 from .memory_writer import ReviewMemoryWriter
 from .personas import PERSONA_CONFIGS, build_persona_prompt, parse_persona_response
+from .schemas import MissionReviewPayloadV1
 from .reviewer import _resolve_model
 
 __all__ = [
@@ -11,6 +12,7 @@ __all__ = [
     "ActionItem",
     "MetricsSnapshot",
     "GoodhartWarning",
+    "MissionReviewPayloadV1",
     "MetricsCollector",
     "MissionReviewer",
     "ReviewMemoryWriter",

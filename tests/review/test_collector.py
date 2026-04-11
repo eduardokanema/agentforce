@@ -12,6 +12,7 @@ from agentforce.core.spec import Caps, MissionSpec, TaskSpec, TaskStatus
 from agentforce.core.state import EventLogEntry, MissionState, TaskState
 from agentforce.review import MetricsSnapshot
 from agentforce.review.collector import MetricsCollector
+from agentforce.review.schemas import MissionReviewPayloadV1
 
 
 def _spec(task_count: int = 4) -> MissionSpec:
@@ -36,6 +37,10 @@ def _state(task_states: dict[str, TaskState] | None = None, event_log: list[Even
         event_log=event_log or [],
         started_at="2024-01-01T10:00:00+00:00",
     )
+
+
+def _payload(state: MissionState) -> MissionReviewPayloadV1:
+    return MissionReviewPayloadV1.from_state(state)
 
 
 def _approved_task(
@@ -130,7 +135,7 @@ def test_collect_happy_path_computes_all_metrics():
     state.tokens_out = 450
     state.cost_usd = 4.5
 
-    snapshot = MetricsCollector.collect(state)
+    snapshot = MetricsCollector.collect(_payload(state))
 
     assert snapshot.tasks_total == 4
     assert snapshot.tasks_completed == 3
@@ -150,7 +155,7 @@ def test_collect_happy_path_computes_all_metrics():
 def test_collect_zero_tasks_returns_zero_metrics():
     state = _state({})
 
-    snapshot = MetricsCollector.collect(state)
+    snapshot = MetricsCollector.collect(_payload(state))
 
     assert snapshot.tasks_total == 0
     assert snapshot.tasks_completed == 0
@@ -173,7 +178,7 @@ def test_collect_zero_completed_tasks_returns_zero_metrics():
     }
     state = _state(task_states)
 
-    snapshot = MetricsCollector.collect(state)
+    snapshot = MetricsCollector.collect(_payload(state))
 
     assert snapshot.tasks_total == 2
     assert snapshot.tasks_completed == 0
@@ -220,7 +225,7 @@ def test_collect_skips_tasks_with_missing_timestamps_for_wall_time():
     }
     state = _state(task_states)
 
-    snapshot = MetricsCollector.collect(state)
+    snapshot = MetricsCollector.collect(_payload(state))
 
     assert snapshot.tasks_completed == 3
     assert snapshot.wall_time_per_task_s == pytest.approx(40.0)
@@ -250,7 +255,7 @@ def test_collect_zero_task_token_fields_uses_mission_fallback_and_warns():
     state = _state(task_states)
     state.tokens_out = 600
 
-    snapshot = MetricsCollector.collect(state)
+    snapshot = MetricsCollector.collect(_payload(state))
 
     assert snapshot.token_efficiency == pytest.approx(300.0)
     assert "per-task token fields are zero; using mission-level fallback" in snapshot.data_quality_warnings
@@ -268,7 +273,7 @@ def test_collect_review_rejection_rate_uses_event_log():
         EventLogEntry(timestamp="2024-01-01T10:04:00+00:00", event_type="review_rejected", task_id="task-2"),
     ])
 
-    snapshot = MetricsCollector.collect(state)
+    snapshot = MetricsCollector.collect(_payload(state))
 
     assert snapshot.review_rejection_rate == pytest.approx(0.25)
 

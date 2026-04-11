@@ -16,10 +16,11 @@ from agentforce.review.personas import (
     build_persona_prompt,
     parse_persona_response,
 )
+from agentforce.review.schemas import MissionReviewPayloadV1
 
 
 @pytest.fixture
-def mission_state() -> MissionState:
+def mission_payload() -> MissionReviewPayloadV1:
     spec = MissionSpec(
         name="Persona Review Mission",
         goal="Deliver a reliable review slice with strong prompt formatting and parsing.",
@@ -65,7 +66,7 @@ def mission_state() -> MissionState:
         EventLogEntry(timestamp=f"2026-04-09T00:00:{i:02d}+00:00", event_type="task_event", task_id="01", details=f"log-{i:02d}")
         for i in range(1, 53)
     ]
-    return state
+    return MissionReviewPayloadV1.from_state(state)
 
 
 def test_persona_configs_have_expected_keys():
@@ -83,9 +84,9 @@ def test_persona_configs_have_expected_keys():
 
 
 @pytest.mark.parametrize("persona_key", sorted(PERSONA_CONFIGS))
-def test_build_persona_prompt_includes_required_sections(persona_key: str, mission_state: MissionState):
+def test_build_persona_prompt_includes_required_sections(persona_key: str, mission_payload: MissionReviewPayloadV1):
     metrics = MetricsSnapshot(
-        mission_id=mission_state.mission_id,
+        mission_id=mission_payload.mission_id,
         token_efficiency=12.5,
         first_pass_rate=0.8,
         rework_rate=0.2,
@@ -108,7 +109,7 @@ def test_build_persona_prompt_includes_required_sections(persona_key: str, missi
     system_prompt, user_message = build_persona_prompt(
         persona_key=persona_key,
         metrics=metrics,
-        state=mission_state,
+        payload=mission_payload,
         prior_history=["Tighten acceptance criteria", "Add parser regression tests"],
     )
 
@@ -135,10 +136,10 @@ def test_build_persona_prompt_includes_required_sections(persona_key: str, missi
     assert "Tighten acceptance criteria" in user_message
 
 
-def test_build_persona_prompt_omits_prior_history_when_absent(mission_state: MissionState):
-    metrics = MetricsSnapshot(mission_id=mission_state.mission_id)
+def test_build_persona_prompt_omits_prior_history_when_absent(mission_payload: MissionReviewPayloadV1):
+    metrics = MetricsSnapshot(mission_id=mission_payload.mission_id)
 
-    _, user_message = build_persona_prompt("quality_champion", metrics, mission_state, prior_history=None)
+    _, user_message = build_persona_prompt("quality_champion", metrics, mission_payload, prior_history=None)
 
     assert "Prior 3 action items from last review" not in user_message
 

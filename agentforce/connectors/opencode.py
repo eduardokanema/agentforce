@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 from agentforce.core.token_event import TokenEvent
+from agentforce.streaming import StreamRecorder
 
 _USAGE_TYPES = ("usage", "tokens", "stats")
 _IN_KEYS = ("inputTokens", "promptTokens", "tokensIn")
@@ -111,7 +112,7 @@ def run(
 
         timer = threading.Timer(timeout, _kill)
         timer.start()
-        sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
+        recorder = StreamRecorder.from_raw_stream_path(stream_path, provider="opencode")
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -126,30 +127,33 @@ def run(
                         text_chunk = event.get("part", {}).get("text", "")
                         if text_chunk:
                             text_parts.append(text_chunk)
-                    # Write only extracted text to stream — never raw JSON
-                    if sf and text_chunk:
-                        sf.write(text_chunk + "\n")
-                        sf.flush()
+                    if recorder and text_chunk:
+                        recorder.text_delta(text_chunk, role="assistant")
+                    elif recorder:
+                        recorder.raw_line(line, role="system", meta={"provider_event_type": event.get("type", "")})
                     t_in, t_out = _extract_tokens(event)
                     total_in += t_in
                     total_out += t_out
+                    if recorder and (t_in or t_out):
+                        recorder.usage(tokens_in=total_in, tokens_out=total_out, cost_usd=0.0)
                 except (json.JSONDecodeError, AttributeError):
                     text_parts.append(line)
-                    if sf:
-                        sf.write(line + "\n")
-                        sf.flush()
+                    if recorder:
+                        recorder.raw_line(line, role="system", meta={"provider_event_type": "non_json"})
             proc.wait()
         finally:
             timer.cancel()
-            if sf:
-                sf.close()
 
         token_event = TokenEvent(tokens_in=total_in, tokens_out=total_out, cost_usd=0.0)
 
         if timed_out:
+            if recorder:
+                recorder.error("opencode timed out")
             return False, "".join(text_parts).strip(), "opencode timed out", returned_session_id, token_event
 
         error = proc.stderr.read().strip()
+        if error and recorder:
+            recorder.error(error)
         output = "".join(text_parts).strip()
         success = proc.returncode == 0 and "error" not in (error or "").lower()
         return success, output, error, returned_session_id, token_event

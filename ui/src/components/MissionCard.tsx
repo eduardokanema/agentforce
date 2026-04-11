@@ -15,12 +15,20 @@ interface MissionCardProps {
 }
 
 function accentColorClassName(status: MissionSummary['status']): string {
+  if (status === 'draft') {
+    return 'text-amber border-amber/40 bg-amber/10';
+  }
+
   if (status === 'in_progress' || status === 'active') {
     return 'text-cyan border-cyan/40 bg-cyan/10';
   }
 
   if (status === 'completed' || status === 'review_approved' || status === 'complete') {
     return 'text-green border-green/40 bg-green/10';
+  }
+
+  if (status === 'finished') {
+    return 'text-teal border-teal/40 bg-teal/10';
   }
 
   if (status === 'failed') {
@@ -116,6 +124,13 @@ export default function MissionCard({ mission, onStop, onRestart, onArchive, onD
   };
 
   const missionHref = isDraft ? `/plan/${mission.mission_id}` : `/mission/${mission.mission_id}`;
+  const primaryActionLabel = isDraft ? 'Open' : 'View';
+  const deleteTitle = isDraft ? `Discard draft "${mission.name}"?` : `Delete mission "${mission.name}"?`;
+  const deleteMessage = isDraft
+    ? 'This will permanently discard the draft. It cannot be undone.'
+    : 'This will permanently hide the mission. It cannot be undone.';
+  const deleteConfirmLabel = isDraft ? 'Discard Draft' : 'Delete';
+  const deleteButtonLabel = isDraft ? 'Discard' : 'Delete';
 
   return (
     <>
@@ -158,7 +173,16 @@ export default function MissionCard({ mission, onStop, onRestart, onArchive, onD
           </div>
 
           <div className="flex items-center gap-2 pt-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-            {!isDraft && (
+            {isDraft ? (
+              <>
+                <Link
+                  className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-cyan transition-colors hover:bg-cyan/10 hover:no-underline"
+                  to={missionHref}
+                >
+                  ↗ {primaryActionLabel}
+                </Link>
+              </>
+            ) : (
               <>
                 <button
                   type="button"
@@ -192,27 +216,29 @@ export default function MissionCard({ mission, onStop, onRestart, onArchive, onD
                 </button>
               </>
             )}
-            <button
-              type="button"
-              className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-dim transition-colors hover:bg-surface"
-              onClick={onArchive}
-            >
-              ⊘ Archive
-            </button>
+            {!isDraft ? (
+              <button
+                type="button"
+                className="inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-dim transition-colors hover:bg-surface"
+                onClick={onArchive}
+              >
+                ⊘ Archive
+              </button>
+            ) : null}
             <button
               type="button"
               className="ml-auto inline-flex items-center rounded-full border border-border px-2 py-0.5 text-[10px] text-red/60 transition-colors hover:bg-red/10 hover:text-red"
               onClick={() => {
                 setPendingAction({
-                  title: `Delete mission "${mission.name}"?`,
-                  message: 'This will permanently hide the mission. It cannot be undone.',
-                  confirmLabel: 'Delete',
+                  title: deleteTitle,
+                  message: deleteMessage,
+                  confirmLabel: deleteConfirmLabel,
                   variant: 'danger',
                   action: onDelete,
                 });
               }}
             >
-              ✕ Delete
+              ✕ {deleteButtonLabel}
             </button>
           </div>
         </div>

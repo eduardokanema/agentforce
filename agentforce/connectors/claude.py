@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 from agentforce.core.token_event import TokenEvent
+from agentforce.streaming import StreamRecorder
 
 
 def available() -> bool:
@@ -60,7 +61,7 @@ def run(
 
         timer = threading.Timer(timeout, _kill)
         timer.start()
-        sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
+        recorder = StreamRecorder.from_raw_stream_path(stream_path, provider="claude")
         try:
             proc.stdin.write(prompt)
             proc.stdin.close()
@@ -94,10 +95,10 @@ def run(
                     if text_chunk:
                         output_parts.append(text_chunk)
 
-                # Write only extracted text to stream — never raw JSON
-                if sf and text_chunk:
-                    sf.write(text_chunk)
-                    sf.flush()
+                if recorder and text_chunk:
+                    recorder.text_delta(text_chunk, role="assistant")
+                elif recorder and etype not in ("message_start", "assistant"):
+                    recorder.raw_line(line, role="system", meta={"provider_event_type": etype})
 
                 # usage: "result" event has final totals; also check assistant/message_start
                 if etype == "result":
@@ -105,6 +106,8 @@ def run(
                     tokens_in = usage.get("input_tokens", tokens_in)
                     tokens_out = usage.get("output_tokens", tokens_out)
                     cost_usd = event.get("total_cost_usd", 0.0)
+                    if recorder:
+                        recorder.usage(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd)
                 else:
                     usage = event.get("usage", {})
                     if not usage and etype in ("message_start", "assistant"):
@@ -115,13 +118,15 @@ def run(
             proc.wait()
         finally:
             timer.cancel()
-            if sf:
-                sf.close()
 
         token_event = TokenEvent(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd)
         if timed_out:
+            if recorder:
+                recorder.error("claude timed out")
             return False, "".join(output_parts).strip(), "claude timed out", None, token_event
         stderr = proc.stderr.read()
+        if stderr.strip() and recorder:
+            recorder.error(stderr.strip())
         return proc.returncode == 0, "".join(output_parts).strip(), stderr.strip(), None, token_event
     except Exception as e:
         token_event = TokenEvent(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd)

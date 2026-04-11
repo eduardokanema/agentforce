@@ -11,6 +11,7 @@ from agentforce.memory.memory import Memory
 from agentforce.review.collector import MetricsCollector
 from agentforce.review.memory_writer import ReviewMemoryWriter
 from agentforce.review.models import ActionItem, MetricsSnapshot, ReviewReport
+from agentforce.review.schemas import MissionReviewPayloadV1
 
 
 def _mission_state() -> MissionState:
@@ -105,6 +106,7 @@ def test_package_exports_match_review_contract():
         "ActionItem",
         "MetricsSnapshot",
         "GoodhartWarning",
+        "MissionReviewPayloadV1",
         "MetricsCollector",
         "MissionReviewer",
         "ReviewMemoryWriter",
@@ -114,7 +116,7 @@ def test_package_exports_match_review_contract():
 def test_metrics_collector_end_to_end_and_memory_round_trip(tmp_path: Path):
     state = _mission_state()
 
-    metrics = MetricsCollector.collect(state)
+    metrics = MetricsCollector.collect(MissionReviewPayloadV1.from_state(state))
 
     assert metrics.tasks_completed == 3
     assert metrics.tasks_total == 4
@@ -156,7 +158,7 @@ def test_metrics_collector_end_to_end_and_memory_round_trip(tmp_path: Path):
         task_state.tokens_out = 0
     zero_tokens_state.tokens_out = 20000
 
-    fallback_metrics = MetricsCollector.collect(zero_tokens_state)
+    fallback_metrics = MetricsCollector.collect(MissionReviewPayloadV1.from_state(zero_tokens_state))
     assert "per-task token fields are zero" in " ".join(fallback_metrics.data_quality_warnings)
     assert fallback_metrics.token_efficiency == pytest.approx(20000 / 3)
 

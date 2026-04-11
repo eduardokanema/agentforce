@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import MissionCard from '../components/MissionCard';
-import { archiveMission, deleteMission, restartMission, stopMission, unarchiveMission } from '../lib/api';
+import { archiveMission, deleteMission, discardPlanDraft, restartMission, stopMission, unarchiveMission } from '../lib/api';
 import { useMissionList } from '../hooks/useMissionList';
 import { useToast } from '../hooks/useToast';
 import type { MissionSummary } from '../lib/types';
@@ -116,13 +116,25 @@ export default function MissionsPage() {
     }
   };
 
-  const handleDelete = async (missionId: string): Promise<void> => {
+  const handleDelete = async (mission: MissionSummary): Promise<void> => {
     try {
-      await deleteMission(missionId);
-      addToast('Mission deleted', 'info');
+      if (mission.status === 'draft') {
+        await discardPlanDraft(mission.mission_id);
+        addToast('Draft discarded', 'info');
+      } else {
+        await deleteMission(mission.mission_id);
+        addToast('Mission deleted', 'info');
+      }
       refresh();
     } catch (error) {
-      addToast(error instanceof Error ? error.message : 'Failed to delete mission', 'error');
+      addToast(
+        error instanceof Error
+          ? error.message
+          : mission.status === 'draft'
+            ? 'Failed to discard draft'
+            : 'Failed to delete mission',
+        'error',
+      );
     }
   };
 
@@ -162,7 +174,7 @@ export default function MissionsPage() {
                   void handleArchive(mission.mission_id);
                 }}
                 onDelete={() => {
-                  void handleDelete(mission.mission_id);
+                  void handleDelete(mission);
                 }}
                 onRestart={() => {
                   void handleRestart(mission.mission_id);

@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from agentforce.core.event_bus import EVENT_BUS
+
 from . import ws
 
 _DEFAULT_AGENTFORCE_HOME = Path(os.path.expanduser("~/.agentforce"))
@@ -202,14 +204,23 @@ def _all_mission_summaries() -> list[dict]:
 def _broadcast_mission_refresh(state) -> None:
     """Broadcast mission state update to all connected WebSocket clients."""
     try:
-        ws.broadcast_mission(state.mission_id, state.to_dict())
-        ws.broadcast_mission_list(_all_mission_summaries())
+        EVENT_BUS.publish(
+            "mission.snapshot",
+            {"mission_id": state.mission_id, "state": state.to_dict()},
+        )
+        EVENT_BUS.publish(
+            "mission.list_snapshot",
+            {"missions": _all_mission_summaries()},
+        )
     except Exception:
         pass
 
 
 def _broadcast_mission_list_refresh() -> None:
     try:
-        ws.broadcast_mission_list(_all_mission_summaries())
+        EVENT_BUS.publish(
+            "mission.list_snapshot",
+            {"missions": _all_mission_summaries()},
+        )
     except Exception:
         pass

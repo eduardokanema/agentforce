@@ -8,7 +8,7 @@ from typing import Any, Iterable
 from urllib import request as urllib_request
 
 from agentforce.core.spec import MissionSpec
-from agentforce.server.routes.providers import _ssl_context
+from agentforce.server.routes.providers import _get_provider_models, _ssl_context
 
 
 @dataclass(frozen=True)
@@ -73,15 +73,30 @@ class LivePlannerAdapter(PlannerAdapter):
 
     def plan_turn(self, draft: dict[str, Any], user_message: str) -> PlannerTurnResult:
         from agentforce.connectors import claude as _claude_connector
+        from agentforce.connectors import codex as _codex_connector
         from agentforce.connectors import gemini as _gemini_connector
 
         system_prompt = _build_system_prompt(draft)
         prompt = _build_user_prompt(draft, user_message)
-        model = _select_model(draft, use_openrouter=False)
+        preferred_agent = _preferred_planner_agent(draft)
 
-        if _claude_connector.available():
+        if preferred_agent == "codex" and _codex_connector.available():
+            model = _select_model(draft, provider="codex", use_openrouter=False)
+            response_text = _codex_cli_completion(model, system_prompt, prompt)
+        elif preferred_agent == "claude" and _claude_connector.available():
+            model = _select_model(draft, provider="claude", use_openrouter=False)
             response_text = _claude_cli_completion(model, system_prompt, prompt)
+        elif preferred_agent == "gemini" and _gemini_connector.available():
+            model = _select_model(draft, provider="gemini", use_openrouter=False)
+            response_text = _gemini_cli_completion(model, system_prompt, prompt)
+        elif _claude_connector.available():
+            model = _select_model(draft, provider="claude", use_openrouter=False)
+            response_text = _claude_cli_completion(model, system_prompt, prompt)
+        elif _codex_connector.available():
+            model = _select_model(draft, provider="codex", use_openrouter=False)
+            response_text = _codex_cli_completion(model, system_prompt, prompt)
         elif _gemini_connector.available():
+            model = _select_model(draft, provider="gemini", use_openrouter=False)
             response_text = _gemini_cli_completion(model, system_prompt, prompt)
         else:
             openrouter_key, anthropic_key = _load_provider_keys()
@@ -90,9 +105,10 @@ class LivePlannerAdapter(PlannerAdapter):
                     "no AI provider configured — install claude CLI or add an API key in Models settings"
                 )
             if openrouter_key:
-                model = _select_model(draft, use_openrouter=True)
+                model = _select_model(draft, provider="openrouter", use_openrouter=True)
                 response_text = _openrouter_completion(openrouter_key, model, system_prompt, prompt)
             else:
+                model = _select_model(draft, provider="anthropic", use_openrouter=False)
                 response_text = _anthropic_completion(anthropic_key, model, system_prompt, prompt)
 
         assistant_message, draft_spec = _parse_planner_response(response_text)
@@ -137,11 +153,79 @@ def _load_provider_keys() -> tuple[str | None, str | None]:
     return openrouter_key, anthropic_key
 
 
-def _select_model(draft: dict[str, Any], *, use_openrouter: bool) -> str:
+def _planning_profile(draft: dict[str, Any]) -> dict[str, Any]:
+    validation = draft.get("validation")
+    if not isinstance(validation, dict):
+        return {}
+    planning_profiles = validation.get("planning_profiles")
+    if not isinstance(planning_profiles, dict):
+        return {}
+    planner = planning_profiles.get("planner")
+    return planner if isinstance(planner, dict) else {}
+
+
+def _preferred_planner_agent(draft: dict[str, Any]) -> str:
+    planner = _planning_profile(draft)
+    agent = str(planner.get("agent") or "").strip()
+    return agent or "claude"
+
+
+def _provider_model_ids(provider: str) -> set[str]:
+    if provider not in {"claude", "codex", "gemini"}:
+        return set()
+    try:
+        return {
+            str(model.get("id") or "").strip()
+            for model in _get_provider_models(provider)
+            if isinstance(model, dict) and str(model.get("id") or "").strip()
+        }
+    except Exception:
+        return set()
+
+
+def _provider_default_model(provider: str, *, use_openrouter: bool) -> str | None:
+    model_ids = _provider_model_ids(provider)
+    if provider == "claude":
+        return next(iter(model_ids), "claude-sonnet-4-6")
+    if provider == "codex":
+        return next(iter(model_ids), None)
+    if provider == "gemini":
+        return next(iter(model_ids), "auto")
+    if provider == "openrouter":
+        return "anthropic/claude-sonnet-4-6"
+    if provider == "anthropic":
+        return "claude-sonnet-4-6"
+    return "anthropic/claude-sonnet-4-6" if use_openrouter else None
+
+
+def _model_supported_by_provider(model: str, provider: str) -> bool:
+    if not model:
+        return False
+    if provider in {"openrouter", "anthropic"}:
+        return True
+    return model in _provider_model_ids(provider)
+
+
+def _select_model(draft: dict[str, Any], *, provider: str, use_openrouter: bool) -> str | None:
+    planner = _planning_profile(draft)
+    planner_model = str(planner.get("model") or "").strip()
+    planner_agent = str(planner.get("agent") or "").strip()
     approved_models = list(draft.get("approved_models") or [])
-    if approved_models:
-        return str(approved_models[0])
-    return "anthropic/claude-sonnet-4-6" if use_openrouter else "claude-sonnet-4-6"
+    if planner_agent == provider and _model_supported_by_provider(planner_model, provider):
+        return planner_model
+    for model in approved_models:
+        model_value = str(model or "").strip()
+        if _model_supported_by_provider(model_value, provider):
+            return model_value
+    return _provider_default_model(provider, use_openrouter=use_openrouter)
+
+
+def _is_unavailable_model_error(output: str, error: str) -> bool:
+    text = f"{error}\n{output}".lower()
+    return (
+        "selected model" in text
+        and ("may not exist" in text or "may not have access" in text or "pick a different model" in text)
+    )
 
 
 def _build_user_prompt(draft: dict[str, Any], user_message: str) -> str:
@@ -199,6 +283,13 @@ def _gemini_cli_completion(model: str, system_prompt: str, prompt: str) -> str:
         timeout=120,
         model=model,
     )
+    if not success and model and _is_unavailable_model_error(output, error):
+        success, output, error, _, _ = _gemini_connector.run(
+            prompt=full_prompt,
+            workdir=workdir,
+            timeout=120,
+            model=None,
+        )
     if not success and not output:
         raise RuntimeError(f"gemini CLI planner failed: {error[:200]}")
     # Strip markdown fences if gemini wraps JSON in ```json ... ```
@@ -226,6 +317,13 @@ def _claude_cli_completion(model: str, system_prompt: str, prompt: str) -> str:
             timeout=180,
             model=model,
         )
+        if not success and model and _is_unavailable_model_error(output, error):
+            success, output, error, _, _ = _claude_connector.run(
+                prompt=full_prompt,
+                workdir=workdir,
+                timeout=180,
+                model=None,
+            )
     if not success and not output:
         raise RuntimeError(f"claude CLI planner failed: {error[:200]}")
     # Strip markdown fences if claude wraps JSON in ```json ... ```
@@ -237,6 +335,30 @@ def _claude_cli_completion(model: str, system_prompt: str, prompt: str) -> str:
             if not line.startswith("```")
         ).strip()
     return text
+
+
+def _codex_cli_completion(model: str | None, system_prompt: str, prompt: str) -> str:
+    from agentforce.connectors import codex as _codex_connector
+    import os
+
+    full_prompt = f"{system_prompt}\n\n{prompt}"
+    workdir = os.getcwd()
+    success, output, error, _, _ = _codex_connector.run(
+        prompt=full_prompt,
+        workdir=workdir,
+        timeout=180,
+        model=model,
+    )
+    if not success and model and _is_unavailable_model_error(output, error):
+        success, output, error, _, _ = _codex_connector.run(
+            prompt=full_prompt,
+            workdir=workdir,
+            timeout=180,
+            model=None,
+        )
+    if not success and not output:
+        raise RuntimeError(f"codex CLI planner failed: {error[:200]}")
+    return output.strip()
 
 
 def _openrouter_completion(api_key: str, model: str, system_prompt: str, prompt: str) -> str:
@@ -280,10 +402,30 @@ def _anthropic_completion(api_key: str, model: str, system_prompt: str, prompt: 
 
 
 def _parse_planner_response(response_text: str) -> tuple[str, dict[str, Any]]:
+    text = response_text.strip()
+    payload = None
+
     try:
-        payload = json.loads(response_text)
-    except Exception as exc:
-        raise RuntimeError("planner response was not valid JSON") from exc
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    if payload is None and "```json" in text:
+        try:
+            block = text.split("```json", 1)[1].split("```", 1)[0].strip()
+            payload = json.loads(block)
+        except (json.JSONDecodeError, IndexError):
+            pass
+
+    if payload is None:
+        payload = _extract_planner_payload_candidate(text)
+
+    if payload is None:
+        preview = " ".join(text.split())
+        if len(preview) > 240:
+            preview = preview[:237] + "..."
+        detail = f": {preview}" if preview else ""
+        raise RuntimeError(f"planner response was not valid JSON{detail}")
     if not isinstance(payload, dict):
         raise RuntimeError("planner response must be a JSON object")
 
@@ -299,6 +441,31 @@ def _parse_planner_response(response_text: str) -> tuple[str, dict[str, Any]]:
     if issues:
         raise RuntimeError(f"planner response draft_spec invalid: {issues[0]}")
     return assistant_message, mission_spec.to_dict()
+
+
+def _extract_planner_payload_candidate(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            candidate, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
+
+    for candidate in reversed(candidates):
+        if isinstance(candidate.get("assistant_message"), str) and isinstance(candidate.get("draft_spec"), dict):
+            return candidate
+
+    for candidate in reversed(candidates):
+        if isinstance(candidate, dict):
+            return candidate
+
+    return None
 
 
 def _title_from_goal(goal: str) -> str:

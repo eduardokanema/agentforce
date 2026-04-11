@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 from agentforce.core.token_event import TokenEvent
+from agentforce.streaming import StreamRecorder
 
 
 _MODEL_ALIASES = {
@@ -83,7 +84,7 @@ def run(
 
         timer = threading.Timer(timeout, _kill)
         timer.start()
-        sf = open(stream_path, "a", encoding="utf-8") if stream_path else None
+        recorder = StreamRecorder.from_raw_stream_path(stream_path, provider="gemini")
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -103,25 +104,32 @@ def run(
                         content = event.get("content", "")
                         if content:
                             output_parts.append(content)
-                            if sf:
-                                sf.write(content)
-                                sf.flush()
+                            if recorder:
+                                recorder.text_delta(content, role="assistant")
+                    elif recorder:
+                        recorder.raw_line(line, role="system", meta={"provider_event_type": etype})
                 elif etype == "result":
                     stats = event.get("stats", {})
                     tokens_in = stats.get("input_tokens", tokens_in)
                     tokens_out = stats.get("output_tokens", tokens_out)
                     cost_usd = stats.get("total_cost_usd", cost_usd)
+                    if recorder:
+                        recorder.usage(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd)
+                elif recorder:
+                    recorder.raw_line(line, role="system", meta={"provider_event_type": etype})
 
             proc.wait()
         finally:
             timer.cancel()
-            if sf:
-                sf.close()
 
         token_event = TokenEvent(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd)
         if timed_out:
+            if recorder:
+                recorder.error("gemini timed out")
             return False, "".join(output_parts).strip(), "gemini timed out", new_session_id, token_event
         stderr = proc.stderr.read()
+        if stderr.strip() and recorder:
+            recorder.error(stderr.strip())
         return proc.returncode == 0, "".join(output_parts).strip(), stderr.strip(), new_session_id, token_event
     except Exception as e:
         token_event = TokenEvent(tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost_usd)

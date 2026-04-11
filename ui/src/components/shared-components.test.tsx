@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { act, type ReactElement } from 'react';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TASK_STATUSES, type TaskStatus } from '../lib/types';
-import StatusBadge from './StatusBadge';
+import StatusBadge, { STATUS_BADGE_LABELS } from './StatusBadge';
 import MissionProgressBar from './MissionProgressBar';
 import EventLogTable from './EventLogTable';
 import ConnectionBanner from './ConnectionBanner';
@@ -120,6 +120,15 @@ describe('shared UI components', () => {
       expect(markup).toContain(expected.text);
       expect(markup).toContain(expected.bg);
     }
+  });
+
+  it('StatusBadge renders the amber draft badge treatment', () => {
+    const markup = renderToStaticMarkup(<StatusBadge status="draft" />);
+
+    expect(markup).toContain('text-amber');
+    expect(markup).toContain('bg-amber-bg');
+    expect(markup).toContain('border-amber/20');
+    expect(markup).toContain(STATUS_BADGE_LABELS.draft);
   });
 
   it('MissionProgressBar uses a width transition that matches the server timing', () => {

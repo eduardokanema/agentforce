@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+from agentforce.core.event_bus import EVENT_BUS
 from agentforce.core.engine import MissionEngine
 from agentforce.core.spec import Caps, MissionSpec, TaskSpec
 from agentforce.memory import Memory
@@ -42,12 +43,17 @@ def make_handler() -> DashboardHandler:
 def test_engine_save_broadcasts_mission_state_and_summary(tmp_path):
     engine = make_engine(tmp_path)
 
-    with patch("agentforce.server.ws.broadcast_mission") as broadcast_mission, \
-            patch("agentforce.server.ws.broadcast_mission_list") as broadcast_mission_list:
+    with patch.object(EVENT_BUS, "publish") as publish:
         engine._save()
 
-    broadcast_mission.assert_called_once_with(engine.state.mission_id, engine.state.to_dict())
-    broadcast_mission_list.assert_called_once_with([engine.state.to_summary_dict()])
+    assert call(
+        "mission.snapshot",
+        {"mission_id": engine.state.mission_id, "state": engine.state.to_dict()},
+    ) in publish.call_args_list
+    assert call(
+        "mission.list_snapshot",
+        {"missions": [engine.state.to_summary_dict()]},
+    ) in publish.call_args_list
 
 
 def test_engine_save_swallows_ws_import_failure(tmp_path, monkeypatch):

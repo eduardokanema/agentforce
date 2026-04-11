@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agentforce.core.state import MissionState
 from agentforce.review.models import MetricsSnapshot, RetroItem
+from agentforce.review.schemas import MissionReviewPayloadV1
 
 PERSONA_CONFIGS: dict[str, dict] = {
     "quality_champion": {
@@ -116,30 +116,19 @@ def _truncate_title(title: str, limit: int = 40) -> str:
     return title[: limit - 3] + "..."
 
 
-def _task_title(state: MissionState, task_id: str, fallback: str) -> str:
-    for task in state.spec.tasks:
-        if task.id == task_id:
-            return task.title or fallback
-    return fallback
-
-
-def _status_text(status: Any) -> str:
-    return status.value if hasattr(status, "value") else str(status)
-
-
 def build_persona_prompt(
     persona_key: str,
     metrics: MetricsSnapshot,
-    state: MissionState,
+    payload: MissionReviewPayloadV1,
     prior_history: list[str] | None = None,
 ) -> tuple[str, str]:
     """Build (system_prompt, user_message) for a persona."""
     config = PERSONA_CONFIGS[persona_key]
 
     lines: list[str] = [
-        f"Mission: {state.spec.name}",
-        f"Goal: {state.spec.goal[:200]}",
-        f"completed_at: {state.completed_at if state.completed_at is not None else 'None'}",
+        f"Mission: {payload.mission_name}",
+        f"Goal: {payload.mission_goal[:200]}",
+        f"completed_at: {payload.completed_at if payload.completed_at is not None else 'None'}",
         "",
         "Metrics table:",
         "metric | value",
@@ -158,16 +147,15 @@ def build_persona_prompt(
             "task_id | title | status | retries | score | cost_usd | tokens_out",
         ]
     )
-    for task_spec in state.spec.tasks:
-        task_state = state.task_states.get(task_spec.id, None)
-        title = _truncate_title(_task_title(state, task_spec.id, task_spec.title))
-        status = _status_text(task_state.status if task_state else "pending")
-        retries = task_state.retries if task_state else 0
-        score = task_state.review_score if task_state else 0
-        cost = task_state.cost_usd if task_state else 0.0
-        tokens_out = task_state.tokens_out if task_state else 0
+    for task in payload.tasks:
+        title = _truncate_title(task.title)
+        status = task.status
+        retries = task.retries
+        score = task.review_score
+        cost = task.cost_usd
+        tokens_out = task.tokens_out
         lines.append(
-            f"{task_spec.id} | {title} | {status} | {retries} | {score} | {_format_number(cost)} | {tokens_out}"
+            f"{task.task_id} | {title} | {status} | {retries} | {score} | {_format_number(cost)} | {tokens_out}"
         )
 
     lines.extend(
@@ -177,15 +165,15 @@ def build_persona_prompt(
             "timestamp | event_type | task_id | details",
         ]
     )
-    for entry in state.event_log[-50:]:
+    for entry in payload.event_log[-50:]:
         lines.append(
             f"{entry.timestamp} | {entry.event_type} | {entry.task_id or '-'} | {entry.details}"
         )
 
-    if state.caps_hit:
+    if payload.caps_hit:
         lines.append("")
         lines.append("Caps hit:")
-        for cap, description in state.caps_hit.items():
+        for cap, description in payload.caps_hit.items():
             lines.append(f"caps_hit: {cap}: {description}")
 
     if prior_history:

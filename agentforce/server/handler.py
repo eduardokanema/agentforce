@@ -42,6 +42,7 @@ _ROUTES: list[tuple[str, re.Pattern[str], object]] = [
     ("GET", re.compile(r"^/api/plan(?:/.*)?$"), plan.get),
     ("POST", re.compile(r"^/api/plan(?:/.*)?$"), plan.post),
     ("PATCH", re.compile(r"^/api/plan(?:/.*)?$"), plan.patch),
+    ("DELETE", re.compile(r"^/api/plan(?:/.*)?$"), plan.delete),
     ("GET", re.compile(r"^/api/mission/[^/]+/task/[^/]+(?:/.*)?$"), tasks.get),
     ("POST", re.compile(r"^/api/mission/[^/]+/task/[^/]+(?:/.*)?$"), tasks.post),
     ("GET", re.compile(r"^/api/mission(?:/.*)?$"), missions.get),
@@ -219,6 +220,48 @@ def _watch_stream_files(
                 positions[stem] = (new_pos, seq)
 
 
+def _watch_stream_event_files(
+    streams_dir: Path | None = None,
+    stop_event: threading.Event | None = None,
+    poll_seconds: float = 0.25,
+) -> None:
+    stream_root = streams_dir if streams_dir is not None else _STREAMS_DIR
+    positions: dict[str, int] = {}
+    while stop_event is None or not stop_event.is_set():
+        _time.sleep(poll_seconds)
+        if not stream_root.exists():
+            continue
+        try:
+            event_files = list(stream_root.glob("*.events.jsonl"))
+        except OSError:
+            continue
+        for event_file in event_files:
+            stem = event_file.name.removesuffix(".events.jsonl")
+            idx = stem.find("_")
+            if idx < 0:
+                continue
+            mission_id, task_id = stem[:idx], stem[idx + 1 :]
+            pos = positions.get(stem, 0)
+            try:
+                with open(event_file, "r", encoding="utf-8", errors="replace") as fh:
+                    fh.seek(pos)
+                    chunk = fh.read()
+                    new_pos = fh.tell()
+            except OSError:
+                continue
+            if not chunk:
+                continue
+            for line in chunk.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    payload = _jsonlib.loads(line)
+                except _jsonlib.JSONDecodeError:
+                    continue
+                ws.broadcast_task_stream_event(mission_id, task_id, payload)
+            positions[stem] = new_pos
+
+
 def serve(port: int = 8080, state_dir: Path | None = None, daemon: bool = False) -> None:
     global _daemon
     _daemon = None
@@ -259,6 +302,13 @@ def serve(port: int = 8080, state_dir: Path | None = None, daemon: bool = False)
             name="agentforce-stream-watcher",
         )
         stream_watcher.start()
+        event_stream_watcher = threading.Thread(
+            target=_watch_stream_event_files,
+            kwargs={"streams_dir": _STREAMS_DIR, "poll_seconds": 0.25},
+            daemon=True,
+            name="agentforce-event-stream-watcher",
+        )
+        event_stream_watcher.start()
 
         if daemon:
             import queue as _queue
@@ -281,10 +331,23 @@ def serve(port: int = 8080, state_dir: Path | None = None, daemon: bool = False)
                     on_status_changed=_ws_on_status_changed,
                 ),
             )
+            shutdown_requested = threading.Event()
 
             def _handle_stop(signum=None, frame=None):
-                _daemon.stop()
-                server.shutdown()
+                if shutdown_requested.is_set():
+                    return
+                shutdown_requested.set()
+
+                def _stop_server() -> None:
+                    if _daemon is not None:
+                        _daemon.stop()
+                    server.shutdown()
+
+                threading.Thread(
+                    target=_stop_server,
+                    daemon=True,
+                    name="agentforce-server-shutdown",
+                ).start()
 
             _signal.signal(_signal.SIGINT, _handle_stop)
             _signal.signal(_signal.SIGTERM, _handle_stop)

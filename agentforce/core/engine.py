@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from .event_bus import EVENT_BUS
+from agentforce.review.schemas import MissionReviewPayloadV1
 from .destructive_actions import (
     DESTRUCTIVE_ACTION_KIND,
     DESTRUCTIVE_ACTION_OPTIONS,
@@ -136,6 +138,7 @@ class MissionEngine:
 
         self.state.log_event("mission_started", details=f"Started mission: {spec.name}")
         self._state_file = self.state_dir / f"{mid}.json"
+        self._review_payload_emitted = False
         self._save()
 
         logger.info("Engine initialized: %s [%s]", spec.name, mid)
@@ -165,10 +168,23 @@ class MissionEngine:
     def _save(self):
         self.state.save(self._state_file)
         try:
-            from agentforce.server import ws
-
-            ws.broadcast_mission(self.state.mission_id, self.state.to_dict())
-            ws.broadcast_mission_list([self.state.to_summary_dict()])
+            EVENT_BUS.publish(
+                "mission.snapshot",
+                {"mission_id": self.state.mission_id, "state": self.state.to_dict()},
+            )
+            EVENT_BUS.publish(
+                "mission.list_snapshot",
+                {"missions": [self.state.to_summary_dict()]},
+            )
+            EVENT_BUS.publish(
+                "mission.cost_updated",
+                {
+                    "mission_id": self.state.mission_id,
+                    "tokens_in": self.state.tokens_in,
+                    "tokens_out": self.state.tokens_out,
+                    "cost_usd": self.state.cost_usd,
+                },
+            )
         except Exception:
             pass
 
@@ -188,8 +204,63 @@ class MissionEngine:
         engine.reviewer_model = None
         engine.state = state
         engine._state_file = Path(state_file)
+        engine._review_payload_emitted = False
         engine._sync_execution_telemetry()
         return engine
+
+    def _log_event(self, event_type: str, task_id: str | None = None, details: str = "") -> None:
+        self.state.log_event(event_type, task_id, details)
+        try:
+            EVENT_BUS.publish(
+                "mission.event_logged",
+                {
+                    "mission_id": self.state.mission_id,
+                    "entry": self.state.event_log[-1].to_dict(),
+                },
+            )
+        except Exception:
+            pass
+
+    def _publish_task_update(self, task_id: str) -> None:
+        task = self.state.get_task(task_id)
+        if task is None:
+            return
+        try:
+            EVENT_BUS.publish(
+                "mission.task_updated",
+                {
+                    "mission_id": self.state.mission_id,
+                    "task_id": task_id,
+                    "task": task.to_dict(),
+                },
+            )
+            EVENT_BUS.publish(
+                "task.cost_updated",
+                {
+                    "mission_id": self.state.mission_id,
+                    "task_id": task_id,
+                    "tokens_in": task.tokens_in,
+                    "tokens_out": task.tokens_out,
+                    "cost_usd": task.cost_usd,
+                },
+            )
+        except Exception:
+            pass
+
+    def _emit_review_payload_ready(self) -> None:
+        if self._review_payload_emitted or self.state.completed_at is None:
+            return
+        payload = MissionReviewPayloadV1.from_state(self.state)
+        try:
+            EVENT_BUS.publish(
+                "mission.review_payload_ready",
+                {
+                    "mission_id": self.state.mission_id,
+                    "payload": payload.to_dict(),
+                },
+            )
+        finally:
+            self._review_payload_emitted = True
 
     def _cli_execution_profile(self, role: str) -> Optional[ExecutionProfile]:
         model = self.worker_model if role == "worker" else self.reviewer_model
@@ -267,19 +338,21 @@ class MissionEngine:
         if self.is_done():
             if self.state.completed_at is None:
                 self.state.completed_at = datetime.now(timezone.utc).isoformat()
-                self.state.log_event("mission_completed", details="All tasks review approved")
+                self._log_event("mission_completed", details="All tasks review approved")
                 if self.state.spec.caps.review == "disabled":
-                    self.state.log_event("review_skipped", details="Review disabled in caps")
+                    self._log_event("review_skipped", details="Review disabled in caps")
                 self._save()
+                self._emit_review_payload_ready()
             return actions
 
         if self.is_failed():
             if self.state.completed_at is None:
                 self.state.completed_at = datetime.now(timezone.utc).isoformat()
-                self.state.log_event("mission_failed", details="Mission already failed")
+                self._log_event("mission_failed", details="Mission already failed")
                 if self.state.spec.caps.review == "disabled":
-                    self.state.log_event("review_skipped", details="Review disabled in caps")
+                    self._log_event("review_skipped", details="Review disabled in caps")
                 self._save()
+                self._emit_review_payload_ready()
             return actions
 
         self.state.record_active_tick()
@@ -287,22 +360,24 @@ class MissionEngine:
         # Check caps
         cap_hit = self._check_caps()
         if cap_hit:
-            self.state.log_event("mission_failed", details=cap_hit)
+            self._log_event("mission_failed", details=cap_hit)
             if self.state.spec.caps.review == "disabled":
-                self.state.log_event("review_skipped", details="Review disabled in caps")
+                self._log_event("review_skipped", details="Review disabled in caps")
             if self.state.completed_at is None:
                 self.state.completed_at = datetime.now(timezone.utc).isoformat()
             self._save()
+            self._emit_review_payload_ready()
             return actions  # Stop all activity
 
         # Human interventions first — if we're past the limit, fail the mission
         if self.state.interventions_exhausted() and self.state.needs_human():
-            self.state.log_event("mission_failed", details="Intervention limit exhausted")
+            self._log_event("mission_failed", details="Intervention limit exhausted")
             if self.state.spec.caps.review == "disabled":
-                self.state.log_event("review_skipped", details="Review disabled in caps")
+                self._log_event("review_skipped", details="Review disabled in caps")
             if self.state.completed_at is None:
                 self.state.completed_at = datetime.now(timezone.utc).isoformat()
             self._save()
+            self._emit_review_payload_ready()
             return actions
 
         # Surface any human interventions
@@ -384,7 +459,16 @@ class MissionEngine:
             if ts.error_message:
                 prompt += f"\nPrevious error: {ts.error_message}"
 
-        self.state.log_event("task_dispatched", task_id, f"Worker dispatched for {task_spec.title}")
+        self._log_event("task_dispatched", task_id, f"Worker dispatched for {task_spec.title}")
+        self._publish_task_update(task_id)
+        EVENT_BUS.publish(
+            "task.attempt_started",
+            {
+                "mission_id": self.state.mission_id,
+                "task_id": task_id,
+                "attempt_number": ts.retries + 1,
+            },
+        )
         logger.info("Dispatching worker: %s - %s", task_id, task_spec.title)
         execution = self._resolve_execution_profile(task_spec, "worker")
         logger.debug("task %s worker model: %s", task_id, execution.model if execution else None)
@@ -421,7 +505,8 @@ class MissionEngine:
             project_memory=mem_context,
         )
 
-        self.state.log_event("review_started", task_id, f"Review started for {task_spec.title}")
+        self._log_event("review_started", task_id, f"Review started for {task_spec.title}")
+        self._publish_task_update(task_id)
         logger.info("Dispatching reviewer: %s", task_id)
         execution = self._resolve_execution_profile(task_spec, "reviewer")
 
@@ -457,7 +542,7 @@ class MissionEngine:
             ts.worker_output = output
             ts.status = TaskStatus.COMPLETED
             ts.retry_not_before = 0.0
-            self.state.log_event("task_completed", task_id, f"Worker completed {task_spec.title}")
+            self._log_event("task_completed", task_id, f"Worker completed {task_spec.title}")
             logger.info("Worker completed: %s", task_id)
         else:
             ts.error_message = error or "Worker reported failure"
@@ -470,15 +555,16 @@ class MissionEngine:
             if ts.retries >= task_spec.max_retries or self.state.total_retries >= self.state.caps.max_retries_global:
                 ts.status = TaskStatus.FAILED
                 ts.retry_not_before = 0.0
-                self.state.log_event("task_failed", task_id, ts.error_message)
+                self._log_event("task_failed", task_id, ts.error_message)
                 logger.warning("Task failed permanently: %s", task_id)
             else:
                 backoff = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2 ** (ts.retries - 1)))
                 ts.status = TaskStatus.RETRY
                 ts.retry_not_before = time.time() + backoff
-                self.state.log_event("task_retry", task_id, f"Retry {ts.retries}/{task_spec.max_retries}")
+                self._log_event("task_retry", task_id, f"Retry {ts.retries}/{task_spec.max_retries}")
                 logger.info("Retrying task: %s (attempt %d)", task_id, ts.retries + 1)
 
+        self._publish_task_update(task_id)
         self._save()
 
     def apply_reviewer_result(self, task_id: str, approved: bool, feedback: str = "", score: int = 0, blocking_issues: list = None, suggestions: list = None):
@@ -504,7 +590,7 @@ class MissionEngine:
             ts.retry_not_before = 0.0
             ts.completed_at = datetime.now(timezone.utc).isoformat()
             self.memory.task_clear(task_id)  # Clean ephemeral memory
-            self.state.log_event("review_approved", task_id, feedback)
+            self._log_event("review_approved", task_id, feedback)
             logger.info("Task review approved: %s", task_id)
 
             # Update project memory with lessons learned
@@ -534,20 +620,21 @@ class MissionEngine:
                     ts.retry_not_before = 0.0
                     self.state.total_human_interventions += 1
                     self.state.lifetime_human_interventions += 1
-                    self.state.log_event("human_intervention", task_id, ts.human_intervention_message)
+                    self._log_event("human_intervention", task_id, ts.human_intervention_message)
                     logger.warning("Human intervention needed: %s", task_id)
                 else:
                     ts.status = TaskStatus.FAILED
                     ts.retry_not_before = 0.0
-                    self.state.log_event("task_failed", task_id, f"Max retries exceeded: {feedback}")
+                    self._log_event("task_failed", task_id, f"Max retries exceeded: {feedback}")
                     logger.warning("Task failed after retries: %s", task_id)
             else:
                 backoff = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2 ** (ts.retries - 1)))
                 ts.status = TaskStatus.RETRY
                 ts.retry_not_before = time.time() + backoff
-                self.state.log_event("review_rejected", task_id, f"Retry {ts.retries}/{task_spec.max_retries}: {feedback}")
+                self._log_event("review_rejected", task_id, f"Retry {ts.retries}/{task_spec.max_retries}: {feedback}")
                 logger.info("Task rejected, will retry: %s (score: %d)", task_id, score)
 
+        self._publish_task_update(task_id)
         self._save()
 
     def _clear_human_intervention(self, ts: TaskState) -> None:
@@ -593,11 +680,12 @@ class MissionEngine:
                 + f"\n\nHuman guidance: Previously approved destructive action {action_key}. {guidance}"
             ).strip()
             ts.bump()
-            self.state.log_event(
+            self._log_event(
                 "destructive_action_auto_allowed",
                 task_id,
                 f"Auto-allowed destructive action {action_key}",
             )
+            self._publish_task_update(task_id)
             self._save()
             return False
 
@@ -618,8 +706,9 @@ class MissionEngine:
         if not was_already_waiting:
             self.state.total_human_interventions += 1
             self.state.lifetime_human_interventions += 1
-        self.state.log_event("human_intervention", task_id, ts.human_intervention_message)
+        self._log_event("human_intervention", task_id, ts.human_intervention_message)
         logger.warning("Destructive action approval needed: %s", task_id)
+        self._publish_task_update(task_id)
         self._save()
         return True
 
@@ -678,8 +767,9 @@ class MissionEngine:
             ts.review_feedback = ts.review_feedback + f"\n\nHuman guidance: {resolution}"
         ts.bump()
 
-        self.state.log_event("human_resolved", task_id, resolution)
+        self._log_event("human_resolved", task_id, resolution)
         logger.info("Human resolved task: %s", task_id)
+        self._publish_task_update(task_id)
         self._save()
 
     def resolve_as_failed(self, task_id: str):
@@ -693,7 +783,8 @@ class MissionEngine:
         ts.retry_not_before = 0.0
         ts.bump()
 
-        self.state.log_event("task_failed", task_id, "Marked as failed by human")
+        self._log_event("task_failed", task_id, "Marked as failed by human")
+        self._publish_task_update(task_id)
         self._save()
 
     def manual_retry(self, task_id: str) -> None:
@@ -717,7 +808,8 @@ class MissionEngine:
         ts.status = TaskStatus.PENDING if status == TaskStatus.COMPLETED.value else TaskStatus.RETRY
         ts.retry_not_before = 0.0
         ts.bump()
-        self.state.log_event("task_retry", task_id, "Manually retried task; budget reset")
+        self._log_event("task_retry", task_id, "Manually retried task; budget reset")
+        self._publish_task_update(task_id)
         self._save()
 
     def append_task(self, spec: TaskSpec) -> None:
@@ -739,14 +831,16 @@ class MissionEngine:
         
         # Reset the finished_at flag if it was set, effectively reopening the mission
         self.state.finished_at = None
+        self._publish_task_update(spec.id)
         self._save()
 
     def finish_mission(self) -> None:
         """Mark the mission as officially finished by the user."""
         self.state.finished_at = datetime.now(timezone.utc).isoformat()
         self.state.completed_at = self.state.finished_at
-        self.state.log_event("mission_finished")
+        self._log_event("mission_finished")
         self._save()
+        self._emit_review_payload_ready()
 
     def change_default_models(
         self,
@@ -754,6 +848,8 @@ class MissionEngine:
         reviewer_model: str | None = None,
         worker_agent: str | None = None,
         reviewer_agent: str | None = None,
+        worker_thinking: str | None = None,
+        reviewer_thinking: str | None = None,
     ) -> dict:
         """Update mission defaults for tasks that have not started yet.
 
@@ -765,13 +861,15 @@ class MissionEngine:
         reviewer_model = reviewer_model.strip() if isinstance(reviewer_model, str) else None
         worker_agent = worker_agent.strip() if isinstance(worker_agent, str) else None
         reviewer_agent = reviewer_agent.strip() if isinstance(reviewer_agent, str) else None
-        if not worker_model and not reviewer_model and not worker_agent and not reviewer_agent:
-            raise ValueError("worker_model, reviewer_model, worker_agent, or reviewer_agent is required")
+        worker_thinking = worker_thinking.strip() if isinstance(worker_thinking, str) else None
+        reviewer_thinking = reviewer_thinking.strip() if isinstance(reviewer_thinking, str) else None
+        if not worker_model and not reviewer_model and not worker_agent and not reviewer_agent and not worker_thinking and not reviewer_thinking:
+            raise ValueError("worker_model, reviewer_model, worker_agent, reviewer_agent, worker_thinking, or reviewer_thinking is required")
 
         roles = []
-        if worker_model or worker_agent:
+        if worker_model or worker_agent or worker_thinking:
             roles.append("worker")
-        if reviewer_model or reviewer_agent:
+        if reviewer_model or reviewer_agent or reviewer_thinking:
             roles.append("reviewer")
 
         old_defaults = self.state.resolved_execution_defaults()
@@ -809,37 +907,39 @@ class MissionEngine:
                 pinned_tasks += 1
 
         defaults = self.state.execution_defaults
-        if worker_model or worker_agent:
+        if worker_model or worker_agent or worker_thinking:
             current = defaults.worker or ExecutionProfile()
             defaults.worker = ExecutionProfile(
                 agent=worker_agent or current.agent,
                 model=worker_model or current.model,
-                thinking=current.thinking,
+                thinking=worker_thinking or current.thinking,
             )
             self.spec.execution_defaults.worker = defaults.worker
-        if reviewer_model or reviewer_agent:
+        if reviewer_model or reviewer_agent or reviewer_thinking:
             current = defaults.reviewer or ExecutionProfile()
             defaults.reviewer = ExecutionProfile(
                 agent=reviewer_agent or current.agent,
                 model=reviewer_model or current.model,
-                thinking=current.thinking,
+                thinking=reviewer_thinking or current.thinking,
             )
             self.spec.execution_defaults.reviewer = defaults.reviewer
 
         self._sync_execution_telemetry()
-        self.state.log_event(
+        self._log_event(
             "mission_default_models_changed",
             details=(
-                f"worker={worker_agent or '-'}:{worker_model or '-'} "
-                f"reviewer={reviewer_agent or '-'}:{reviewer_model or '-'} pinned={pinned_tasks}"
+                f"worker={worker_agent or '-'}:{worker_model or '-'}:{worker_thinking or '-'} "
+                f"reviewer={reviewer_agent or '-'}:{reviewer_model or '-'}:{reviewer_thinking or '-'} pinned={pinned_tasks}"
             ),
         )
         self._save()
         return {
             "worker_agent": self.state.execution_defaults.worker.agent if self.state.execution_defaults.worker else None,
             "worker_model": self.state.execution_defaults.worker.model if self.state.execution_defaults.worker else None,
+            "worker_thinking": self.state.execution_defaults.worker.thinking if self.state.execution_defaults.worker else None,
             "reviewer_agent": self.state.execution_defaults.reviewer.agent if self.state.execution_defaults.reviewer else None,
             "reviewer_model": self.state.execution_defaults.reviewer.model if self.state.execution_defaults.reviewer else None,
+            "reviewer_thinking": self.state.execution_defaults.reviewer.thinking if self.state.execution_defaults.reviewer else None,
             "pinned_tasks": pinned_tasks,
         }
 
@@ -850,6 +950,8 @@ class MissionEngine:
         reviewer_model: str | None = None,
         worker_agent: str | None = None,
         reviewer_agent: str | None = None,
+        worker_thinking: str | None = None,
+        reviewer_thinking: str | None = None,
     ) -> bool:
         """Change worker and/or reviewer models for a task.
 
@@ -864,35 +966,49 @@ class MissionEngine:
         reviewer_model = reviewer_model.strip() if isinstance(reviewer_model, str) else None
         worker_agent = worker_agent.strip() if isinstance(worker_agent, str) else None
         reviewer_agent = reviewer_agent.strip() if isinstance(reviewer_agent, str) else None
-        if not worker_model and not reviewer_model and not worker_agent and not reviewer_agent:
-            raise ValueError("worker_model, reviewer_model, worker_agent, or reviewer_agent is required")
+        worker_thinking = worker_thinking.strip() if isinstance(worker_thinking, str) else None
+        reviewer_thinking = reviewer_thinking.strip() if isinstance(reviewer_thinking, str) else None
+        if not worker_model and not reviewer_model and not worker_agent and not reviewer_agent and not worker_thinking and not reviewer_thinking:
+            raise ValueError("worker_model, reviewer_model, worker_agent, reviewer_agent, worker_thinking, or reviewer_thinking is required")
 
         task_spec = self._get_task_spec(task_id)
         ts = self.state.get_task(task_id)
         if not ts:
             raise ValueError(f"Unknown task: {task_id}")
 
-        if worker_model or worker_agent:
+        if worker_model or worker_agent or worker_thinking:
             if task_spec.execution.worker is None:
-                task_spec.execution.worker = ExecutionProfile(agent=worker_agent, model=worker_model)
+                task_spec.execution.worker = ExecutionProfile(
+                    agent=worker_agent,
+                    model=worker_model,
+                    thinking=worker_thinking,
+                )
             else:
                 if worker_agent:
                     task_spec.execution.worker.agent = worker_agent
                 if worker_model:
                     task_spec.execution.worker.model = worker_model
+                if worker_thinking:
+                    task_spec.execution.worker.thinking = worker_thinking
             if worker_model:
                 task_spec.model = worker_model
-        if reviewer_model or reviewer_agent:
+        if reviewer_model or reviewer_agent or reviewer_thinking:
             if task_spec.execution.reviewer is None:
-                task_spec.execution.reviewer = ExecutionProfile(agent=reviewer_agent, model=reviewer_model)
+                task_spec.execution.reviewer = ExecutionProfile(
+                    agent=reviewer_agent,
+                    model=reviewer_model,
+                    thinking=reviewer_thinking,
+                )
             else:
                 if reviewer_agent:
                     task_spec.execution.reviewer.agent = reviewer_agent
                 if reviewer_model:
                     task_spec.execution.reviewer.model = reviewer_model
+                if reviewer_thinking:
+                    task_spec.execution.reviewer.thinking = reviewer_thinking
 
         status = getattr(ts.status, "value", ts.status)
-        worker_runtime_changed = bool(worker_model or worker_agent)
+        worker_runtime_changed = bool(worker_model or worker_agent or worker_thinking)
         if status == TaskStatus.PENDING.value or not worker_runtime_changed:
             # Task has never been dispatched — just persist the new model.
             self._save()
@@ -909,11 +1025,12 @@ class MissionEngine:
         ts.status = TaskStatus.PENDING
         ts.retry_not_before = 0.0
         ts.bump()
-        self.state.log_event(
+        self._log_event(
             "task_model_changed",
             task_id,
-            f"Worker runtime changed to agent={worker_agent or '-'} model={worker_model or '-'}, retries reset",
+            f"Worker runtime changed to agent={worker_agent or '-'} model={worker_model or '-'} thinking={worker_thinking or '-'}, retries reset",
         )
+        self._publish_task_update(task_id)
         self._save()
         return True
 

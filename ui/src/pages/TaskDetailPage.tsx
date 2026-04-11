@@ -6,13 +6,15 @@ import RetryHistory from '../components/RetryHistory';
 import ReviewPanel from '../components/ReviewPanel';
 import StatusBadge from '../components/StatusBadge';
 import StatsBar from '../components/StatsBar';
+import StructuredStream from '../components/StructuredStream';
 import TokenMeter from '../components/TokenMeter';
-import Terminal from '../components/Terminal';
 import { changeTaskModel, getModels, injectPrompt, markTaskFailed, resolveHumanBlock, retryTask, stopTask } from '../lib/api';
 import { useMission } from '../hooks/useMission';
 import { useTaskStream } from '../hooks/useTaskStream';
 import { useToast } from '../hooks/useToast';
 import type { Model, TaskSpec, TaskState, TaskStatus } from '../lib/types';
+
+const THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
 
 function formatDuration(startedAt?: string | null, completedAt?: string | null): string {
   if (!startedAt) {
@@ -153,10 +155,12 @@ function LoadingState({ message }: { message: string }) {
 function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: string }) {
   const { mission, loading, error } = useMission(missionId);
   const { addToast } = useToast();
-  const { lines, done } = useTaskStream(missionId, taskId);
+  const { events, done } = useTaskStream(missionId, taskId);
   const [injectMsg, setInjectMsg] = useState('');
   const [changeModelInput, setChangeModelInput] = useState('');
   const [changeReviewerModelInput, setChangeReviewerModelInput] = useState('');
+  const [changeWorkerThinkingInput, setChangeWorkerThinkingInput] = useState('medium');
+  const [changeReviewerThinkingInput, setChangeReviewerThinkingInput] = useState('medium');
   const [showChangeModel, setShowChangeModel] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [destructiveChoiceId, setDestructiveChoiceId] = useState('approve_once');
@@ -202,6 +206,20 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
     ?? mission?.execution?.tasks?.[taskId]?.reviewer?.model
     ?? mission?.execution?.defaults.reviewer?.model
     ?? null;
+  const currentWorkerThinking = taskSpec?.execution?.worker?.thinking
+    ?? mission?.execution?.tasks?.[taskId]?.worker?.thinking
+    ?? mission?.execution?.defaults.worker?.thinking
+    ?? 'medium';
+  const currentReviewerThinking = taskSpec?.execution?.reviewer?.thinking
+    ?? mission?.execution?.tasks?.[taskId]?.reviewer?.thinking
+    ?? mission?.execution?.defaults.reviewer?.thinking
+    ?? 'medium';
+  const changeModelDirty = (
+    changeModelInput !== (currentModel ?? '')
+    || changeReviewerModelInput !== (currentReviewerModel ?? '')
+    || changeWorkerThinkingInput !== currentWorkerThinking
+    || changeReviewerThinkingInput !== currentReviewerThinking
+  );
   const hasReviewPanel = Boolean(
     reviewFeedback.trim()
       || reviewScore > 0
@@ -209,6 +227,7 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
       || blockingIssues.length > 0
       || (suggestions && suggestions.length > 0),
   );
+  const streamDone = done || ['completed', 'review_approved', 'review_rejected', 'failed', 'needs_human', 'blocked'].includes(taskState?.status ?? 'pending');
 
   useEffect(() => {
     if (!isDestructiveIntervention) {
@@ -263,7 +282,7 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
   const handleChangeModel = async (): Promise<void> => {
     const workerModel = changeModelInput.trim();
     const reviewerModel = changeReviewerModelInput.trim();
-    if (!workerModel && !reviewerModel) {
+    if (!changeModelDirty) {
       return;
     }
 
@@ -274,12 +293,16 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
       const result = await changeTaskModel(missionId, taskId, {
         worker_agent: workerAgent,
         worker_model: workerModel || null,
+        worker_thinking: changeWorkerThinkingInput,
         reviewer_agent: reviewerAgent,
         reviewer_model: reviewerModel || null,
+        reviewer_thinking: changeReviewerThinkingInput,
       });
       addToast(result.retried ? 'Models changed — task re-queued' : 'Models updated', 'success');
       setChangeModelInput('');
       setChangeReviewerModelInput('');
+      setChangeWorkerThinkingInput('medium');
+      setChangeReviewerThinkingInput('medium');
       setShowChangeModel(false);
     } catch (error) {
       addToast(error instanceof Error ? error.message : 'Failed to change model', 'error');
@@ -423,6 +446,8 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
             setShowChangeModel((v) => !v);
             setChangeModelInput(currentModel ?? '');
             setChangeReviewerModelInput(currentReviewerModel ?? '');
+            setChangeWorkerThinkingInput(currentWorkerThinking);
+            setChangeReviewerThinkingInput(currentReviewerThinking);
           }}
         >
           Change Model
@@ -431,52 +456,80 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
 
       {showChangeModel ? (
         <div className="mb-4 grid gap-2 md:grid-cols-[1fr_1fr_auto_auto]">
-          <select
-            className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan disabled:opacity-50"
-            value={changeModelInput}
-            disabled={models.length === 0}
-            onChange={(event) => { setChangeModelInput(event.target.value); }}
-            aria-label="Worker model"
-          >
-            <option value="">{models.length === 0 ? 'Loading models…' : 'Worker model…'}</option>
-            {Object.entries(
-              models.reduce<Record<string, Model[]>>((acc, m) => {
-                (acc[m.provider] ??= []).push(m);
-                return acc;
-              }, {}),
-            ).map(([provider, providerModels]) => (
-              <optgroup key={provider} label={provider}>
-                {providerModels.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-          <select
-            className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan disabled:opacity-50"
-            value={changeReviewerModelInput}
-            disabled={models.length === 0}
-            onChange={(event) => { setChangeReviewerModelInput(event.target.value); }}
-            aria-label="Reviewer model"
-          >
-            <option value="">{models.length === 0 ? 'Loading models…' : 'Reviewer model…'}</option>
-            {Object.entries(
-              models.reduce<Record<string, Model[]>>((acc, m) => {
-                (acc[m.provider] ??= []).push(m);
-                return acc;
-              }, {}),
-            ).map(([provider, providerModels]) => (
-              <optgroup key={provider} label={provider}>
-                {providerModels.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
+          <div className="grid gap-2">
+            <select
+              className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan disabled:opacity-50"
+              value={changeModelInput}
+              disabled={models.length === 0}
+              onChange={(event) => { setChangeModelInput(event.target.value); }}
+              aria-label="Worker model"
+            >
+              <option value="">{models.length === 0 ? 'Loading models…' : 'Worker model…'}</option>
+              {Object.entries(
+                models.reduce<Record<string, Model[]>>((acc, m) => {
+                  (acc[m.provider] ??= []).push(m);
+                  return acc;
+                }, {}),
+              ).map(([provider, providerModels]) => (
+                <optgroup key={provider} label={provider}>
+                  {providerModels.map((m) => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <select
+              className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan"
+              value={changeWorkerThinkingInput}
+              onChange={(event) => { setChangeWorkerThinkingInput(event.target.value); }}
+              aria-label="Worker thinking"
+            >
+              {THINKING_LEVELS.map((level) => (
+                <option key={`worker-thinking-${level}`} value={level}>
+                  Thinking · {level}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grid gap-2">
+            <select
+              className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan disabled:opacity-50"
+              value={changeReviewerModelInput}
+              disabled={models.length === 0}
+              onChange={(event) => { setChangeReviewerModelInput(event.target.value); }}
+              aria-label="Reviewer model"
+            >
+              <option value="">{models.length === 0 ? 'Loading models…' : 'Reviewer model…'}</option>
+              {Object.entries(
+                models.reduce<Record<string, Model[]>>((acc, m) => {
+                  (acc[m.provider] ??= []).push(m);
+                  return acc;
+                }, {}),
+              ).map(([provider, providerModels]) => (
+                <optgroup key={provider} label={provider}>
+                  {providerModels.map((m) => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <select
+              className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan"
+              value={changeReviewerThinkingInput}
+              onChange={(event) => { setChangeReviewerThinkingInput(event.target.value); }}
+              aria-label="Reviewer thinking"
+            >
+              {THINKING_LEVELS.map((level) => (
+                <option key={`reviewer-thinking-${level}`} value={level}>
+                  Thinking · {level}
+                </option>
+              ))}
+            </select>
+          </div>
           <button
             type="button"
             className="rounded border border-cyan/30 px-3 py-1 text-[12px] text-cyan transition-colors hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
-            disabled={changeModelInput.trim().length === 0 && changeReviewerModelInput.trim().length === 0}
+            disabled={!changeModelDirty}
             onClick={() => { void handleChangeModel(); }}
           >
             {taskState.status === 'pending' ? 'Save' : 'Change & Retry'}
@@ -484,7 +537,13 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
           <button
             type="button"
             className="rounded border border-border px-3 py-1 text-[12px] text-dim transition-colors hover:bg-surface"
-            onClick={() => { setShowChangeModel(false); setChangeModelInput(''); setChangeReviewerModelInput(''); }}
+            onClick={() => {
+              setShowChangeModel(false);
+              setChangeModelInput('');
+              setChangeReviewerModelInput('');
+              setChangeWorkerThinkingInput('medium');
+              setChangeReviewerThinkingInput('medium');
+            }}
           >
             Cancel
           </button>
@@ -505,54 +564,13 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
 
       <section className="sec">
         <h2 className="section-title">Live Stream</h2>
-        <Terminal lines={lines} done={done} />
-        {done ? <p className="mt-2 text-[12px] text-dim">(stream complete)</p> : null}
+        <StructuredStream events={events} done={streamDone} />
+        {streamDone ? <p className="mt-2 text-[12px] text-dim">(stream complete)</p> : null}
       </section>
-
-      {injectEnabled ? (
-        <section className="sec">
-          <details className="sec" open>
-            <summary className="section-title cursor-pointer">Send Instruction to Agent</summary>
-            <div className="mt-3 rounded-lg border border-border bg-card p-4">
-              <textarea
-                rows={3}
-                className="w-full rounded border border-border bg-surface px-3 py-2 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan"
-                value={injectMsg}
-                onChange={(event) => {
-                  setInjectMsg(event.target.value);
-                }}
-              />
-              <button
-                type="button"
-                className="mt-3 rounded border border-cyan/30 bg-cyan-bg px-3 py-1 text-[12px] font-semibold text-cyan transition-colors hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
-                disabled={injectMsg.trim().length === 0}
-                onClick={() => {
-                  void handleInject();
-                }}
-              >
-                Send Instruction
-              </button>
-            </div>
-          </details>
-        </section>
-      ) : null}
-
-      {hasReviewPanel ? (
-        <section className="sec">
-          <h2 className="section-title">Review Panel</h2>
-          <ReviewPanel
-            feedback={reviewFeedback}
-            score={reviewScore}
-            criteriaResults={criteriaResults}
-            blockingIssues={blockingIssues}
-            suggestions={suggestions}
-          />
-        </section>
-      ) : null}
 
       {retryCount > 0 ? (
         <section className="sec">
-          <h2 className="section-title">Retry History</h2>
+          <h2 className="section-title">Previous Reviews</h2>
           <RetryHistory missionId={missionId} taskId={taskId} currentRetryCount={retryCount} />
         </section>
       ) : null}
@@ -628,6 +646,47 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
           <div className="rounded-lg border border-red/20 bg-red-bg p-4 text-sm text-red">
             <p className="whitespace-pre-wrap leading-6 text-text">{errorMessage}</p>
           </div>
+        </section>
+      ) : null}
+
+      {injectEnabled ? (
+        <section className="sec">
+          <details className="sec" open>
+            <summary className="section-title cursor-pointer">Send Instruction to Agent</summary>
+            <div className="mt-3 rounded-lg border border-border bg-card p-4">
+              <textarea
+                rows={3}
+                className="w-full rounded border border-border bg-surface px-3 py-2 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan"
+                value={injectMsg}
+                onChange={(event) => {
+                  setInjectMsg(event.target.value);
+                }}
+              />
+              <button
+                type="button"
+                className="mt-3 rounded border border-cyan/30 bg-cyan-bg px-3 py-1 text-[12px] font-semibold text-cyan transition-colors hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={injectMsg.trim().length === 0}
+                onClick={() => {
+                  void handleInject();
+                }}
+              >
+                Send Instruction
+              </button>
+            </div>
+          </details>
+        </section>
+      ) : null}
+
+      {hasReviewPanel ? (
+        <section className="sec">
+          <h2 className="section-title">Final Review</h2>
+          <ReviewPanel
+            feedback={reviewFeedback}
+            score={reviewScore}
+            criteriaResults={criteriaResults}
+            blockingIssues={blockingIssues}
+            suggestions={suggestions}
+          />
         </section>
       ) : null}
 

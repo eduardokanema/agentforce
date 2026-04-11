@@ -229,6 +229,14 @@ class PlanDraftStore:
             self._write_draft(sanitized)
             return DraftSaveResult(status="saved", draft=sanitized)
 
+    def delete(self, draft_id: str) -> bool:
+        with self._locked_store():
+            path = self._draft_path(draft_id)
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
+
     def prune_expired(self, *, now: str | datetime | None = None) -> list[str]:
         current_time = self._coerce_datetime(now) or _utc_now()
         pruned: list[str] = []

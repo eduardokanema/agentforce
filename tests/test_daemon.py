@@ -365,6 +365,21 @@ def test_cli_log_file_rotating_handler(tmp_path):
         handler.close()
 
 
+def test_cli_module_execution_emits_no_runpy_warning(tmp_path):
+    """python -m agentforce.cli.cli --help should not warn about prior sys.modules import."""
+    result = subprocess.run(
+        [sys.executable, "-m", "agentforce.cli.cli", "serve", "--help"],
+        capture_output=True,
+        text=True,
+        env=_daemon_env(tmp_path),
+    )
+
+    assert result.returncode == 0
+    combined = result.stdout + result.stderr
+    assert "RuntimeWarning" not in combined
+    assert "found in sys.modules after import of package 'agentforce.cli'" not in combined
+
+
 # ---------------------------------------------------------------------------
 # Embedded mode tests (matched by -k 'embedded')
 # ---------------------------------------------------------------------------
@@ -399,8 +414,9 @@ def test_embedded_sigint_handler(tmp_path, monkeypatch):
     import agentforce.server.handler as h
 
     stop_calls: list = []
-    shutdown_calls: list = []
+    shutdown_threads: list[int] = []
     installed: dict = {}
+    serve_thread_id: list[int] = []
 
     monkeypatch.setattr(MissionDaemon, "start", lambda self: None)
     monkeypatch.setattr(MissionDaemon, "stop", lambda self: stop_calls.append(True))
@@ -411,17 +427,26 @@ def test_embedded_sigint_handler(tmp_path, monkeypatch):
     monkeypatch.setattr(signal, "signal", capture_signal)
 
     def fake_serve_forever(self):
+        serve_thread_id.append(threading.get_ident())
         handler_fn = installed.get(signal.SIGINT)
         if handler_fn:
             handler_fn(signal.SIGINT, None)
+        deadline = time.time() + 2.0
+        while not shutdown_threads and time.time() < deadline:
+            time.sleep(0.01)
 
     monkeypatch.setattr(ThreadingHTTPServer, "serve_forever", fake_serve_forever)
-    monkeypatch.setattr(ThreadingHTTPServer, "shutdown", lambda self: shutdown_calls.append(True))
+
+    def fake_shutdown(self):
+        shutdown_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(ThreadingHTTPServer, "shutdown", fake_shutdown)
 
     h.serve(port=0, state_dir=tmp_path, daemon=True)
 
     assert stop_calls, "daemon.stop() must be called on SIGINT"
-    assert shutdown_calls, "server.shutdown() must be called on SIGINT"
+    assert shutdown_threads, "server.shutdown() must be called on SIGINT"
+    assert shutdown_threads[0] != serve_thread_id[0], "shutdown must run off serve_forever thread"
     assert h._daemon.status()["running"] is False
 
 

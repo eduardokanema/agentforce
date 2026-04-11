@@ -5,7 +5,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-from anthropic import Anthropic
+try:
+    from anthropic import Anthropic
+except ModuleNotFoundError:  # pragma: no cover - exercised only in minimal test envs
+    Anthropic = None
 
 from agentforce.core.state import MissionState
 from agentforce.memory.memory import Memory, MemoryEntry
@@ -19,6 +22,7 @@ from agentforce.review.models import (
     ReviewReport,
 )
 from agentforce.review.personas import build_persona_prompt, parse_persona_response
+from agentforce.review.schemas import MissionReviewPayloadV1
 
 
 AGENTFORCE_HOME = Path(os.path.expanduser("~/.agentforce"))
@@ -68,7 +72,8 @@ def _resolve_model(requested_model: str | None) -> str:
 
 def _get_anthropic_client() -> Anthropic:
     """Get Anthropic client. Uses ANTHROPIC_API_KEY env var (set by connector config)."""
-
+    if Anthropic is None:
+        raise ModuleNotFoundError("anthropic")
     return Anthropic()
 
 
@@ -194,8 +199,8 @@ class MissionReviewer:
         if not is_review_enabled():
             return ReviewReport(mission_id=mission_id, skipped=True)
 
-        state = self._load_state(mission_id)
-        metrics = MetricsCollector.collect(state)
+        payload = self._load_payload(mission_id)
+        metrics = MetricsCollector.collect(payload)
         baseline = self._load_baseline(mission_id)
         goodhart_warnings: list[GoodhartWarning] = []
         if baseline is not None:
@@ -212,7 +217,7 @@ class MissionReviewer:
             system_prompt, user_prompt = build_persona_prompt(
                 persona_key,
                 metrics,
-                state,
+                payload,
                 prior_history,
             )
             try:
@@ -243,7 +248,7 @@ class MissionReviewer:
 
         report = ReviewReport(
             mission_id=mission_id,
-            mission_name=state.spec.name,
+            mission_name=payload.mission_name,
             metrics=metrics,
             goodhart_warnings=goodhart_warnings,
             retro_items=all_retro_items,
@@ -347,13 +352,13 @@ class MissionReviewer:
         summary = [f"{item.priority} [{item.action_type}] {item.title}" for item in items[:3]]
         self.memory.project_set(mission_id, _ACTION_HISTORY_KEY, json.dumps(summary), category="review")
 
-    def _load_state(self, mission_id: str) -> MissionState:
-        """Load MissionState from JSON. Raise FileNotFoundError if missing."""
+    def _load_payload(self, mission_id: str) -> MissionReviewPayloadV1:
+        """Load MissionState JSON and convert it to the stable review payload."""
 
         state_path = self.state_dir / f"{mission_id}.json"
         if not state_path.exists():
             raise FileNotFoundError(state_path)
-        return MissionState.load(state_path)
+        return MissionReviewPayloadV1.from_state(MissionState.load(state_path))
 
 
 __all__ = [

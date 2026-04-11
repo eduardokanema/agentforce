@@ -15,6 +15,7 @@ from agentforce.core.state import MissionState, TaskState
 import agentforce.server.handler as handler_mod
 from agentforce.server import state_io
 from agentforce.server.handler import DashboardHandler
+from agentforce.server.plan_drafts import PlanDraftStore
 from agentforce.server.routes import providers as providers_mod
 
 
@@ -452,6 +453,23 @@ def _json_request(handler: DashboardHandler, payload: dict) -> None:
     handler.headers["Content-Length"] = str(len(body))
 
 
+def _draft_payload(name: str, *, status: str = "draft") -> dict:
+    return {
+        "status": status,
+        "draft_spec": {
+            "name": name,
+            "goal": name,
+        },
+        "turns": [],
+        "validation": {},
+        "activity_log": [],
+        "approved_models": [],
+        "workspace_paths": [],
+        "companion_profile": {},
+        "draft_notes": [],
+    }
+
+
 def test_api_plan_drafts_list_empty(tmp_path, monkeypatch):
     _patch_home(monkeypatch, tmp_path)
     
@@ -464,19 +482,10 @@ def test_api_plan_drafts_list_empty(tmp_path, monkeypatch):
 
 
 def test_api_plan_drafts_list_returns_summaries(tmp_path, monkeypatch):
-    from agentforce.server.routes import plan as plan_routes
-    
     _patch_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda _run_id: None)
-    
-    # Create two drafts
+    store = PlanDraftStore(tmp_path / "drafts")
     for i in range(2):
-        create_handler = _make_handler("/api/plan/drafts")
-        payload = json.dumps({"prompt": f"Draft {i}"}).encode("utf-8")
-        create_handler.rfile = BytesIO(payload)
-        create_handler.headers["Content-Length"] = str(len(payload))
-        create_handler.do_POST()
-        assert create_handler.send_response.call_args.args == (200,)
+        store.create(f"draft-{i}", **_draft_payload(f"Draft {i}"))
 
     list_handler = _make_handler("/api/plan/drafts")
     list_handler.do_GET()
@@ -485,6 +494,7 @@ def test_api_plan_drafts_list_returns_summaries(tmp_path, monkeypatch):
     body = _response_body(list_handler)
     assert isinstance(body, list)
     assert len(body) == 2
+    assert set(body[0]) == {"id", "name", "goal", "status", "created_at", "updated_at"}
     
     # Sort by name for consistent testing if needed, though list_all sorts by updated_at desc
     body.sort(key=lambda x: x["name"])
@@ -503,42 +513,25 @@ def test_api_plan_drafts_list_returns_summaries(tmp_path, monkeypatch):
 
 
 def test_api_plan_drafts_list_filtering(tmp_path, monkeypatch):
-    from agentforce.server.routes import plan as plan_routes
     _patch_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda _run_id: None)
+    store = PlanDraftStore(tmp_path / "drafts")
 
-    # Create one normal draft, one finalized, one cancelled
     statuses = ["draft", "finalized", "cancelled"]
     for status in statuses:
-        create_handler = _make_handler("/api/plan/drafts")
-        payload = json.dumps({"prompt": f"Mission {status}"}).encode("utf-8")
-        create_handler.rfile = BytesIO(payload)
-        create_handler.headers["Content-Length"] = str(len(payload))
-        create_handler.do_POST()
-        created = _response_body(create_handler)
-        
-        if status != "draft":
-            # Manually update status in the filesystem
-            draft_path = tmp_path / "drafts" / f"{created['id']}.json"
-            data = json.loads(draft_path.read_text())
-            data["status"] = status
-            draft_path.write_text(json.dumps(data))
+        store.create(status, **_draft_payload(f"Mission {status}", status=status))
 
-    # Default: should only return "draft"
     list_handler = _make_handler("/api/plan/drafts")
     list_handler.do_GET()
     body = _response_body(list_handler)
     assert len(body) == 1
     assert body[0]["status"] == "draft"
 
-    # include_terminal=true: should return all 3
     list_all_handler = _make_handler("/api/plan/drafts?include_terminal=true")
     list_all_handler.do_GET()
     body_all = _response_body(list_all_handler)
     assert len(body_all) == 3
     assert {b["status"] for b in body_all} == {"draft", "finalized", "cancelled"}
 
-    # include_terminal=false: should only return "draft"
     list_none_handler = _make_handler("/api/plan/drafts?include_terminal=false")
     list_none_handler.do_GET()
     body_none = _response_body(list_none_handler)
@@ -581,6 +574,38 @@ def test_plan_draft_create_and_get_round_trip(tmp_path, monkeypatch):
     assert loaded_body["workspace_paths"] == ["/workspace/app"]
     assert loaded_body["companion_profile"] == {"id": "planner", "label": "Planner"}
     assert len(loaded_body["plan_runs"]) == 1
+
+
+def test_plan_draft_delete_discards_active_draft(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    store = PlanDraftStore(tmp_path / "drafts")
+    created = store.create("draft-delete", **_draft_payload("Discard me"))
+
+    delete_handler = _make_handler(f"/api/plan/drafts/{created.id}")
+    delete_handler.do_DELETE()
+
+    assert delete_handler.send_response.call_args.args == (200,)
+    body = _response_body(delete_handler)
+    assert body == {"id": created.id, "status": "discarded"}
+    assert store.load(created.id) is None
+
+    list_handler = _make_handler("/api/plan/drafts")
+    list_handler.do_GET()
+    assert _response_body(list_handler) == []
+
+
+def test_plan_draft_delete_rejects_terminal_drafts(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    store = PlanDraftStore(tmp_path / "drafts")
+    created = store.create("draft-finalized", **_draft_payload("Finished", status="finalized"))
+
+    delete_handler = _make_handler(f"/api/plan/drafts/{created.id}")
+    delete_handler.do_DELETE()
+
+    assert delete_handler.send_response.call_args.args == (409,)
+    body = _response_body(delete_handler)
+    assert "expected 'draft'" in body["error"]
+    assert store.load(created.id) is not None
 
 
 def test_plan_draft_create_with_preflight_questions_blocks_initial_run(tmp_path, monkeypatch):
@@ -1458,6 +1483,224 @@ def test_plan_start_state_file_saved(tmp_path, monkeypatch):
 
     assert handler.send_response.call_args.args == (200,)
     assert (state_dir / f"{body['mission_id']}.json").exists()
+
+
+def test_plan_run_retry_creates_new_retry_run(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server.planning_runtime import create_plan_run_for_draft
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Retry this plan", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    draft_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    draft_handler.do_GET()
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+
+    run = create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Initial planning attempt",
+    )
+
+    enqueued: list[str] = []
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
+
+    retry_handler = _make_handler(f"/api/plan/runs/{run.id}/retry")
+    retry_handler.do_POST()
+
+    assert retry_handler.send_response.call_args.args == (200,)
+    body = _response_body(retry_handler)
+    assert body["draft_id"] == draft_id
+    assert body["status"] == "queued"
+    assert body["plan_run_id"] != run.id
+    assert enqueued == [body["plan_run_id"]]
+
+
+def test_parse_planner_response_includes_preview_on_invalid_json():
+    from agentforce.server import planner_adapter as planner_adapter_mod
+
+    with pytest.raises(RuntimeError) as excinfo:
+        planner_adapter_mod._parse_planner_response("not-json planner output with trailing notes")
+
+    assert "planner response was not valid JSON" in str(excinfo.value)
+    assert "not-json planner output with trailing notes" in str(excinfo.value)
+
+
+def test_resolve_profile_replaces_unavailable_planning_model(tmp_path, monkeypatch):
+    from agentforce.server import planning_runtime
+    from agentforce.server.plan_drafts import MissionDraftV1
+
+    monkeypatch.setattr(
+        planning_runtime.providers,
+        "_get_provider_models",
+        lambda provider_id: [{"id": "gpt-5.3-codex"}] if provider_id == "codex" else [],
+    )
+
+    draft = MissionDraftV1.from_dict({
+        "id": "draft-1",
+        "revision": 1,
+        "status": "draft",
+        "draft_spec": {"name": "Draft", "goal": "Goal"},
+        "turns": [],
+        "validation": {
+            "planning_profiles": {
+                "planner": {"agent": "codex", "model": "gpt-5.4", "thinking": "high"},
+            },
+        },
+        "activity_log": [],
+        "approved_models": [],
+        "workspace_paths": [],
+        "companion_profile": {},
+        "draft_notes": [],
+    })
+
+    profile = planning_runtime._resolve_profile(draft, "planner")
+    assert profile.agent == "codex"
+    assert profile.model == "gpt-5.3-codex"
+
+
+def test_invoke_profile_retries_codex_without_explicit_model_on_access_error(tmp_path, monkeypatch):
+    from agentforce.server import planning_runtime
+    from agentforce.core.token_event import TokenEvent
+
+    calls: list[str | None] = []
+
+    def fake_run(*, prompt, workdir, model, timeout, variant):
+        calls.append(model)
+        if model == "gpt-5.4":
+            return (
+                False,
+                "",
+                "There's an issue with the selected model (gpt-5.4). It may not exist or you may not have access to it. Run --model to pick a different model.",
+                None,
+                TokenEvent(0, 0, 0.0),
+            )
+        return (True, "ok", "", None, TokenEvent(1, 2, 0.0))
+
+    monkeypatch.setattr("agentforce.connectors.codex.run", fake_run)
+
+    output, usage = planning_runtime._invoke_profile(
+        planning_runtime.PlanningProfile(agent="codex", model="gpt-5.4", thinking="high"),
+        "plan this",
+        str(tmp_path),
+    )
+
+    assert output == "ok"
+    assert usage.tokens_in == 1
+    assert calls == ["gpt-5.4", None]
+
+
+def test_planner_select_model_ignores_incompatible_approved_model(monkeypatch):
+    from agentforce.server import planner_adapter as planner_adapter_mod
+
+    monkeypatch.setattr(
+        planner_adapter_mod,
+        "_get_provider_models",
+        lambda provider: [{"id": "claude-sonnet-4-6"}] if provider == "claude" else [{"id": "gpt-5.4"}],
+    )
+
+    draft = {
+        "approved_models": ["gpt-5.4"],
+        "validation": {
+            "planning_profiles": {
+                "planner": {"agent": "codex", "model": "gpt-5.4", "thinking": "high"},
+            },
+        },
+    }
+
+    model = planner_adapter_mod._select_model(draft, provider="claude", use_openrouter=False)
+    assert model == "claude-sonnet-4-6"
+
+
+def test_live_planner_adapter_respects_planner_agent_preference(monkeypatch):
+    from agentforce.server import planner_adapter as planner_adapter_mod
+
+    monkeypatch.setattr("agentforce.connectors.claude.available", lambda: True)
+    monkeypatch.setattr("agentforce.connectors.codex.available", lambda: True)
+    monkeypatch.setattr("agentforce.connectors.gemini.available", lambda: False)
+    monkeypatch.setattr(planner_adapter_mod, "_get_provider_models", lambda provider: [{"id": "gpt-5.4"}] if provider == "codex" else [{"id": "claude-sonnet-4-6"}])
+
+    codex_calls: list[str | None] = []
+
+    def fake_codex(model, system_prompt, prompt):
+        codex_calls.append(model)
+        return json.dumps({
+            "assistant_message": "Planned with codex",
+            "draft_spec": {
+                "name": "Mission",
+                "goal": "Goal",
+                "definition_of_done": [],
+                "tasks": [],
+                "caps": {},
+            },
+        })
+
+    monkeypatch.setattr(planner_adapter_mod, "_codex_cli_completion", fake_codex)
+    monkeypatch.setattr(planner_adapter_mod, "_claude_cli_completion", lambda *_args: (_ for _ in ()).throw(AssertionError("claude should not run")))
+
+    result = planner_adapter_mod.LivePlannerAdapter().plan_turn(
+        {
+            "draft_spec": {"name": "Mission", "goal": "Goal", "definition_of_done": [], "tasks": [], "caps": {}},
+            "approved_models": ["gpt-5.4"],
+            "validation": {
+                "planning_profiles": {
+                    "planner": {"agent": "codex", "model": "gpt-5.4", "thinking": "high"},
+                },
+            },
+        },
+        "plan it",
+    )
+
+    assert result.assistant_message == "Planned with codex"
+    assert codex_calls == ["gpt-5.4"]
+
+
+def test_codex_cli_completion_retries_without_model_on_access_error(tmp_path, monkeypatch):
+    from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.core.token_event import TokenEvent
+
+    calls: list[str | None] = []
+
+    def fake_run(*, prompt, workdir, timeout, model, stream_path=None, variant=None, session_id=None):
+        calls.append(model)
+        if model == "gpt-5.4":
+            return (
+                False,
+                "",
+                "There's an issue with the selected model (gpt-5.4). It may not exist or you may not have access to it. Run --model to pick a different model.",
+                None,
+                TokenEvent(0, 0, 0.0),
+            )
+        return (True, '{"assistant_message":"ok","draft_spec":{"name":"Mission","goal":"Goal","definition_of_done":[],"tasks":[],"caps":{}}}', "", None, TokenEvent(0, 0, 0.0))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("agentforce.connectors.codex.run", fake_run)
+
+    text = planner_adapter_mod._codex_cli_completion("gpt-5.4", "system", "prompt")
+    assert '"assistant_message":"ok"' in text
+    assert calls == ["gpt-5.4", None]
+
+
+def test_parse_planner_response_extracts_final_json_from_mixed_codex_output():
+    from agentforce.server import planner_adapter as planner_adapter_mod
+
+    response_text = """
+I’m checking the mission-spec shape and the repo’s planner guidance first, then I’ll rewrite the draft into a complete MissionSpec JSON.
+▶ /bin/zsh -lc "pwd && rg --files . | rg \\"AGENTS\\\\.md|RTK\\\\.md|mission|spec|schema|planner\\""
+✓ /bin/zsh -lc "pwd && rg --files . | rg \\"AGENTS\\\\.md|RTK\\\\.md|mission|spec|schema|planner\\""
+{"assistant_message":"Planner draft updated.","draft_spec":{"name":"Mission","goal":"Goal","definition_of_done":[],"tasks":[],"caps":{}}}
+""".strip()
+
+    assistant_message, draft_spec = planner_adapter_mod._parse_planner_response(response_text)
+
+    assert assistant_message == "Planner draft updated."
+    assert draft_spec["name"] == "Mission"
 
 
 def test_plan_start_draft_status_finalized(tmp_path, monkeypatch):

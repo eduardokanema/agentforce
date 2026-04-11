@@ -88,6 +88,7 @@ function renderPage(
       <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
           <Route path="/plan" element={<PlanModePage />} />
+          <Route path="/plan/:id" element={<PlanModePage />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -126,6 +127,7 @@ const models: Model[] = [
 describe('PlanModePage', () => {
   afterEach(() => {
     document.body.innerHTML = '';
+    window.localStorage.clear();
     vi.unstubAllGlobals();
   });
 
@@ -476,6 +478,180 @@ describe('PlanModePage', () => {
     await flushPromises();
 
     expect(container.textContent?.toLowerCase()).toContain('conflict');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('retries a failed planning run from history', async () => {
+    let retried = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft({
+          plan_runs: retried
+            ? [
+                {
+                  id: 'run-retry',
+                  draft_id: 'draft-123',
+                  base_revision: 3,
+                  head_revision_seen: 3,
+                  status: 'queued',
+                  trigger_kind: 'retry',
+                  trigger_message: 'Retry of run run-failed',
+                  created_at: '2026-04-11T00:00:00Z',
+                  steps: [],
+                  cost_usd: 0,
+                },
+              ]
+            : [
+                {
+                  id: 'run-failed',
+                  draft_id: 'draft-123',
+                  base_revision: 3,
+                  head_revision_seen: 3,
+                  status: 'failed',
+                  trigger_kind: 'auto',
+                  trigger_message: 'Initial run',
+                  created_at: '2026-04-10T00:00:00Z',
+                  steps: [],
+                  error_message: 'planner response was not valid JSON',
+                  cost_usd: 0,
+                },
+              ],
+        })), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/runs/run-failed/retry') {
+        expect(init).toEqual(expect.objectContaining({ method: 'POST' }));
+        retried = true;
+        return new Response(JSON.stringify({
+          draft_id: 'draft-123',
+          plan_run_id: 'run-retry',
+          status: 'queued',
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const retryButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Retry run'));
+    expect(retryButton).toBeTruthy();
+
+    await act(async () => {
+      retryButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/plan/runs/run-failed/retry',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(container.textContent).toContain('Retry of run run-failed');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('rehydrates persisted workspaces and planning models from local storage', async () => {
+    window.localStorage.setItem('agentforce-planmode-workspaces-v1', JSON.stringify(['/workspace/app']));
+    window.localStorage.setItem('agentforce-planmode-models-v1', JSON.stringify(['claude-sonnet-4-5']));
+    window.localStorage.setItem('agentforce-planmode-profiles-v1', JSON.stringify({
+      planner: { agent: 'claude', model: 'claude-sonnet-4-5', thinking: 'high' },
+      critic_technical: { agent: 'claude', model: 'claude-haiku-4-5', thinking: 'medium' },
+      critic_practical: { agent: 'claude', model: 'claude-haiku-4-5', thinking: 'medium' },
+      resolver: { agent: 'claude', model: 'claude-opus-4-5', thinking: 'high' },
+    }));
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/config') {
+        return new Response(JSON.stringify({
+          filesystem: { allowed_base_paths: ['/workspace'] },
+          default_caps: {
+            max_concurrent_workers: 2,
+            max_retries_per_task: 2,
+            max_wall_time_minutes: 60,
+            max_cost_usd: 0,
+          },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.startsWith('/api/filesystem')) {
+        return new Response(JSON.stringify({
+          path: '/workspace',
+          entries: [{ name: 'app', path: '/workspace/app', is_dir: true }],
+          parent: null,
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts') {
+        return new Response(JSON.stringify({ id: 'draft-123', revision: 1, plan_run_id: 'run-1' }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft()), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock);
+    await flushPromises();
+
+    const prompt = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      prompt.value = 'Build another plan';
+      prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const openDraftButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Open Flight Plan')) as HTMLButtonElement | undefined;
+    expect(openDraftButton?.disabled).toBe(false);
+
+    await act(async () => {
+      openDraftButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/plan/drafts',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('/workspace/app'),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/plan/drafts',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('claude-sonnet-4-5'),
+      }),
+    );
 
     act(() => {
       root.unmount();

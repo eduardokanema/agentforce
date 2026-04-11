@@ -5,18 +5,21 @@ import Breadcrumb from "../components/Breadcrumb";
 import EventLogTable from "../components/EventLogTable";
 import StatusBadge from "../components/StatusBadge";
 import TokenMeter from "../components/TokenMeter";
-import { createReadjustedDraft, getModels, restartMission, stopMission, updateMissionDefaultModels } from "../lib/api";
+import { createReadjustedDraft, finishMission, getModels, restartMission, stopMission, troubleshootMission, updateMissionDefaultModels } from "../lib/api";
 import { useMission } from "../hooks/useMission";
 import { useToast } from "../hooks/useToast";
 import SpaceProgress from "../components/SpaceProgress";
 import type { EventLogEntry, Model, TaskSpec, TaskState, TaskStatus } from "../lib/types";
+
+const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 
 type MissionBadgeStatus =
   | "active"
   | "complete"
   | "failed"
   | "needs_human"
-  | "in_progress";
+  | "in_progress"
+  | "finished";
 
 function formatDuration(
   startedAt: string,
@@ -41,8 +44,16 @@ function formatDuration(
 }
 
 function getMissionStatus(
-  taskStates: Record<string, TaskState>,
+  mission: {
+    task_states: Record<string, TaskState>;
+    finished_at?: string | null;
+  },
 ): MissionBadgeStatus {
+  if (mission.finished_at) {
+    return "finished";
+  }
+
+  const taskStates = mission.task_states;
   const states = Object.values(taskStates);
   if (states.some((taskState) => taskState.status === "failed")) {
     return "failed";
@@ -187,6 +198,10 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   const [models, setModels] = useState<Model[]>([]);
   const [defaultWorkerModel, setDefaultWorkerModel] = useState("");
   const [defaultReviewerModel, setDefaultReviewerModel] = useState("");
+  const [defaultWorkerThinking, setDefaultWorkerThinking] = useState("medium");
+  const [defaultReviewerThinking, setDefaultReviewerThinking] = useState("medium");
+  const [troubleshootPrompt, setTroubleshootPrompt] = useState("");
+  const [troubleshootSaving, setTroubleshootSaving] = useState(false);
   const [pendingAction, setPendingAction] = useState<null | {
     title: string;
     message: string;
@@ -235,11 +250,17 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   const taskIndexById = new Map(
     mission.spec.tasks.map((task, index) => [task.id, index + 1]),
   );
-  const missionStatus = getMissionStatus(mission.task_states);
+  const missionStatus = getMissionStatus(mission);
   const workspacePath =
     mission.working_dir?.trim() || mission.spec.working_dir?.trim() || "—";
   const workerExecution = formatExecutionProfile(mission.execution?.defaults.worker);
   const reviewerExecution = formatExecutionProfile(mission.execution?.defaults.reviewer);
+  const missionDefaultsDirty = (
+    defaultWorkerModel !== (mission.execution?.defaults.worker?.model ?? mission.worker_model ?? "")
+    || defaultReviewerModel !== (mission.execution?.defaults.reviewer?.model ?? "")
+    || defaultWorkerThinking !== (mission.execution?.defaults.worker?.thinking ?? "medium")
+    || defaultReviewerThinking !== (mission.execution?.defaults.reviewer?.thinking ?? "medium")
+  );
   const planning = mission.planning;
   let runningTaskIndex = 0;
 
@@ -264,6 +285,8 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   const openDefaultModelControls = (): void => {
     setDefaultWorkerModel(mission.execution?.defaults.worker?.model ?? mission.worker_model ?? "");
     setDefaultReviewerModel(mission.execution?.defaults.reviewer?.model ?? "");
+    setDefaultWorkerThinking(mission.execution?.defaults.worker?.thinking ?? "medium");
+    setDefaultReviewerThinking(mission.execution?.defaults.reviewer?.thinking ?? "medium");
     setShowDefaultModels((current) => !current);
   };
 
@@ -277,8 +300,10 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
       const result = await updateMissionDefaultModels(missionId, {
         worker_agent: workerAgent,
         worker_model: workerModel || null,
+        worker_thinking: defaultWorkerThinking,
         reviewer_agent: reviewerAgent,
         reviewer_model: reviewerModel || null,
+        reviewer_thinking: defaultReviewerThinking,
       });
       addToast(
         `Default models updated for not-started tasks; pinned ${result.pinned_tasks} started task${result.pinned_tasks === 1 ? "" : "s"}`,
@@ -287,6 +312,37 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
       setShowDefaultModels(false);
     } catch (error) {
       addToast(error instanceof Error ? error.message : "Failed to update default models", "error");
+    }
+  };
+
+  const submitTroubleshootPrompt = async (): Promise<void> => {
+    const prompt = troubleshootPrompt.trim();
+    if (!prompt) {
+      addToast("Enter a troubleshooting prompt first", "error");
+      return;
+    }
+
+    setTroubleshootSaving(true);
+    try {
+      await troubleshootMission(missionId, prompt);
+      setTroubleshootPrompt("");
+      addToast("Troubleshooting task added and mission restarted", "success");
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : "Failed to add troubleshooting task", "error");
+    } finally {
+      setTroubleshootSaving(false);
+    }
+  };
+
+  const submitFinishMission = async (): Promise<void> => {
+    setTroubleshootSaving(true);
+    try {
+      await finishMission(missionId);
+      addToast("Mission marked as finished", "success");
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : "Failed to finish mission", "error");
+    } finally {
+      setTroubleshootSaving(false);
     }
   };
 
@@ -442,6 +498,17 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
                 <option key={`worker-${model.id}`} value={model.id}>{model.name}</option>
               ))}
             </select>
+            <select
+              className="mt-2 w-full rounded border border-border bg-card px-3 py-2 font-mono text-[12px] normal-case tracking-normal text-text outline-none focus:border-cyan"
+              value={defaultWorkerThinking}
+              onChange={(event) => setDefaultWorkerThinking(event.currentTarget.value)}
+            >
+              {THINKING_LEVELS.map((level) => (
+                <option key={`default-worker-thinking-${level}`} value={level}>
+                  Thinking · {level}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
             Reviewer
@@ -455,12 +522,23 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
                 <option key={`reviewer-${model.id}`} value={model.id}>{model.name}</option>
               ))}
             </select>
+            <select
+              className="mt-2 w-full rounded border border-border bg-card px-3 py-2 font-mono text-[12px] normal-case tracking-normal text-text outline-none focus:border-cyan"
+              value={defaultReviewerThinking}
+              onChange={(event) => setDefaultReviewerThinking(event.currentTarget.value)}
+            >
+              {THINKING_LEVELS.map((level) => (
+                <option key={`default-reviewer-thinking-${level}`} value={level}>
+                  Thinking · {level}
+                </option>
+              ))}
+            </select>
           </label>
           <div className="flex items-end gap-2">
             <button
               type="button"
               className="rounded border border-cyan/30 px-3 py-2 text-[12px] text-cyan transition-colors hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={!defaultWorkerModel.trim() && !defaultReviewerModel.trim()}
+              disabled={!missionDefaultsDirty}
               onClick={() => { void saveDefaultModels(); }}
             >
               Save Models
@@ -642,6 +720,45 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
         </div>
         <EventLogTable entries={filteredEventLog} />
       </section>
+
+      {missionStatus === "complete" ? (
+        <section className="sec">
+          <h2 className="section-title">Finalize Mission</h2>
+          <div className="rounded-2xl border border-border bg-card p-4">
+            <p className="text-sm text-dim">
+              The current task list is complete. Add a troubleshooting follow-up to reopen the mission,
+              or mark it as definitively finished.
+            </p>
+            <label className="mt-4 block text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+              Troubleshooting prompt
+              <textarea
+                className="mt-2 min-h-28 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text outline-none transition-colors placeholder:text-muted focus:border-cyan"
+                placeholder="Describe the follow-up issue to investigate."
+                value={troubleshootPrompt}
+                onChange={(event) => setTroubleshootPrompt(event.currentTarget.value)}
+              />
+            </label>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded border border-cyan/30 px-3 py-2 text-[12px] text-cyan transition-colors hover:bg-cyan/10 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={troubleshootSaving || !troubleshootPrompt.trim()}
+                onClick={() => { void submitTroubleshootPrompt(); }}
+              >
+                Troubleshoot & Retry
+              </button>
+              <button
+                type="button"
+                className="rounded border border-green/30 px-3 py-2 text-[12px] text-green transition-colors hover:bg-green/10 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={troubleshootSaving}
+                onClick={() => { void submitFinishMission(); }}
+              >
+                Mark as Finished
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       <ConfirmDialog
         confirmLabel={pendingAction?.confirmLabel}

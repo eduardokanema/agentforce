@@ -1,3 +1,5 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+
 export interface PlannerStreamEventView {
   type: string;
   phase: string;
@@ -38,43 +40,121 @@ function severityStyle(s: string): { badge: string; card: string } {
   }
 }
 
+function formatClock(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function labelForEvent(event: PlannerStreamEventView): string {
+  const type = event.type.replace(/_/g, " ");
+  if (type === "plan_cost_update") return "usage";
+  if (type === "plan_step_started") return "step started";
+  if (type === "plan_step_completed") return "step completed";
+  if (type === "plan_run_started") return "run started";
+  if (type === "plan_run_failed") return "run failed";
+  if (type === "plan_run_queued") return "queued";
+  return type;
+}
+
+function toneForEvent(event: PlannerStreamEventView): string {
+  if (event.type === "plan_cost_update") {
+    return "border-emerald-400/20 bg-[linear-gradient(135deg,rgba(16,185,129,0.12),rgba(16,185,129,0.04))] text-green";
+  }
+  if (event.status === "failed" || event.type === "plan_run_failed") {
+    return "border-red/20 bg-red/5 text-red";
+  }
+  if (event.status === "running" || event.status === "started") {
+    return "border-cyan/20 bg-cyan/5 text-cyan";
+  }
+  return "border-border bg-surface text-dim";
+}
+
 export default function PlannerStreamPanel({
   events,
   busy,
 }: PlannerStreamPanelProps) {
+  const [autoScroll, setAutoScroll] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const eventViews = useMemo(
+    () => events.map((event, index) => ({
+      ...event,
+      key: `${event.type}-${event.phase}-${event.status}-${index}`,
+      label: labelForEvent(event),
+      tone: toneForEvent(event),
+      time: formatClock(new Date().toISOString()),
+    })),
+    [events],
+  );
+
+  useEffect(() => {
+    if (!autoScroll) {
+      return;
+    }
+    const node = scrollRef.current;
+    if (!node) {
+      return;
+    }
+    node.scrollTop = node.scrollHeight;
+  }, [autoScroll, eventViews.length]);
+
   return (
     <section className="rounded-lg border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="section-title">Planner Stream</h2>
-          <p className="mt-1 text-xs text-dim">
-            Status events are retained without raw chunk buffers.
-          </p>
+          <p className="mt-1 text-xs text-dim">Flight Director Cockpit activity feed.</p>
         </div>
-        <span className={`flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[11px] ${busy ? 'border-cyan/50 bg-cyan/10 text-cyan shadow-[0_0_8px_rgba(34,211,238,0.2)]' : 'border-border bg-surface text-dim'}`}>
-          {busy ? "streaming" : "idle"}
-          {busy && <span className="inline-block h-2.5 w-1.5 bg-cyan animate-data-blink" />}
-        </span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className={[
+              "rounded border px-2 py-0.5 font-mono text-[11px] transition-colors",
+              autoScroll ? "border-cyan/30 bg-cyan/10 text-cyan" : "border-border text-dim hover:bg-surface",
+            ].join(" ")}
+            onClick={() => setAutoScroll((current) => !current)}
+          >
+            {autoScroll ? "↓ Auto" : "↑ Manual"}
+          </button>
+          <span className={`flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[11px] ${busy ? 'border-cyan/50 bg-cyan/10 text-cyan shadow-[0_0_8px_rgba(34,211,238,0.2)]' : 'border-border bg-surface text-dim'}`}>
+            {busy ? "streaming" : "idle"}
+            {busy && <span className="inline-block h-2.5 w-1.5 bg-cyan animate-data-blink" />}
+          </span>
+        </div>
       </div>
 
-      <div className="mt-4 space-y-2 relative">
-        {events.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-border px-3 py-3 text-sm text-dim animate-fade-in-up">
+      <div ref={scrollRef} className="mt-4 max-h-[560px] overflow-y-auto">
+        <div className="space-y-2 relative">
+        {eventViews.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border px-3 py-3 text-sm text-dim">
             Awaiting planner traffic.
           </div>
         ) : null}
-        {events.map((event, index) => (
+        {eventViews.map((event) => (
           <div
-            key={`${event.type}-${event.status}-${index}`}
-            className="rounded-lg border border-border bg-surface px-3 py-2 animate-slide-in-right opacity-0"
-            style={{ animationDelay: `${index * 50}ms`, animationFillMode: 'forwards' }}
+            key={event.key}
+            className={`rounded-lg border px-3 py-3 ${event.tone}`}
           >
-            <div className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted">
-              {event.type} · {event.phase} · {event.status}
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full border border-current/20 bg-black/5 px-2 py-0.5 text-[10px] uppercase tracking-[0.08em]">
+                  {event.label}
+                </span>
+                <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted">
+                  {event.phase} · {event.status}
+                </span>
+              </div>
+              <span className="font-mono text-[11px] text-dim">{event.time}</span>
             </div>
             {event.content ? (
               <div className="mt-1 text-sm text-text">
-                {event.content.includes("```json") ? (
+                {event.type === "plan_cost_update" ? (
+                  <div className="mt-3 rounded border border-current/10 bg-black/10 px-3 py-2 font-mono text-[12px] text-text">
+                    {event.content}
+                  </div>
+                ) : event.content.includes("```json") ? (
                   <div className="space-y-2">
                     {event.content.split("```json").map((part, i) => {
                       if (i === 0) return part ? <p key={i}>{part}</p> : null;
@@ -142,21 +222,6 @@ export default function PlannerStreamPanel({
                       }
                     })}
                   </div>
-                ) : event.content.trim().startsWith("{") &&
-                  event.content.trim().endsWith("}") ? (
-                  <pre className="overflow-x-auto rounded-lg bg-black/20 p-3 font-mono text-xs text-cyan">
-                    {(() => {
-                      try {
-                        return JSON.stringify(
-                          JSON.parse(event.content),
-                          null,
-                          2,
-                        );
-                      } catch {
-                        return event.content;
-                      }
-                    })()}
-                  </pre>
                 ) : (
                   <p>{event.content}</p>
                 )}
@@ -164,6 +229,7 @@ export default function PlannerStreamPanel({
             ) : null}
           </div>
         ))}
+        </div>
       </div>
     </section>
   );

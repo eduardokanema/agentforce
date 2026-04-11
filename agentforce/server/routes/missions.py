@@ -10,7 +10,9 @@ from pathlib import Path
 import yaml
 
 from agentforce.core.engine import MissionEngine
+from agentforce.core.spec import TaskSpec
 from agentforce.memory import Memory
+from agentforce.telemetry import TelemetryStore
 
 from .. import state_io, ws
 from ..plan_drafts import PlanDraftStore
@@ -67,6 +69,41 @@ def _load_engine(mission_id: str) -> MissionEngine | None:
     if not state_path.exists():
         return None
     return MissionEngine.load(state_path, Memory(state_io.get_agentforce_home() / "memory"))
+
+
+def _enqueue_mission(mission_id: str) -> None:
+    from agentforce.server import handler as _handler
+
+    active_daemon = getattr(_handler, "_daemon", None)
+    if active_daemon is not None:
+        active_daemon.enqueue(mission_id)
+
+
+def _draft_troubleshooting_task(engine: MissionEngine, prompt: str) -> TaskSpec:
+    clean_prompt = prompt.strip()
+    snippet = " ".join(clean_prompt.split())[:80]
+    completed_tasks = [
+        task.id
+        for task in engine.spec.tasks
+        if getattr(engine.state.get_task(task.id), "status", None) == "review_approved"
+    ]
+    dependencies = completed_tasks[-1:] if completed_tasks else []
+    task_id = f"troubleshoot_{uuid.uuid4().hex[:8]}"
+    return TaskSpec(
+        id=task_id,
+        title=f"Troubleshooting: {snippet or 'follow-up'}",
+        description=(
+            "Investigate and resolve the operator-reported follow-up issue after the mission "
+            f"completed.\n\nTroubleshooting prompt:\n{clean_prompt}"
+        ),
+        acceptance_criteria=[
+            "Investigate the reported issue using the current mission context.",
+            "Implement or document the required follow-up changes.",
+            "Summarize the troubleshooting outcome and any remaining risks.",
+        ],
+        dependencies=dependencies,
+        working_dir=engine.spec.working_dir,
+    )
 
 
 def _archive_mission(mission_id: str) -> tuple[int, dict]:
@@ -158,17 +195,54 @@ def _post_mission_restart(mission_id: str) -> tuple[int, dict]:
     state.total_human_interventions = 0 # Reset global mission intervention budget
     state.caps_hit = {}
     state.completed_at = None
+    state.finished_at = None
     state.log_event("mission_restarted", details=f"Restarted mission; requeued {requeued} active task(s)")
     state.save(_state_path(mission_id))
     _broadcast_mission_refresh(state)
     _broadcast_mission_list_refresh()
-
-    from agentforce.server import handler as _handler
-    active_daemon = getattr(_handler, "_daemon", None)
-    if active_daemon is not None:
-        active_daemon.enqueue(mission_id)
+    _enqueue_mission(mission_id)
 
     return 200, {"requeued": requeued}
+
+
+def _post_mission_troubleshoot(mission_id: str, body: dict) -> tuple[int, dict]:
+    engine = _load_engine(mission_id)
+    if not engine:
+        return 404, {"error": f"Mission {mission_id!r} not found"}
+    if engine.state.finished_at:
+        return 409, {"error": "Mission already finished"}
+    if not engine.state.is_done():
+        return 409, {"error": "Mission is not complete"}
+
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return 400, {"error": "prompt is required"}
+
+    task_spec = _draft_troubleshooting_task(engine, prompt)
+    engine.append_task(task_spec)
+    engine.state.completed_at = None
+    engine.state.log_event("mission_troubleshoot_requested", task_spec.id, prompt.strip())
+    engine._save()
+    TelemetryStore(state_io.get_agentforce_home() / "telemetry").record_troubleshooting(mission_id, prompt.strip())
+
+    _broadcast_mission_refresh(engine.state)
+    _broadcast_mission_list_refresh()
+    _enqueue_mission(mission_id)
+
+    return 200, {"task_id": task_spec.id, "status": "active"}
+
+
+def _post_mission_finish(mission_id: str) -> tuple[int, dict]:
+    engine = _load_engine(mission_id)
+    if not engine:
+        return 404, {"error": f"Mission {mission_id!r} not found"}
+    if not engine.state.is_done():
+        return 409, {"error": "Mission is not complete"}
+
+    engine.finish_mission()
+    _broadcast_mission_refresh(engine.state)
+    _broadcast_mission_list_refresh()
+    return 200, {"finished": True}
 
 
 def _post_mission_default_models(mission_id: str, body: dict) -> tuple[int, dict]:
@@ -180,12 +254,16 @@ def _post_mission_default_models(mission_id: str, body: dict) -> tuple[int, dict
     reviewer_model = body.get("reviewer_model")
     worker_agent = body.get("worker_agent")
     reviewer_agent = body.get("reviewer_agent")
+    worker_thinking = body.get("worker_thinking")
+    reviewer_thinking = body.get("reviewer_thinking")
     try:
         result = engine.change_default_models(
             worker_model=worker_model if isinstance(worker_model, str) else None,
             reviewer_model=reviewer_model if isinstance(reviewer_model, str) else None,
             worker_agent=worker_agent if isinstance(worker_agent, str) else None,
             reviewer_agent=reviewer_agent if isinstance(reviewer_agent, str) else None,
+            worker_thinking=worker_thinking if isinstance(worker_thinking, str) else None,
+            reviewer_thinking=reviewer_thinking if isinstance(reviewer_thinking, str) else None,
         )
     except ValueError as exc:
         return 400, {"error": str(exc)}
@@ -404,6 +482,10 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
         return _post_mission_review(parts[2], handler._read_json_body())
     if len(parts) == 4 and parts[1] == "mission" and parts[3] == "readjust-trajectory":
         return _post_readjust_trajectory(parts[2])
+    if len(parts) == 4 and parts[1] == "mission" and parts[3] == "troubleshoot":
+        return _post_mission_troubleshoot(parts[2], handler._read_json_body())
+    if len(parts) == 4 and parts[1] == "mission" and parts[3] == "finish":
+        return _post_mission_finish(parts[2])
 
     return 404, {"error": "Not found"}
 

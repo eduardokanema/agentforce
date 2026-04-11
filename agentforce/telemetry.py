@@ -169,3 +169,23 @@ class TelemetryStore:
             })
             with open(path, "w") as f:
                 json.dump(d, f, indent=2)
+
+    def record_troubleshooting(self, mission_id: str, prompt: str) -> None:
+        path = self.get_mission_file(mission_id)
+        payload: dict
+        if path.exists():
+            with open(path) as f:
+                payload = json.load(f)
+        else:
+            payload = {
+                "mission_id": mission_id,
+                "mission_name": "",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": "",
+            }
+        payload.setdefault("troubleshoot_prompts", []).append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "prompt": prompt,
+        })
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)

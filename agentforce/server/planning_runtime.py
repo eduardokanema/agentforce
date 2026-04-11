@@ -21,11 +21,37 @@ class PlanningProfile:
     thinking: str
 
 
+def _available_models_for_agent(agent: str) -> list[str]:
+    if agent not in {"claude", "codex", "gemini"}:
+        return []
+    try:
+        return [
+            str(model.get("id") or "").strip()
+            for model in providers._get_provider_models(agent)
+            if isinstance(model, dict) and str(model.get("id") or "").strip()
+        ]
+    except Exception:
+        return []
+
+
+def _fallback_model_for_agent(agent: str) -> str:
+    available = _available_models_for_agent(agent)
+    return available[0] if available else ""
+
+
 def _default_profile() -> PlanningProfile:
     from agentforce.connectors import claude
     if claude.available():
-        return PlanningProfile(agent="claude", model="claude-sonnet-4-6", thinking="high")
-    return PlanningProfile(agent="codex", model="gpt-5.4", thinking="high")
+        return PlanningProfile(
+            agent="claude",
+            model=_fallback_model_for_agent("claude") or "claude-sonnet-4-6",
+            thinking="high",
+        )
+    return PlanningProfile(
+        agent="codex",
+        model=_fallback_model_for_agent("codex"),
+        thinking="high",
+    )
 
 
 def _now_iso() -> str:
@@ -124,10 +150,26 @@ def _resolve_profile(draft: MissionDraftV1, key: str) -> PlanningProfile:
     planning_profiles = dict(draft.validation.get("planning_profiles") or {})
     configured = dict(planning_profiles.get(key) or {})
     default = _default_profile()
+    agent = str(configured.get("agent") or default.agent)
+    configured_model = str(configured.get("model") or "").strip()
+    model = configured_model or default.model
+    available_models = _available_models_for_agent(agent)
+    if available_models and model and model not in available_models:
+        model = available_models[0]
     return PlanningProfile(
-        agent=str(configured.get("agent") or default.agent),
-        model=str(configured.get("model") or default.model),
+        agent=agent,
+        model=model,
         thinking=str(configured.get("thinking") or default.thinking),
+    )
+
+
+def _should_retry_without_model(agent: str, output: str, error: str) -> bool:
+    if agent != "codex":
+        return False
+    text = f"{error}\n{output}".lower()
+    return (
+        "selected model" in text
+        and ("may not exist" in text or "may not have access" in text or "pick a different model" in text)
     )
 
 
@@ -136,6 +178,14 @@ def _invoke_profile(profile: PlanningProfile, prompt: str, workdir: str | None) 
     if profile.agent == "codex":
         from agentforce.connectors import codex
         success, output, error, _, token_event = codex.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
+        if not success and profile.model and _should_retry_without_model(profile.agent, output, error):
+            success, output, error, _, token_event = codex.run(
+                prompt=prompt,
+                workdir=workdir_value,
+                model=None,
+                timeout=180,
+                variant=profile.thinking,
+            )
     elif profile.agent == "claude":
         from agentforce.connectors import claude
         success, output, error, _, token_event = claude.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
@@ -341,6 +391,7 @@ def run_plan_run(run_id: str) -> None:
             "draft_id": failed.draft_id,
             "plan_run_id": failed.id,
             "error": error_msg,
+            "message": error_msg,
         })
         raise
 

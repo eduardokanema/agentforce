@@ -463,6 +463,41 @@ def _start_draft(draft_id: str) -> tuple[int, dict]:
     return 200, {"mission_id": mission_id, "draft_id": draft_id, "status": "started"}
 
 
+def _retry_plan_run(run_id: str) -> tuple[int, dict]:
+    run = _plan_store().load_run(run_id)
+    if run is None:
+        return 404, {"error": f"Plan run {run_id!r} not found"}
+
+    draft, error = _load_draft_or_404(run.draft_id)
+    if error is not None:
+        return error
+
+    retry = create_plan_run_for_draft(
+        draft,
+        trigger_kind="retry",
+        trigger_message=f"Retry of run {run_id}",
+    )
+    _enqueue_plan_run(retry.id)
+    return 200, {"draft_id": draft.id, "plan_run_id": retry.id, "status": "queued"}
+
+
+def _delete_draft(draft_id: str) -> tuple[int, dict]:
+    draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
+
+    if draft.status != "draft":
+        return 409, {"error": f"Draft status is {draft.status!r}, expected 'draft'"}
+
+    deleted = _store().delete(draft_id)
+    if not deleted:
+        return 404, {"error": f"Draft {draft_id!r} not found"}
+
+    ws.broadcast_draft_updated(draft_id, "discarded")
+    state_io._broadcast_mission_list_refresh()
+    return 200, {"id": draft_id, "status": "discarded"}
+
+
 def _finalize_draft(draft: MissionDraftV1, mission_id: str) -> None:
     finalized = draft.copy_with(
         status="finalized",
@@ -549,6 +584,8 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
 
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "start":
         return _start_draft(parts[3])
+    if len(parts) == 5 and parts[1] == "plan" and parts[2] == "runs" and parts[4] == "retry":
+        return _retry_plan_run(parts[3])
 
     return 404, {"error": "Not found"}
 
@@ -556,4 +593,10 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
 def patch(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "spec":
         return _patch_spec(parts[3], handler._read_json_body())
+    return 404, {"error": "Not found"}
+
+
+def delete(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
+    if len(parts) == 4 and parts[1] == "plan" and parts[2] == "drafts":
+        return _delete_draft(parts[3])
     return 404, {"error": "Not found"}

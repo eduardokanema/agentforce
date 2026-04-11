@@ -17,6 +17,7 @@ export const STATUS_BADGE_CLASSES = {
   blocked: 'text-amber bg-amber-bg border-amber/20',
   active: 'text-blue bg-blue-bg border-blue/20',
   complete: 'text-green bg-green-bg border-green/20',
+  finished: 'text-teal bg-teal/10 border-teal/20',
   draft: 'text-amber bg-amber-bg border-amber/20',
 } as const satisfies Record<StatusBadgeStatus, string>;
 
@@ -35,6 +36,7 @@ export const STATUS_BADGE_LABELS: Record<StatusBadgeStatus, string> = {
   blocked: 'blocked',
   active: 'active',
   complete: 'complete',
+  finished: 'finished',
   draft: 'draft',
 };
 

@@ -4,8 +4,8 @@ from datetime import datetime
 from statistics import mean
 
 from agentforce.core.spec import TaskStatus
-from agentforce.core.state import MissionState
 from agentforce.review.models import GoodhartWarning, MetricsSnapshot
+from agentforce.review.schemas import MissionReviewPayloadV1
 
 
 class MetricsCollector:
@@ -18,47 +18,46 @@ class MetricsCollector:
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
     @staticmethod
-    def collect(state: MissionState) -> MetricsSnapshot:
-        """Extract metrics from a MissionState."""
-        tasks = list(state.task_states.values())
-        total_tasks = len(tasks)
+    def collect(payload: MissionReviewPayloadV1) -> MetricsSnapshot:
+        """Extract metrics from the stable review payload."""
+        total_tasks = len(payload.tasks)
 
         tasks_completed = sum(
-            1 for ts in tasks if MetricsCollector._status_value(ts.status) == TaskStatus.REVIEW_APPROVED.value
+            1 for task in payload.tasks if task.status == TaskStatus.REVIEW_APPROVED.value
         )
         first_pass = sum(
             1
-            for ts in tasks
-            if MetricsCollector._status_value(ts.status) == TaskStatus.REVIEW_APPROVED.value and ts.retries == 0
+            for task in payload.tasks
+            if task.status == TaskStatus.REVIEW_APPROVED.value and task.retries == 0
         )
 
         review_scores = [
-            ts.review_score
-            for ts in tasks
-            if ts.review_score > 0
-            and MetricsCollector._status_value(ts.status) in {
+            task.review_score
+            for task in payload.tasks
+            if task.review_score > 0
+            and task.status in {
                 TaskStatus.REVIEW_APPROVED.value,
                 TaskStatus.FAILED.value,
             }
         ]
 
-        total_retries = state.total_retries
-        total_human_interventions = state.total_human_interventions
-        total_cost_usd = state.cost_usd
-        total_tokens_out = state.tokens_out
+        total_retries = payload.total_retries
+        total_human_interventions = payload.total_human_interventions
+        total_cost_usd = payload.total_cost_usd
+        total_tokens_out = payload.total_tokens_out
 
         total_wall_time_s = 0.0
         wall_time_task_count = 0
-        for ts in tasks:
-            if not ts.started_at or not ts.completed_at:
+        for task in payload.tasks:
+            if not task.started_at or not task.completed_at:
                 continue
-            started = MetricsCollector._parse_iso(ts.started_at)
-            completed = MetricsCollector._parse_iso(ts.completed_at)
+            started = MetricsCollector._parse_iso(task.started_at)
+            completed = MetricsCollector._parse_iso(task.completed_at)
             total_wall_time_s += (completed - started).total_seconds()
             wall_time_task_count += 1
 
-        review_event_approved = sum(1 for e in state.event_log if e.event_type == "review_approved")
-        review_event_rejected = sum(1 for e in state.event_log if e.event_type == "review_rejected")
+        review_event_approved = sum(1 for event in payload.event_log if event.event_type == "review_approved")
+        review_event_rejected = sum(1 for event in payload.event_log if event.event_type == "review_rejected")
         review_event_total = review_event_approved + review_event_rejected
         review_rejection_rate = (
             review_event_rejected / review_event_total if review_event_total > 0 else 0.0
@@ -70,7 +69,7 @@ class MetricsCollector:
 
         if total_tasks == 0 or tasks_completed == 0:
             snapshot = MetricsSnapshot(
-                mission_id=state.mission_id,
+                mission_id=payload.mission_id,
                 token_efficiency=0.0,
                 first_pass_rate=0.0,
                 rework_rate=0.0,
@@ -104,17 +103,17 @@ class MetricsCollector:
         else:
             wall_time_per_task_s = 0.0
 
-        task_costs = sum(ts.cost_usd for ts in tasks)
+        task_costs = sum(task.cost_usd for task in payload.tasks)
         if task_costs > 0:
             cost_per_task_usd = task_costs / tasks_completed
         else:
-            cost_per_task_usd = state.cost_usd / tasks_completed if tasks_completed > 0 else 0.0
+            cost_per_task_usd = payload.total_cost_usd / tasks_completed if tasks_completed > 0 else 0.0
 
-        task_tokens = sum(ts.tokens_out for ts in tasks)
+        task_tokens = sum(task.tokens_out for task in payload.tasks)
         if task_tokens > 0:
             token_efficiency = task_tokens / tasks_completed
         else:
-            token_efficiency = state.tokens_out / tasks_completed if tasks_completed > 0 else 0.0
+            token_efficiency = payload.total_tokens_out / tasks_completed if tasks_completed > 0 else 0.0
             data_quality_warnings.append("per-task token fields are zero; using mission-level fallback")
 
         quality_score = MetricsCollector.compute_quality_score(
@@ -125,7 +124,7 @@ class MetricsCollector:
         efficiency_gated = MetricsCollector.gate_efficiency(token_efficiency, quality_score)
 
         return MetricsSnapshot(
-            mission_id=state.mission_id,
+            mission_id=payload.mission_id,
             token_efficiency=token_efficiency,
             first_pass_rate=first_pass_rate,
             rework_rate=rework_rate,

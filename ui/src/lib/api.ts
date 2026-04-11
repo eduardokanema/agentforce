@@ -74,6 +74,24 @@ export function getTaskOutput(missionId: string, taskId: string): Promise<{ line
   );
 }
 
+export function getTaskStreamEvents(
+  missionId: string,
+  taskId: string,
+  afterSeq = 0,
+): Promise<{
+  events: Array<import('./ws').StreamEventRecord>;
+  done: boolean;
+  last_seq: number;
+}> {
+  return requestJson<{
+    events: Array<import('./ws').StreamEventRecord>;
+    done: boolean;
+    last_seq: number;
+  }>(
+    `/api/mission/${encodeURIComponent(missionId)}/task/${encodeURIComponent(taskId)}/stream_events?after_seq=${afterSeq}`,
+  );
+}
+
 export function getTaskAttempts(missionId: string, taskId: string): Promise<TaskAttempt[]> {
   return requestJson<TaskAttempt[]>(
     `/api/mission/${encodeURIComponent(missionId)}/task/${encodeURIComponent(taskId)}/attempts`,
@@ -88,26 +106,47 @@ export function restartMission(id: string): Promise<void> {
   return requestVoid(`/api/mission/${encodeURIComponent(id)}/restart`);
 }
 
+export function troubleshootMission(id: string, prompt: string): Promise<{ task_id: string; status: string }> {
+  return requestJson<{ task_id: string; status: string }>(
+    `/api/mission/${encodeURIComponent(id)}/troubleshoot`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    },
+  );
+}
+
+export function finishMission(id: string): Promise<void> {
+  return requestVoid(`/api/mission/${encodeURIComponent(id)}/finish`);
+}
+
 export function updateMissionDefaultModels(
   id: string,
   models: {
     worker_agent?: string | null;
     worker_model?: string | null;
+    worker_thinking?: string | null;
     reviewer_agent?: string | null;
     reviewer_model?: string | null;
+    reviewer_thinking?: string | null;
   },
 ): Promise<{
   worker_agent: string | null;
   worker_model: string | null;
+  worker_thinking: string | null;
   reviewer_agent: string | null;
   reviewer_model: string | null;
+  reviewer_thinking: string | null;
   pinned_tasks: number;
 }> {
   return requestJson<{
     worker_agent: string | null;
     worker_model: string | null;
+    worker_thinking: string | null;
     reviewer_agent: string | null;
     reviewer_model: string | null;
+    reviewer_thinking: string | null;
     pinned_tasks: number;
   }>(
     `/api/mission/${encodeURIComponent(id)}/default_models`,
@@ -168,22 +207,28 @@ export function changeTaskModel(
   modelOrModels: string | {
     worker_agent?: string | null;
     worker_model?: string | null;
+    worker_thinking?: string | null;
     reviewer_agent?: string | null;
     reviewer_model?: string | null;
+    reviewer_thinking?: string | null;
   },
 ): Promise<{
   worker_agent: string | null;
   worker_model: string | null;
+  worker_thinking: string | null;
   reviewer_agent: string | null;
   reviewer_model: string | null;
+  reviewer_thinking: string | null;
   retried: boolean;
 }> {
   const body = typeof modelOrModels === 'string' ? { worker_model: modelOrModels } : modelOrModels;
   return requestJson<{
     worker_agent: string | null;
     worker_model: string | null;
+    worker_thinking: string | null;
     reviewer_agent: string | null;
     reviewer_model: string | null;
+    reviewer_thinking: string | null;
     retried: boolean;
   }>(
     `/api/mission/${encodeURIComponent(missionId)}/task/${encodeURIComponent(taskId)}/change_model`,
@@ -365,11 +410,27 @@ export function submitPlanDraftPreflight(
   );
 }
 
+export function retryPlanRun(runId: string): Promise<{
+  draft_id: string;
+  plan_run_id: string;
+  status: string;
+}> {
+  return requestJson<{
+    draft_id: string;
+    plan_run_id: string;
+    status: string;
+  }>(`/api/plan/runs/${encodeURIComponent(runId)}/retry`, { method: 'POST' });
+}
+
 export function startPlanDraft(id: string): Promise<{ mission_id: string; draft_id: string; status: string }> {
   return requestJson<{ mission_id: string; draft_id: string; status: string }>(
     `/api/plan/drafts/${encodeURIComponent(id)}/start`,
     { method: 'POST' },
   );
+}
+
+export function discardPlanDraft(id: string): Promise<void> {
+  return requestVoid(`/api/plan/drafts/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 export function createReadjustedDraft(missionId: string): Promise<{ id: string; revision: number }> {

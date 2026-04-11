@@ -16,6 +16,19 @@ export interface MissionStateEvent {
   state: MissionState;
 }
 
+export interface MissionTaskUpdateEvent {
+  type: 'mission_task_update';
+  mission_id: string;
+  task_id: string;
+  task: MissionState['task_states'][string];
+}
+
+export interface MissionEventLoggedEvent {
+  type: 'mission_event_logged';
+  mission_id: string;
+  entry: NonNullable<MissionState['event_log']>[number];
+}
+
 export interface MissionCostUpdateEvent {
   type: 'mission_cost_update';
   mission_id: string;
@@ -57,6 +70,32 @@ export interface TaskStreamDoneEvent {
   task_id: string;
 }
 
+export interface StreamEventRecord {
+  seq: number;
+  timestamp: string;
+  mission_id: string;
+  task_id: string;
+  provider: string;
+  role: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  raw_line?: string;
+}
+
+export interface TaskStreamEvent {
+  type: 'task_stream_event';
+  mission_id: string;
+  task_id: string;
+  event: StreamEventRecord;
+}
+
+export interface TaskAttemptStartEvent {
+  type: 'task_attempt_start';
+  mission_id: string;
+  task_id: string;
+  attempt_number: number;
+}
+
 export interface PlanningEvent {
   type:
     | 'plan_run_queued'
@@ -92,11 +131,15 @@ type WsInboundEvent =
   | MissionListEvent
   | MissionListUpdateEvent
   | MissionStateEvent
+  | MissionTaskUpdateEvent
+  | MissionEventLoggedEvent
   | MissionCostUpdateEvent
   | TaskCostUpdateEvent
   | StreamLineEvent
   | TaskStreamLineEvent
   | TaskStreamDoneEvent
+  | TaskStreamEvent
+  | TaskAttemptStartEvent
   | PlanningEvent
   | DraftUpdatedEvent;
 
@@ -158,6 +201,18 @@ function isMissionState(value: unknown): value is MissionState {
     && isString(value.worker_model);
 }
 
+function isStreamEventRecord(value: unknown): value is StreamEventRecord {
+  return isRecord(value)
+    && isNumber(value.seq)
+    && isString(value.timestamp)
+    && isString(value.mission_id)
+    && isString(value.task_id)
+    && isString(value.provider)
+    && isString(value.role)
+    && isString(value.kind)
+    && isRecord(value.payload);
+}
+
 function isInboundEvent(value: unknown): value is WsInboundEvent {
   if (!isRecord(value) || !isString(value.type)) {
     return false;
@@ -169,6 +224,20 @@ function isInboundEvent(value: unknown): value is WsInboundEvent {
       return Array.isArray(value.missions) && value.missions.every(isMissionSummary);
     case 'mission_state':
       return isString(value.mission_id) && isMissionState(value.state);
+    case 'mission_task_update':
+      return isString(value.mission_id)
+        && isString(value.task_id)
+        && isRecord(value.task)
+        && isString(value.task.task_id)
+        && isString(value.task.status)
+        && isNumber(value.task.retries)
+        && isNumber(value.task.review_score);
+    case 'mission_event_logged':
+      return isString(value.mission_id)
+        && isRecord(value.entry)
+        && isString(value.entry.timestamp)
+        && isString(value.entry.event_type)
+        && isString(value.entry.details);
     case 'mission_cost_update':
       return isString(value.mission_id)
         && isNumber(value.tokens_in)
@@ -188,6 +257,12 @@ function isInboundEvent(value: unknown): value is WsInboundEvent {
         && isNumber(value.seq);
     case 'task_stream_done':
       return isString(value.mission_id) && isString(value.task_id);
+    case 'task_stream_event':
+      return isString(value.mission_id) && isString(value.task_id) && isStreamEventRecord(value.event);
+    case 'task_attempt_start':
+      return isString(value.mission_id)
+        && isString(value.task_id)
+        && isNumber(value.attempt_number);
     case 'plan_run_queued':
     case 'plan_run_started':
     case 'plan_step_started':

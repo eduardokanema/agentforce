@@ -22,6 +22,8 @@ function renderCard(
   container: HTMLDivElement;
   onStop: ReturnType<typeof vi.fn>;
   onRestart: ReturnType<typeof vi.fn>;
+  onArchive: ReturnType<typeof vi.fn>;
+  onDelete: ReturnType<typeof vi.fn>;
 } {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -41,7 +43,7 @@ function renderCard(
     );
   });
 
-  return { container, onStop, onRestart };
+  return { container, onStop, onRestart, onArchive, onDelete };
 }
 
 describe("MissionCard", () => {
@@ -202,5 +204,57 @@ describe("MissionCard", () => {
 
     expect(container.textContent).toContain("worker:gpt-5.4");
     expect(container.textContent).toContain("reviewer:gpt-5.4-mini");
+  });
+
+  it("renders draft cards with amber accent, plan-mode links, and draft-only actions", async () => {
+    const mission: MissionSummary = {
+      mission_id: "draft-123",
+      name: "Draft mission",
+      status: "draft",
+      done_tasks: 0,
+      total_tasks: 0,
+      pct: 0,
+      duration: "0m",
+      worker_agent: "",
+      worker_model: "",
+      started_at: "2026-04-08T00:00:00Z",
+      cost_usd: 0,
+    };
+    const onArchive = vi.fn();
+    const onDelete = vi.fn();
+    const { container } = renderCard(mission, vi.fn(), vi.fn(), onArchive, onDelete);
+
+    expect(container.innerHTML).toContain("bg-amber");
+    expect(container.textContent).toContain("draft");
+    expect(container.textContent).not.toContain("Stop");
+    expect(container.textContent).not.toContain("Restart");
+    expect(container.textContent).not.toContain("Archive");
+
+    const links = Array.from(container.querySelectorAll("a"));
+    expect(links).toHaveLength(2);
+    for (const link of links) {
+      expect(link.getAttribute("href")).toBe("/plan/draft-123");
+    }
+    expect(container.textContent).toContain("Open");
+    expect(container.textContent).toContain("Discard");
+
+    const discardButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Discard"),
+    ) as HTMLButtonElement;
+    expect(discardButton).toBeTruthy();
+
+    await act(async () => {
+      discardButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.textContent).toContain('Discard draft "Draft mission"?');
+    const confirmDiscard = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Discard Draft",
+    ) as HTMLButtonElement;
+
+    await act(async () => {
+      confirmDiscard.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onArchive).not.toHaveBeenCalled();
   });
 });

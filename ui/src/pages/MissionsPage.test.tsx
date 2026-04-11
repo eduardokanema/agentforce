@@ -3,7 +3,7 @@ import { act } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MissionSummary } from "../lib/types";
-import { stopMission, restartMission } from "../lib/api";
+import { discardPlanDraft, restartMission, stopMission } from "../lib/api";
 
 const useMissionListMock = vi.hoisted(() => vi.fn());
 const useElapsedTimeMock = vi.hoisted(() => vi.fn());
@@ -26,8 +26,12 @@ vi.mock("../hooks/useToast", () => ({
 }));
 
 vi.mock("../lib/api", () => ({
+  archiveMission: vi.fn(),
+  deleteMission: vi.fn(),
+  unarchiveMission: vi.fn(),
   stopMission: vi.fn(),
   restartMission: vi.fn(),
+  discardPlanDraft: vi.fn(),
 }));
 
 import MissionsPage from "./MissionsPage";
@@ -54,6 +58,7 @@ describe("MissionsPage", () => {
     useElapsedTimeMock.mockReset();
     vi.mocked(stopMission).mockReset();
     vi.mocked(restartMission).mockReset();
+    vi.mocked(discardPlanDraft).mockReset();
     useToastMock.addToast.mockReset();
   });
 
@@ -129,7 +134,6 @@ describe("MissionsPage", () => {
     expect(container.textContent).toContain("3/5 tasks");
     expect(container.textContent).toContain("0 retries");
     expect(container.textContent).toContain("$1.2300");
-    expect(container.textContent).toContain("60% complete");
     expect(container.textContent).toContain("1h 20m");
     expect(container.textContent).toContain("Total: 1");
     expect(container.textContent).toContain("Running: 1");
@@ -219,6 +223,56 @@ describe("MissionsPage", () => {
       "success",
     );
     expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards drafts from Mission Control through the draft API", async () => {
+    const missions: MissionSummary[] = [
+      {
+        mission_id: "draft-123",
+        name: "Draft mission",
+        status: "draft",
+        done_tasks: 0,
+        total_tasks: 0,
+        pct: 0,
+        duration: "0m",
+        worker_agent: "",
+        worker_model: "",
+        started_at: "2026-04-08T00:00:00Z",
+        cost_usd: 0,
+      },
+    ];
+    const refresh = vi.fn();
+    useMissionListMock.mockReturnValue({
+      missions,
+      loading: false,
+      error: null,
+      refresh,
+    });
+    useElapsedTimeMock.mockReturnValue("0m");
+    vi.mocked(discardPlanDraft).mockResolvedValue(undefined);
+
+    const container = renderPage();
+    const discardButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Discard"),
+    ) as HTMLButtonElement;
+
+    await act(async () => {
+      discardButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.textContent).toContain('Discard draft "Draft mission"?');
+
+    const confirmDiscard = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Discard Draft",
+    ) as HTMLButtonElement;
+    expect(confirmDiscard).toBeTruthy();
+
+    await act(async () => {
+      confirmDiscard.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(vi.mocked(discardPlanDraft)).toHaveBeenCalledWith("draft-123");
+    expect(useToastMock.addToast).toHaveBeenCalledWith("Draft discarded", "info");
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the page copy limited to the requested mission list surface", () => {

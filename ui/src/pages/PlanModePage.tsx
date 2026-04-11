@@ -15,6 +15,7 @@ import {
   getModels,
   getPlanDraft,
   patchPlanDraftSpec,
+  retryPlanRun,
   sendPlanDraftMessage,
   startPlanDraft,
   submitPlanDraftPreflight,
@@ -38,7 +39,66 @@ const PLANNING_PROFILE_KEYS = [
   { key: "resolver", label: "Resolver" },
 ] as const;
 
+const PLANMODE_PERSISTED_WORKSPACES_KEY = "agentforce-planmode-workspaces-v1";
+const PLANMODE_PERSISTED_MODELS_KEY = "agentforce-planmode-models-v1";
+const PLANMODE_PERSISTED_PROFILES_KEY = "agentforce-planmode-profiles-v1";
 const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+
+function readStoredJson<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw == null) {
+      return fallback;
+    }
+    const parsed = JSON.parse(raw) as T;
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function getDefaultPlanProfiles(): Record<string, ExecutionProfile> {
+  return {
+    planner: { agent: "claude", model: "", thinking: "medium" },
+    critic_technical: { agent: "claude", model: "", thinking: "medium" },
+    critic_practical: { agent: "claude", model: "", thinking: "medium" },
+    resolver: { agent: "claude", model: "", thinking: "medium" },
+  };
+}
+
+function normalizeWorkspacePaths(workspacePaths: string[] = []): string[] {
+  return workspacePaths.filter((path) => typeof path === "string" && path.trim() !== "");
+}
+
+function normalizePlanningProfile(value: unknown): ExecutionProfile {
+  if (!value || typeof value !== "object") {
+    return { agent: "claude", model: "", thinking: "medium" };
+  }
+  const candidate = value as Record<string, unknown>;
+  const agent = typeof candidate.agent === "string" && candidate.agent.trim() !== ""
+    ? candidate.agent
+    : "claude";
+  const model = typeof candidate.model === "string" ? candidate.model : "";
+  const thinking = typeof candidate.thinking === "string" && THINKING_LEVELS.includes(candidate.thinking as typeof THINKING_LEVELS[number])
+    ? candidate.thinking
+    : "medium";
+  return { agent, model, thinking };
+}
+
+function normalizePlanningProfiles(value: unknown): Record<string, ExecutionProfile> {
+  const defaults = getDefaultPlanProfiles();
+  if (!value || typeof value !== "object") {
+    return defaults;
+  }
+  const source = value as Record<string, unknown>;
+  return PLANNING_PROFILE_KEYS.reduce<Record<string, ExecutionProfile>>((acc, { key }) => {
+    acc[key] = normalizePlanningProfile(source[key]);
+    return acc;
+  }, {});
+}
 
 function getConflictMessage(caught: unknown): string | null {
   const error = caught as Error & {
@@ -101,11 +161,7 @@ function getProfileValue(
   return {
     agent: stored.agent ?? "codex",
     model: stored.model ?? "",
-    thinking:
-      stored.thinking ??
-      (key === "critic_technical" || key === "critic_practical"
-        ? "xhigh"
-        : "high"),
+    thinking: stored.thinking ?? "medium",
   };
 }
 
@@ -296,7 +352,9 @@ function PlanningProfilesSummary({
         {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
           const profile = getProfileValue(draft, key);
           const modelObj = models.find((m) => m.id === profile.model);
-          const modelName = modelObj ? `[${modelObj.provider}] ${modelObj.name}` : profile.model || "Default";
+          const modelName = modelObj
+            ? `[${modelObj.provider}] ${modelObj.name}`
+            : profile.model || "Default";
           return (
             <div
               key={key}
@@ -305,11 +363,17 @@ function PlanningProfilesSummary({
               <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
                 {label}
               </div>
-              <div className="truncate text-sm font-semibold text-text" title={modelName}>
+              <div
+                className="truncate text-sm font-semibold text-text"
+                title={modelName}
+              >
                 {modelName}
               </div>
               <div className="mt-1 text-xs text-dim">
-                Thinking: <span className="font-medium text-text">{profile.thinking}</span>
+                Thinking:{" "}
+                <span className="font-medium text-text">
+                  {profile.thinking}
+                </span>
               </div>
             </div>
           );
@@ -319,7 +383,15 @@ function PlanningProfilesSummary({
   );
 }
 
-function PlanHistoryPanel({ draft }: { draft: MissionDraft }) {
+function PlanHistoryPanel({
+  draft,
+  retryingRunId,
+  onRetryRun,
+}: {
+  draft: MissionDraft;
+  retryingRunId: string | null;
+  onRetryRun: (runId: string) => void;
+}) {
   const currentRun = latestRun(draft);
   const currentVersion = latestVersion(draft);
 
@@ -363,7 +435,8 @@ function PlanHistoryPanel({ draft }: { draft: MissionDraft }) {
               </div>
               {run.status === "failed" && run.error_message ? (
                 <div className="mt-2 rounded-lg border border-red/20 bg-red/5 px-3 py-2 text-xs text-red/80">
-                  <span className="font-semibold">Error:</span> {run.error_message}
+                  <span className="font-semibold">Error:</span>{" "}
+                  {run.error_message}
                 </div>
               ) : (
                 <p className="mt-2 text-sm text-text">
@@ -381,6 +454,18 @@ function PlanHistoryPanel({ draft }: { draft: MissionDraft }) {
                   {formatCurrency(run.cost_usd)}
                 </span>
               </div>
+              {run.status === "failed" ? (
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-xs font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={retryingRunId === run.id}
+                    onClick={() => onRetryRun(run.id)}
+                  >
+                    {retryingRunId === run.id ? "Retrying..." : "Retry run"}
+                  </button>
+                </div>
+              ) : null}
             </article>
           ))}
           {(draft.plan_runs ?? []).length === 0 ? (
@@ -438,23 +523,23 @@ export default function PlanModePage() {
   const draftId = id || searchParams.get("draft");
 
   const [prompt, setPrompt] = useState("");
-  const [workspaces, setWorkspaces] = useState<string[]>([]);
+  const [workspaces, setWorkspaces] = useState<string[]>(
+    normalizeWorkspacePaths(readStoredJson<string[]>(PLANMODE_PERSISTED_WORKSPACES_KEY, [])),
+  );
   const [models, setModels] = useState<Model[]>([]);
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
-  const [initialPlanningProfiles, setInitialPlanningProfiles] = useState<
-    Record<string, ExecutionProfile>
-  >({
-    planner: { agent: "claude", model: "", thinking: "high" },
-    critic_technical: { agent: "claude", model: "", thinking: "xhigh" },
-    critic_practical: { agent: "claude", model: "", thinking: "xhigh" },
-    resolver: { agent: "claude", model: "", thinking: "high" },
-  });
+  const [selectedModels, setSelectedModels] = useState<string[]>(
+    readStoredJson<string[]>(PLANMODE_PERSISTED_MODELS_KEY, []),
+  );
+  const [initialPlanningProfiles, setInitialPlanningProfiles] = useState<Record<string, ExecutionProfile>>(
+    normalizePlanningProfiles(readStoredJson<Record<string, unknown>>(PLANMODE_PERSISTED_PROFILES_KEY, getDefaultPlanProfiles())),
+  );
   const [draft, setDraft] = useState<MissionDraft | null>(null);
   const [followUpMessage, setFollowUpMessage] = useState("");
   const [liveEvents, setLiveEvents] = useState<PlannerStreamEventView[]>([]);
   const [loadingModels, setLoadingModels] = useState(true);
   const [loadingDraft, setLoadingDraft] = useState(false);
   const [creatingDraft, setCreatingDraft] = useState(false);
+  const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
   const [savingDraft, setSavingDraft] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [launching, setLaunching] = useState(false);
@@ -501,17 +586,26 @@ export default function PlanModePage() {
           return;
         }
         setModels(loadedModels);
-        setSelectedModels((current) =>
-          current.length > 0 ? current : loadedModels.map((model) => model.id),
-        );
+        const defaultModel = loadedModels[0]?.id || "";
+        const defaultAgent = loadedModels[0]?.provider_id || "codex";
+        const availableModelIds = new Set(loadedModels.map((model) => model.id));
+        setSelectedModels((current) => {
+          const valid = normalizeWorkspacePaths(current).filter((modelId) => availableModelIds.has(modelId));
+          if (valid.length > 0) {
+            return valid;
+          }
+          return loadedModels.map((model) => model.id);
+        });
 
         setInitialPlanningProfiles((current) => {
-          const defaultModel = loadedModels[0]?.id || "";
-          const defaultAgent = loadedModels[0]?.provider_id || "codex";
           const next = { ...current };
           (Object.keys(next) as Array<keyof typeof next>).forEach((k) => {
-            if (next[k].model === "") {
-              next[k] = { ...next[k], model: defaultModel, agent: defaultAgent };
+            if (!availableModelIds.has(String(next[k].model || ""))) {
+              next[k] = {
+                ...next[k],
+                model: defaultModel,
+                agent: defaultAgent,
+              };
             }
           });
           return next;
@@ -534,6 +628,36 @@ export default function PlanModePage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      PLANMODE_PERSISTED_WORKSPACES_KEY,
+      JSON.stringify(normalizeWorkspacePaths(workspaces)),
+    );
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      PLANMODE_PERSISTED_MODELS_KEY,
+      JSON.stringify(selectedModels),
+    );
+  }, [selectedModels]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      PLANMODE_PERSISTED_PROFILES_KEY,
+      JSON.stringify(initialPlanningProfiles),
+    );
+  }, [initialPlanningProfiles]);
 
   useEffect(() => {
     if (!draftId) {
@@ -686,6 +810,28 @@ export default function PlanModePage() {
     }
   };
 
+  const handleRetryRun = async (runId: string): Promise<void> => {
+    if (!draft || retryingRunId === runId) {
+      return;
+    }
+
+    setRetryingRunId(runId);
+    setStreaming(true);
+    setConflictMessage(null);
+    setPageError(null);
+    try {
+      await retryPlanRun(runId);
+      await loadDraft(draft.id);
+    } catch (caught) {
+      setStreaming(false);
+      setPageError(
+        caught instanceof Error ? caught.message : "Failed to retry planning run.",
+      );
+    } finally {
+      setRetryingRunId((current) => (current === runId ? null : current));
+    }
+  };
+
   const handleLaunch = async (): Promise<void> => {
     if (!draft) {
       return;
@@ -823,19 +969,28 @@ export default function PlanModePage() {
               {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
                 const profile = initialPlanningProfiles[key];
                 return (
-                  <div key={key} className="rounded-xl border border-border bg-surface p-3">
-                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+                  <div
+                    key={key}
+                    className="rounded-xl border border-border bg-surface p-3"
+                  >
+                    <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                      {label}
+                    </div>
                     <div className="grid gap-2">
                       <select
                         className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
                         value={profile.model ?? ""}
                         onChange={(e) => {
                           const mid = e.target.value;
-                          const m = models.find(mod => mod.id === mid);
-                          setInitialPlanningProfiles(p => ({
+                          const m = models.find((mod) => mod.id === mid);
+                          setInitialPlanningProfiles((p) => ({
                             ...p,
-                            [key]: { ...profile, model: mid, agent: m?.provider_id || profile.agent }
-                          }))
+                            [key]: {
+                              ...profile,
+                              model: mid,
+                              agent: m?.provider_id || profile.agent,
+                            },
+                          }));
                         }}
                       >
                         {models.map((m) => (
@@ -905,8 +1060,8 @@ export default function PlanModePage() {
             Flight Director Cockpit
           </h1>
           <p className="mt-1 text-sm text-dim">
-            Flight Director conversation on the left, engineering controls on the
-            right.
+            Flight Director conversation on the left, engineering controls on
+            the right.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -945,7 +1100,10 @@ export default function PlanModePage() {
 
       <div className="grid gap-5 md:grid-cols-[1fr_350px] lg:grid-cols-[1fr_400px]">
         <div className="space-y-5">
-          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '100ms', animationFillMode: 'forwards' }}>
+          <div
+            className="animate-fade-in-up"
+            style={{ animationDelay: "100ms", animationFillMode: "forwards" }}
+          >
             <PlannerTranscriptPanel
               turns={draft.turns}
               message={followUpMessage}
@@ -957,7 +1115,10 @@ export default function PlanModePage() {
             />
           </div>
           {preflightPending ? (
-            <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '150ms', animationFillMode: 'forwards' }}>
+            <div
+              className="animate-fade-in-up"
+              style={{ animationDelay: "150ms", animationFillMode: "forwards" }}
+            >
               <PreflightQuestionsPanel
                 draft={draft}
                 answers={preflightAnswers}
@@ -977,16 +1138,29 @@ export default function PlanModePage() {
               />
             </div>
           ) : null}
-          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '200ms', animationFillMode: 'forwards' }}>
+          <div
+            className="animate-fade-in-up"
+            style={{ animationDelay: "200ms", animationFillMode: "forwards" }}
+          >
             <PlannerStreamPanel events={streamEvents} busy={streaming} />
           </div>
-          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '250ms', animationFillMode: 'forwards' }}>
-            <PlanHistoryPanel draft={draft} />
+          <div
+            className="animate-fade-in-up"
+            style={{ animationDelay: "250ms", animationFillMode: "forwards" }}
+          >
+            <PlanHistoryPanel
+              draft={draft}
+              retryingRunId={retryingRunId}
+              onRetryRun={handleRetryRun}
+            />
           </div>
         </div>
 
         <aside className="space-y-5">
-          <section className="rounded-lg border border-border bg-card p-4 animate-fade-in-up opacity-0" style={{ animationDelay: '150ms', animationFillMode: 'forwards' }}>
+          <section
+            className="rounded-lg border border-border bg-card p-4 animate-fade-in-up"
+            style={{ animationDelay: "150ms", animationFillMode: "forwards" }}
+          >
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="section-title">Engineering Controls</h2>
@@ -1006,7 +1180,7 @@ export default function PlanModePage() {
               </div>
               <button
                 type="button"
-                className={`rounded-full border border-cyan/30 px-4 py-2 text-sm font-semibold text-cyan transition-all disabled:cursor-not-allowed disabled:opacity-50 ${!(launching || validationIssues.length > 0 || streaming || preflightPending) ? 'bg-cyan/20 animate-pulse-glow shadow-[0_0_15px_rgba(34,211,238,0.4)]' : 'bg-cyan/10 hover:bg-cyan/15'}`}
+                className={`rounded-full border border-cyan/30 px-4 py-2 text-sm font-semibold text-cyan transition-all disabled:cursor-not-allowed disabled:opacity-50 ${!(launching || validationIssues.length > 0 || streaming || preflightPending) ? "bg-cyan/20 animate-pulse-glow shadow-[0_0_15px_rgba(34,211,238,0.4)]" : "bg-cyan/10 hover:bg-cyan/15"}`}
                 disabled={
                   launching ||
                   validationIssues.length > 0 ||
@@ -1035,7 +1209,10 @@ export default function PlanModePage() {
             </div>
           </section>
 
-          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '200ms', animationFillMode: 'forwards' }}>
+          <div
+            className="animate-fade-in-up"
+            style={{ animationDelay: "200ms", animationFillMode: "forwards" }}
+          >
             <DraftSummaryPanel
               draft={draft}
               saving={savingDraft}
@@ -1069,7 +1246,10 @@ export default function PlanModePage() {
             />
           </div>
 
-          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '250ms', animationFillMode: 'forwards' }}>
+          <div
+            className="animate-fade-in-up"
+            style={{ animationDelay: "250ms", animationFillMode: "forwards" }}
+          >
             <TaskTimelinePanel
               draft={draft}
               saving={savingDraft}
@@ -1090,7 +1270,10 @@ export default function PlanModePage() {
             />
           </div>
 
-          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '300ms', animationFillMode: 'forwards' }}>
+          <div
+            className="animate-fade-in-up"
+            style={{ animationDelay: "300ms", animationFillMode: "forwards" }}
+          >
             <ExecutionProfileControls
               draft={draft}
               models={models}
@@ -1102,8 +1285,8 @@ export default function PlanModePage() {
                       ...current.draft_spec.execution_defaults,
                       worker: {
                         agent:
-                          current.draft_spec.execution_defaults?.worker?.agent ??
-                          "codex",
+                          current.draft_spec.execution_defaults?.worker
+                            ?.agent ?? "codex",
                         thinking:
                           current.draft_spec.execution_defaults?.worker
                             ?.thinking ?? "medium",
@@ -1112,7 +1295,7 @@ export default function PlanModePage() {
                       reviewer: current.draft_spec.execution_defaults
                         ?.reviewer ?? {
                         agent: "codex",
-                        thinking: "low",
+                        thinking: "medium",
                         model:
                           current.draft_spec.execution_defaults?.reviewer
                             ?.model ??
@@ -1133,7 +1316,8 @@ export default function PlanModePage() {
                         agent: "codex",
                         thinking: "medium",
                         model:
-                          current.draft_spec.execution_defaults?.worker?.model ??
+                          current.draft_spec.execution_defaults?.worker
+                            ?.model ??
                           models[0]?.id ??
                           "",
                       },
@@ -1143,8 +1327,68 @@ export default function PlanModePage() {
                             ?.agent ?? "codex",
                         thinking:
                           current.draft_spec.execution_defaults?.reviewer
-                            ?.thinking ?? "low",
+                            ?.thinking ?? "medium",
                         model: value,
+                      },
+                    },
+                  }),
+                );
+              }}
+              onWorkerThinkingChange={(value) => {
+                updateCurrentDraft((current) =>
+                  updateDraftSpec(current, {
+                    ...current.draft_spec,
+                    execution_defaults: {
+                      ...current.draft_spec.execution_defaults,
+                      worker: {
+                        agent:
+                          current.draft_spec.execution_defaults?.worker
+                            ?.agent ?? "codex",
+                        model:
+                          current.draft_spec.execution_defaults?.worker
+                            ?.model ??
+                          models[0]?.id ??
+                          "",
+                        thinking: value,
+                      },
+                      reviewer: current.draft_spec.execution_defaults?.reviewer ?? {
+                        agent: "codex",
+                        model:
+                          current.draft_spec.execution_defaults?.reviewer
+                            ?.model ??
+                          models[0]?.id ??
+                          "",
+                        thinking: "medium",
+                      },
+                    },
+                  }),
+                );
+              }}
+              onReviewerThinkingChange={(value) => {
+                updateCurrentDraft((current) =>
+                  updateDraftSpec(current, {
+                    ...current.draft_spec,
+                    execution_defaults: {
+                      ...current.draft_spec.execution_defaults,
+                      worker: current.draft_spec.execution_defaults?.worker ?? {
+                        agent: "codex",
+                        model:
+                          current.draft_spec.execution_defaults?.worker
+                            ?.model ??
+                          models[0]?.id ??
+                          "",
+                        thinking: "medium",
+                      },
+                      reviewer: {
+                        agent:
+                          current.draft_spec.execution_defaults?.reviewer
+                            ?.agent ?? "codex",
+                        model:
+                          current.draft_spec.execution_defaults?.reviewer
+                            ?.model ??
+                          models[0]?.id ??
+                          "",
+                        thinking: value,
                       },
                     },
                   }),
@@ -1153,11 +1397,17 @@ export default function PlanModePage() {
             />
           </div>
 
-          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '350ms', animationFillMode: 'forwards' }}>
+          <div
+            className="animate-fade-in-up"
+            style={{ animationDelay: "350ms", animationFillMode: "forwards" }}
+          >
             <PlanningProfilesSummary draft={draft} models={models} />
           </div>
 
-          <div className="animate-fade-in-up opacity-0" style={{ animationDelay: '400ms', animationFillMode: 'forwards' }}>
+          <div
+            className="animate-fade-in-up"
+            style={{ animationDelay: "400ms", animationFillMode: "forwards" }}
+          >
             <ValidationBoard
               conflictMessage={conflictMessage}
               summaryIssues={validationIssues}
