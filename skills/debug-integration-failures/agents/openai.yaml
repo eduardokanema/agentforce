@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug Integration Failures"
+  short_description: "Repro-first integration bug workflow"
+  default_prompt: "Use $debug-integration-failures to reproduce, fix, and verify this integration failure."
