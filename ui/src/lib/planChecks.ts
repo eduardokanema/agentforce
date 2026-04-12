@@ -1,5 +1,27 @@
 import type { MissionDraft } from './types';
 
+const THINKING_LEVELS = new Set(['low', 'medium', 'high', 'xhigh']);
+
+function normalizeConfiguredModelId(model: string | null | undefined): string | null {
+  if (!model) {
+    return null;
+  }
+  const trimmed = model.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const firstColon = trimmed.indexOf(':');
+  const lastColon = trimmed.lastIndexOf(':');
+  if (firstColon <= 0 || lastColon <= firstColon + 1 || lastColon >= trimmed.length - 1) {
+    return trimmed;
+  }
+  const thinking = trimmed.slice(lastColon + 1).trim().toLowerCase();
+  if (!THINKING_LEVELS.has(thinking)) {
+    return trimmed;
+  }
+  return trimmed.slice(firstColon + 1, lastColon).trim() || trimmed;
+}
+
 function collectDependencyWarnings(tasks: MissionDraft['draft_spec']['tasks']): string[] {
   const warnings: string[] = [];
   const taskIds = new Set(tasks.map((task) => task.id));
@@ -51,11 +73,12 @@ function collectModelWarnings(draft: MissionDraft, activeModelIds: Set<string>):
   const warnings: string[] = [];
 
   const checkProfile = (model: string | null | undefined, label: string): void => {
-    if (!model) {
+    const normalizedModel = normalizeConfiguredModelId(model);
+    if (!normalizedModel) {
       return;
     }
-    if (!activeModelIds.has(model)) {
-      warnings.push(`${label} uses inactive model ${model}.`);
+    if (!activeModelIds.has(normalizedModel)) {
+      warnings.push(`${label} uses inactive model ${normalizedModel}.`);
     }
   };
 
