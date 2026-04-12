@@ -78,6 +78,10 @@ const SUBSTEP_LABELS: Record<PlanningSubstepId, string> = {
   resolver: 'Resolver',
 };
 
+function normalizedText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function latestRun(draft: MissionDraft | null): PlanRun | null {
   return draft?.plan_runs?.[0] ?? null;
 }
@@ -202,6 +206,7 @@ function buildPhaseCopy(
   validationIssues: string[],
 ): { summary: string; railSummary: string; timestamp?: string | null } {
   const step = latestStep(run);
+  const missionName = normalizedText(draft.draft_spec.name);
   const workspaceCount = draft.workspace_paths.length;
   const planningProfiles = Object.values((draft.validation?.planning_profiles as Record<string, unknown> | undefined) ?? {})
     .filter((value): value is { model?: string | null } => Boolean(value) && typeof value === 'object')
@@ -211,10 +216,10 @@ function buildPhaseCopy(
   switch (phaseId) {
     case 'briefing':
       return {
-        summary: draft.draft_spec.name.trim()
-          ? `${draft.draft_spec.name.trim()} is staged with ${countLabel(workspaceCount, 'workspace')} and ${countLabel(profileCount, 'planning profile')}.`
+        summary: missionName
+          ? `${missionName} is staged with ${countLabel(workspaceCount, 'workspace')} and ${countLabel(profileCount, 'planning profile')}.`
           : 'Mission brief configured and ready for the first planning pass.',
-        railSummary: draft.draft_spec.name.trim() ? 'Mission brief locked' : 'Brief pending',
+        railSummary: missionName ? 'Mission brief locked' : 'Brief pending',
       };
     case 'preflight':
       if (draft.preflight_status === 'pending') {
@@ -285,6 +290,18 @@ function buildLaunchReadiness(
   validationIssues: string[],
   conflictMessage: string | null,
 ): LaunchReadinessState {
+  if (draft.launch_status) {
+    const blockers = [...draft.launch_status.blockers];
+    if (conflictMessage) {
+      blockers.push(conflictMessage);
+    }
+    return {
+      ready: draft.launch_status.ready && !conflictMessage,
+      blockers,
+      summary: conflictMessage || draft.launch_status.summary,
+    };
+  }
+
   const blockers: string[] = [];
 
   if (draft.preflight_status === 'pending') {

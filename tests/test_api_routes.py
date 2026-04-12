@@ -1415,6 +1415,67 @@ def test_get_config_creates_file_if_missing(tmp_path, monkeypatch):
     assert (tmp_path / "config.json").exists()
 
 
+def test_get_and_post_config_normalize_labs_and_preserve_unknown_sections(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "labs": "bad",
+        "default_caps": {"max_cost_usd": 1},
+        "filesystem": {"mode": "workspace-write"},
+        "other": {"keep": True},
+    }), encoding="utf-8")
+
+    get_handler = _make_handler("/api/config")
+    get_handler.do_GET()
+
+    assert get_handler.send_response.call_args.args == (200,)
+    get_body = _response_body(get_handler)
+    assert get_body["labs"]["black_hole_enabled"] is False
+    assert get_body["default_caps"]["max_cost_usd"] == 1
+    assert get_body["filesystem"]["mode"] == "workspace-write"
+    assert get_body["other"]["keep"] is True
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "labs": {
+            "black_hole_enabled": True,
+            "experiments": {
+                "keep": True,
+            },
+            "unknown_flag": "preserve-me",
+        },
+        "default_caps": {"max_cost_usd": 1},
+        "filesystem": {"mode": "workspace-write"},
+        "other": {"keep": True},
+    }), encoding="utf-8")
+
+    payload = json.dumps({
+        "labs": {
+            "experiments": {
+                "add": "new-value",
+            },
+        },
+    }).encode("utf-8")
+    post_handler = _make_handler("/api/config")
+    post_handler.rfile = BytesIO(payload)
+    post_handler.headers["Content-Length"] = str(len(payload))
+    post_handler.do_POST()
+
+    assert post_handler.send_response.call_args.args == (200,)
+    post_body = _response_body(post_handler)
+    assert post_body["labs"]["black_hole_enabled"] is True
+    assert post_body["labs"]["experiments"] == {"keep": True, "add": "new-value"}
+    assert post_body["labs"]["unknown_flag"] == "preserve-me"
+    assert post_body["default_caps"]["max_cost_usd"] == 1
+    assert post_body["filesystem"]["mode"] == "workspace-write"
+    assert post_body["other"]["keep"] is True
+
+    saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert saved["labs"]["black_hole_enabled"] is True
+    assert saved["labs"]["experiments"] == {"keep": True, "add": "new-value"}
+    assert saved["labs"]["unknown_flag"] == "preserve-me"
+    assert saved["other"]["keep"] is True
+
+
 def test_post_config_valid_updates_caps(tmp_path, monkeypatch):
     _patch_home(monkeypatch, tmp_path)
 
@@ -1507,6 +1568,36 @@ def test_post_config_invalid_concurrent_workers_returns_400(tmp_path, monkeypatc
     assert handler.send_response.call_args.args == (400,)
     body = _response_body(handler)
     assert "error" in body
+
+
+def test_black_hole_disabled_contract_and_route_inventory_locked():
+    from agentforce.server.routes import plan as plan_routes
+
+    status, payload = plan_routes._black_hole_disabled_response()
+
+    assert status == 403
+    assert payload == {
+        "error": "black_hole_disabled",
+        "message": "Black Hole is disabled in Labs settings",
+    }
+
+    inventory = {
+        (entry["route"], entry["handler"])
+        for entry in plan_routes.BLACK_HOLE_ROUTE_INVENTORY
+    }
+    assert inventory == {
+        ("POST /api/plan/drafts", "_create_draft"),
+        ("PATCH /api/plan/drafts/{draft_id}/spec", "_patch_spec"),
+        ("POST /api/plan/drafts/{draft_id}/import-yaml", "_import_yaml"),
+        ("POST /api/plan/drafts/{draft_id}/preflight", "_submit_preflight"),
+        ("POST /api/plan/drafts/{draft_id}/repair", "_submit_repair"),
+        ("GET /api/plan/drafts/{draft_id}/black-hole", "_get_black_hole_campaign"),
+        ("POST /api/plan/drafts/{draft_id}/black-hole", "_start_black_hole_campaign"),
+        ("POST /api/plan/drafts/{draft_id}/black-hole/pause", "_pause_black_hole_campaign"),
+        ("POST /api/plan/drafts/{draft_id}/black-hole/resume", "_resume_black_hole_campaign"),
+        ("POST /api/plan/drafts/{draft_id}/black-hole/stop", "_stop_black_hole_campaign"),
+        ("POST /api/plan/drafts/{draft_id}/black-hole/repair", "_submit_repair"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1767,6 +1858,91 @@ def test_plan_start_state_file_saved(tmp_path, monkeypatch):
 
     assert handler.send_response.call_args.args == (200,)
     assert (state_dir / f"{body['mission_id']}.json").exists()
+
+
+def test_plan_draft_payload_and_start_ignore_older_failed_runs_after_reviewed_version(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server.plan_runs import PlanRunStore
+
+    _patch_home(monkeypatch, tmp_path)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _set_handler_config(state_dir)
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", state_dir)
+    monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *a, **k: None)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Launch despite old failed runs", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    patch_handler = _make_handler(f"/api/plan/drafts/{draft_id}/spec")
+    _json_request(patch_handler, {"expected_revision": 1, "draft_spec": _VALID_DRAFT_SPEC})
+    patch_handler.do_PATCH()
+    assert patch_handler.send_response.call_args.args == (200,)
+
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+
+    run_store = PlanRunStore()
+    old_failed = run_store.create_run(
+        "run-old-failed",
+        draft_id=draft_id,
+        base_revision=draft.revision,
+        trigger_kind="auto",
+        trigger_message="Old failed planning attempt",
+    )
+    run_store.save_run(
+        old_failed.copy_with(
+            status="failed",
+            current_step="resolver",
+            completed_at="2026-04-12T00:05:00Z",
+            error_message="Old resolver failure",
+        )
+    )
+
+    current_completed = run_store.create_run(
+        "run-new-completed",
+        draft_id=draft_id,
+        base_revision=draft.revision,
+        trigger_kind="follow_up",
+        trigger_message="Refined plan",
+    )
+    run_store.save_run(
+        current_completed.copy_with(
+            status="completed",
+            current_step="resolver",
+            completed_at="2026-04-12T00:11:00Z",
+            promoted_version_id="version-reviewed",
+            result_version_id="version-reviewed",
+        )
+    )
+    run_store.create_version(
+        "version-reviewed",
+        draft_id=draft_id,
+        source_run_id=current_completed.id,
+        revision_base=draft.revision,
+        draft_spec_snapshot=_VALID_DRAFT_SPEC,
+        changelog=["Resolver approved the reviewed plan."],
+        validation={},
+    )
+
+    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    get_handler.do_GET()
+    assert get_handler.send_response.call_args.args == (200,)
+    payload = _response_body(get_handler)
+    assert payload["launch_status"]["ready"] is True
+    assert payload["launch_status"]["blockers"] == []
+
+    start_handler = _make_handler(f"/api/plan/drafts/{draft_id}/start")
+    start_handler.do_POST()
+
+    assert start_handler.send_response.call_args.args == (200,)
+    body = _response_body(start_handler)
+    assert body["draft_id"] == draft_id
+    assert body["status"] == "started"
+    assert body["mission_id"]
 
 
 def test_plan_run_retry_creates_new_retry_run(tmp_path, monkeypatch):

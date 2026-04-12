@@ -250,16 +250,20 @@ function updateDraftSpec(draft: MissionDraft, draftSpec: MissionSpec): MissionDr
   };
 }
 
+function normalizedDraftText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function draftValidationIssues(draft: MissionDraft | null): string[] {
   if (!draft) {
     return [];
   }
 
   const issues: string[] = [];
-  if (draft.draft_spec.name.trim() === "") {
+  if (normalizedDraftText(draft.draft_spec.name) === "") {
     issues.push("Mission name is required.");
   }
-  if (draft.draft_spec.goal.trim() === "") {
+  if (normalizedDraftText(draft.draft_spec.goal) === "") {
     issues.push("Mission goal is required.");
   }
   if (draft.draft_spec.tasks.length === 0) {
@@ -1575,7 +1579,7 @@ function PhaseViewport({
           <button
             type="button"
             className="rounded-full border border-cyan/30 bg-cyan/10 px-5 py-2.5 text-sm font-semibold text-cyan transition-all hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={launching || summaryIssues.length > 0 || streaming || !!latestFailed}
+            disabled={launching || streaming || !launchReadiness.ready}
             onClick={onLaunch}
           >
             {launching ? "Launching..." : "Launch Mission"}

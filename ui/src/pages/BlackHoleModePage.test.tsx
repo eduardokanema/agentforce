@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BlackHoleCampaignState, MissionDraft, Model } from "../lib/types";
+import { DEFAULT_LABS_CONFIG, type BlackHoleCampaignState, type MissionDraft, type Model } from "../lib/types";
 import BlackHoleModePage from "./BlackHoleModePage";
 
 function flushPromises(): Promise<void> {
@@ -182,6 +182,7 @@ describe("BlackHoleModePage", () => {
         return new Response(JSON.stringify({
           filesystem: { allowed_base_paths: ["/workspace"] },
           default_caps: { max_concurrent_workers: 2, max_retries_per_task: 2, max_wall_time_minutes: 60, max_cost_usd: 0 },
+          labs: { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true },
         }), {
           headers: { "Content-Type": "application/json" },
         });

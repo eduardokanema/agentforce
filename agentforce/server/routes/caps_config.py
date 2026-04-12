@@ -19,6 +19,10 @@ DEFAULT_FILESYSTEM_SETTINGS: dict = {
     "default_start_path": "~/Projects",
 }
 
+DEFAULT_LABS_SETTINGS: dict = {
+    "black_hole_enabled": False,
+}
+
 # field → (coerce_fn, min_inclusive, max_inclusive_or_None)
 _RULES: dict[str, tuple] = {
     "max_concurrent_workers": (int, 1, 8),
@@ -32,32 +36,97 @@ def _config_path() -> Path:
     return state_io.get_agentforce_home() / "config.json"
 
 
+def _dict_or_empty(value: object) -> dict:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _merge_dicts(base: dict, patch: dict) -> dict:
+    merged = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_dicts(dict(merged[key]), value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _normalize_default_caps(config: dict) -> dict:
+    raw = _dict_or_empty(config.get("default_caps"))
+    normalized = dict(raw)
+    for key, default in DEFAULT_CAPS.items():
+        normalized[key] = raw.get(key, default)
+    return normalized
+
+
+def _normalize_filesystem(config: dict) -> dict:
+    raw = _dict_or_empty(config.get("filesystem"))
+    normalized = dict(raw)
+    normalized["default_start_path"] = raw.get("default_start_path", DEFAULT_FILESYSTEM_SETTINGS["default_start_path"])
+    return normalized
+
+
+def _normalize_labs(config: dict) -> dict:
+    raw = _dict_or_empty(config.get("labs"))
+    normalized = _merge_dicts(DEFAULT_LABS_SETTINGS, raw)
+    normalized["black_hole_enabled"] = raw.get("black_hole_enabled") if isinstance(raw.get("black_hole_enabled"), bool) else False
+    return normalized
+
+
+def _normalize_dashboard_config(data: dict) -> dict:
+    normalized = dict(data)
+    normalized["default_caps"] = _normalize_default_caps(data)
+    normalized["filesystem"] = _normalize_filesystem(data)
+    normalized["labs"] = _normalize_labs(data)
+    return normalized
+
+
+def build_api_config_payload(*, allowed_base_paths: list[str] | None = None) -> dict:
+    payload = _load_dashboard_config()
+    filesystem = dict(payload.get("filesystem") or {})
+    filesystem["allowed_base_paths"] = list(allowed_base_paths or [])
+    payload["filesystem"] = filesystem
+    return payload
+
+
+def _allowed_base_paths_from_runtime_config() -> list[str]:
+    try:
+        from .providers import _load_config
+
+        config = _load_config()
+    except Exception:
+        return []
+    filesystem = _dict_or_empty(config.get("filesystem"))
+    raw_paths = filesystem.get("allowed_base_paths", [])
+    if not isinstance(raw_paths, list):
+        return []
+    return [str(Path(path).expanduser().resolve()) for path in raw_paths if path]
+
+
 def _load_dashboard_config() -> dict:
     path = _config_path()
     if not path.exists():
         data = {
             "default_caps": DEFAULT_CAPS.copy(),
             "filesystem": DEFAULT_FILESYSTEM_SETTINGS.copy(),
+            "labs": DEFAULT_LABS_SETTINGS.copy(),
         }
         _write_dashboard_config(data)
-        return data
+        return _normalize_dashboard_config(data)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        return _normalize_dashboard_config(data if isinstance(data, dict) else {})
     except Exception:
-        return {}
+        return _normalize_dashboard_config({})
 
 
 def load_caps() -> dict:
     data = _load_dashboard_config()
-    caps = data.get("default_caps", {})
-    return {k: caps.get(k, v) for k, v in DEFAULT_CAPS.items()}
+    return {k: data["default_caps"].get(k, v) for k, v in DEFAULT_CAPS.items()}
 
 
 def load_filesystem_settings() -> dict:
     data = _load_dashboard_config()
-    filesystem = data.get("filesystem", {})
-    return {k: filesystem.get(k, v) for k, v in DEFAULT_FILESYSTEM_SETTINGS.items()}
+    return {k: data["filesystem"].get(k, v) for k, v in DEFAULT_FILESYSTEM_SETTINGS.items()}
 
 
 def _write_dashboard_config(data: dict) -> None:
@@ -96,12 +165,14 @@ def post(handler, parts: list[str], query: dict):
     if not isinstance(body, dict):
         return 400, {"error": "invalid config payload"}
 
-    current_caps = load_caps()
-    current_filesystem = load_filesystem_settings()
+    current = _load_dashboard_config()
+    current_caps = current["default_caps"]
+    current_filesystem = current["filesystem"]
+    updated = dict(current)
 
     caps_in = body.get("default_caps")
     if caps_in is None:
-        coerced_caps = current_caps
+        updated["default_caps"] = current_caps
     else:
         if not isinstance(caps_in, dict):
             return 400, {"error": "default_caps must be an object"}
@@ -109,7 +180,8 @@ def post(handler, parts: list[str], query: dict):
         error = _validate(merged)
         if error:
             return 400, {"error": error}
-        coerced_caps = {
+        updated["default_caps"] = {
+            **current_caps,
             "max_concurrent_workers": int(merged["max_concurrent_workers"]),
             "max_retries_per_task": int(merged["max_retries_per_task"]),
             "max_wall_time_minutes": int(merged["max_wall_time_minutes"]),
@@ -118,7 +190,7 @@ def post(handler, parts: list[str], query: dict):
 
     filesystem_in = body.get("filesystem")
     if filesystem_in is None:
-        coerced_filesystem = current_filesystem
+        updated["filesystem"] = current_filesystem
     else:
         if not isinstance(filesystem_in, dict):
             return 400, {"error": "filesystem must be an object"}
@@ -127,15 +199,25 @@ def post(handler, parts: list[str], query: dict):
             raw_default_start_path = ""
         if not isinstance(raw_default_start_path, str):
             return 400, {"error": "filesystem.default_start_path must be a string"}
-        coerced_filesystem = {
+        updated["filesystem"] = {
+            **current_filesystem,
             "default_start_path": raw_default_start_path.strip(),
         }
 
-    _write_dashboard_config({
-        "default_caps": coerced_caps,
-        "filesystem": coerced_filesystem,
-    })
-    return 200, {
-        "default_caps": coerced_caps,
-        "filesystem": coerced_filesystem,
-    }
+    labs_in = body.get("labs")
+    if labs_in is None:
+        updated["labs"] = _normalize_labs(current)
+    else:
+        if not isinstance(labs_in, dict):
+            return 400, {"error": "labs must be an object"}
+        updated["labs"] = _normalize_labs({
+            "labs": _merge_dicts(_dict_or_empty(current.get("labs")), labs_in),
+        })
+
+    for key, value in body.items():
+        if key in {"default_caps", "filesystem", "labs"}:
+            continue
+        updated[key] = value
+
+    _write_dashboard_config(updated)
+    return 200, build_api_config_payload(allowed_base_paths=_allowed_base_paths_from_runtime_config())

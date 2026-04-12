@@ -7,6 +7,7 @@ import type {
   DefaultCaps,
   DraftSummary,
   FilesystemListing,
+  LabsConfig,
   Model,
   MissionDraft,
   PreflightAnswer,
@@ -19,6 +20,7 @@ import type {
   TelemetryData,
   ExecutionProfile,
 } from './types';
+import { DEFAULT_LABS_CONFIG as DEFAULT_LABS } from './types';
 
 export const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
@@ -75,6 +77,125 @@ function withLegacyExecutionFields<T extends {
     next.reviewer_thinking ??= next.reviewer_profile.thinking ?? null;
   }
   return next;
+}
+
+function stringOrFallback(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function stringArrayOrEmpty(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function objectRecordOrEmpty(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {};
+}
+
+export function selectLabsConfig(config: Pick<AppConfig, 'labs'> | null | undefined): LabsConfig {
+  return {
+    ...DEFAULT_LABS,
+    ...(config?.labs ?? {}),
+  };
+}
+
+export const BLACK_HOLE_UI_SURFACES = {
+  routePaths: ['/black-hole', '/black-hole/:id'],
+  apiEndpoints: [
+    'POST /api/plan/drafts',
+    'GET /api/plan/drafts/{draft_id}/black-hole',
+    'POST /api/plan/drafts/{draft_id}/black-hole',
+    'POST /api/plan/drafts/{draft_id}/black-hole/pause',
+    'POST /api/plan/drafts/{draft_id}/black-hole/resume',
+    'POST /api/plan/drafts/{draft_id}/black-hole/stop',
+    'POST /api/plan/drafts/{draft_id}/black-hole/repair',
+  ],
+} as const;
+
+function normalizeTaskSpec(task: unknown, index: number): TaskSpec | null {
+  if (!task || typeof task !== 'object' || Array.isArray(task)) {
+    return null;
+  }
+  const candidate = task as Record<string, unknown>;
+  return {
+    id: stringOrFallback(candidate.id, `task-${index + 1}`),
+    title: stringOrFallback(candidate.title, ''),
+    description: stringOrFallback(candidate.description, ''),
+    acceptance_criteria: stringArrayOrEmpty(candidate.acceptance_criteria),
+    tdd: candidate.tdd && typeof candidate.tdd === 'object' && !Array.isArray(candidate.tdd)
+      ? (candidate.tdd as TaskSpec['tdd'])
+      : null,
+    dependencies: stringArrayOrEmpty(candidate.dependencies),
+    working_dir: typeof candidate.working_dir === 'string' ? candidate.working_dir : null,
+    max_retries: typeof candidate.max_retries === 'number' ? candidate.max_retries : 3,
+    output_artifacts: stringArrayOrEmpty(candidate.output_artifacts),
+    execution: candidate.execution && typeof candidate.execution === 'object' && !Array.isArray(candidate.execution)
+      ? (candidate.execution as TaskSpec['execution'])
+      : null,
+  };
+}
+
+function normalizeDraftSpec(payload: MissionDraft): MissionDraft['draft_spec'] {
+  const draftSpec = objectRecordOrEmpty(payload.draft_spec);
+  const caps = objectRecordOrEmpty(draftSpec.caps);
+  const normalizedTasks = Array.isArray(draftSpec.tasks)
+    ? draftSpec.tasks.map(normalizeTaskSpec).filter((task): task is TaskSpec => task !== null)
+    : [];
+
+  return {
+    name: stringOrFallback(draftSpec.name, stringOrFallback((payload as unknown as Record<string, unknown>).name)),
+    goal: stringOrFallback(draftSpec.goal, stringOrFallback((payload as unknown as Record<string, unknown>).goal)),
+    definition_of_done: stringArrayOrEmpty(draftSpec.definition_of_done),
+    tasks: normalizedTasks,
+    caps: {
+      max_tokens_per_task: typeof caps.max_tokens_per_task === 'number' ? caps.max_tokens_per_task : 100000,
+      max_retries_global: typeof caps.max_retries_global === 'number' ? caps.max_retries_global : 3,
+      max_retries_per_task: typeof caps.max_retries_per_task === 'number' ? caps.max_retries_per_task : 3,
+      max_wall_time_minutes: typeof caps.max_wall_time_minutes === 'number' ? caps.max_wall_time_minutes : 120,
+      max_human_interventions: typeof caps.max_human_interventions === 'number' ? caps.max_human_interventions : 2,
+      max_cost_usd: typeof caps.max_cost_usd === 'number' ? caps.max_cost_usd : null,
+      max_concurrent_workers: typeof caps.max_concurrent_workers === 'number' ? caps.max_concurrent_workers : 3,
+      review: typeof caps.review === 'string' ? caps.review : undefined,
+    },
+    execution_defaults:
+      draftSpec.execution_defaults && typeof draftSpec.execution_defaults === 'object' && !Array.isArray(draftSpec.execution_defaults)
+        ? (draftSpec.execution_defaults as MissionDraft['draft_spec']['execution_defaults'])
+        : null,
+    working_dir: typeof draftSpec.working_dir === 'string' ? draftSpec.working_dir : null,
+    project_memory_file: typeof draftSpec.project_memory_file === 'string' ? draftSpec.project_memory_file : null,
+  };
+}
+
+function normalizePlanDraft(payload: MissionDraft): MissionDraft {
+  const preflightAnswers = objectRecordOrEmpty(payload.preflight_answers) as Record<string, PreflightAnswer>;
+  const repairAnswers = objectRecordOrEmpty(payload.repair_answers) as Record<string, PreflightAnswer>;
+  const launchStatus = objectRecordOrEmpty(payload.launch_status);
+  return {
+    ...payload,
+    draft_spec: normalizeDraftSpec(payload),
+    turns: Array.isArray(payload.turns) ? payload.turns : [],
+    validation: objectRecordOrEmpty(payload.validation),
+    activity_log: Array.isArray(payload.activity_log) ? payload.activity_log : [],
+    approved_models: stringArrayOrEmpty(payload.approved_models),
+    workspace_paths: stringArrayOrEmpty(payload.workspace_paths),
+    companion_profile: objectRecordOrEmpty(payload.companion_profile),
+    draft_notes: Array.isArray(payload.draft_notes)
+      ? payload.draft_notes.filter((note): note is Record<string, unknown> => Boolean(note) && typeof note === 'object' && !Array.isArray(note))
+      : [],
+    plan_runs: Array.isArray(payload.plan_runs) ? payload.plan_runs : [],
+    plan_versions: Array.isArray(payload.plan_versions) ? payload.plan_versions : [],
+    preflight_questions: Array.isArray(payload.preflight_questions) ? payload.preflight_questions : [],
+    preflight_answers: preflightAnswers,
+    repair_questions: Array.isArray(payload.repair_questions) ? payload.repair_questions : [],
+    repair_answers: repairAnswers,
+    repair_issues: Array.isArray(payload.repair_issues) ? payload.repair_issues : [],
+    launch_status: {
+      ready: launchStatus.ready === true,
+      blockers: stringArrayOrEmpty(launchStatus.blockers),
+      summary: stringOrFallback(launchStatus.summary),
+    },
+  };
 }
 
 export function getMissions(): Promise<MissionSummary[]> {
@@ -342,7 +463,7 @@ export function createPlanDraft(payload: {
 }
 
 export function getPlanDraft(id: string): Promise<MissionDraft> {
-  return requestJson<MissionDraft>(`/api/plan/drafts/${encodeURIComponent(id)}`);
+  return requestJson<MissionDraft>(`/api/plan/drafts/${encodeURIComponent(id)}`).then(normalizePlanDraft);
 }
 
 export function getBlackHoleCampaign(id: string): Promise<BlackHoleCampaignState> {

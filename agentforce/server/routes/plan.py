@@ -28,6 +28,84 @@ _active_daemon = None
 _SIMPLE_PLAN_KIND = "simple_plan"
 _BLACK_HOLE_KIND = "black_hole"
 
+BLACK_HOLE_DISABLED_RESPONSE = {
+    "error": "black_hole_disabled",
+    "message": "Black Hole is disabled in Labs settings",
+}
+
+BLACK_HOLE_ROUTE_INVENTORY: tuple[dict[str, str], ...] = (
+    {
+        "surface": "draft_create",
+        "route": "POST /api/plan/drafts",
+        "handler": "_create_draft",
+        "reason": "Can mint draft_kind=black_hole from incoming validation.",
+    },
+    {
+        "surface": "draft_update",
+        "route": "PATCH /api/plan/drafts/{draft_id}/spec",
+        "handler": "_patch_spec",
+        "reason": "Preserves existing black-hole validation when draft spec changes.",
+    },
+    {
+        "surface": "draft_import",
+        "route": "POST /api/plan/drafts/{draft_id}/import-yaml",
+        "handler": "_import_yaml",
+        "reason": "Preserves existing black-hole validation when YAML replaces the draft spec.",
+    },
+    {
+        "surface": "preflight_submit",
+        "route": "POST /api/plan/drafts/{draft_id}/preflight",
+        "handler": "_submit_preflight",
+        "reason": "Advances black-hole drafts out of preflight without queuing a simple plan run.",
+    },
+    {
+        "surface": "repair_submit",
+        "route": "POST /api/plan/drafts/{draft_id}/repair",
+        "handler": "_submit_repair",
+        "reason": "Can resume black-hole campaigns through shared repair submission.",
+    },
+    {
+        "surface": "black_hole_read",
+        "route": "GET /api/plan/drafts/{draft_id}/black-hole",
+        "handler": "_get_black_hole_campaign",
+        "reason": "Reads black-hole draft config and campaign state.",
+    },
+    {
+        "surface": "black_hole_launch",
+        "route": "POST /api/plan/drafts/{draft_id}/black-hole",
+        "handler": "_start_black_hole_campaign",
+        "reason": "Configures and launches the black-hole campaign for a draft.",
+    },
+    {
+        "surface": "black_hole_pause",
+        "route": "POST /api/plan/drafts/{draft_id}/black-hole/pause",
+        "handler": "_pause_black_hole_campaign",
+        "reason": "Pauses an in-flight black-hole campaign.",
+    },
+    {
+        "surface": "black_hole_resume",
+        "route": "POST /api/plan/drafts/{draft_id}/black-hole/resume",
+        "handler": "_resume_black_hole_campaign",
+        "reason": "Resumes a paused or waiting black-hole campaign.",
+    },
+    {
+        "surface": "black_hole_stop",
+        "route": "POST /api/plan/drafts/{draft_id}/black-hole/stop",
+        "handler": "_stop_black_hole_campaign",
+        "reason": "Stops an active black-hole campaign.",
+    },
+    {
+        "surface": "black_hole_repair_submit",
+        "route": "POST /api/plan/drafts/{draft_id}/black-hole/repair",
+        "handler": "_submit_repair",
+        "reason": "Black-hole-specific repair submission path resumes pending campaign state.",
+    },
+)
+
+
+def _black_hole_disabled_response() -> tuple[int, dict]:
+    return 403, dict(BLACK_HOLE_DISABLED_RESPONSE)
+
 
 def _store() -> PlanDraftStore:
     return PlanDraftStore()
@@ -77,11 +155,44 @@ def _enqueue_plan_run(run_id: str) -> None:
     threading.Thread(target=_runner, daemon=True, name=f"agentforce-plan-{run_id}").start()
 
 
+def _build_launch_status(
+    draft: MissionDraftV1,
+    *,
+    plan_runs: list | None = None,
+    plan_versions: list | None = None,
+) -> dict:
+    # Preserve launch semantics from the start route; this status is the
+    # frontend-visible projection of the same backend rule, not a stricter UI gate.
+    blockers: list[str] = []
+
+    if draft.status != "draft":
+        blockers.append(f"Draft status is {draft.status!r}, expected 'draft'")
+    if _draft_kind(draft) != _SIMPLE_PLAN_KIND:
+        blockers.append("black hole drafts cannot launch missions directly")
+    if str(draft.validation.get("preflight_status") or "") == "pending":
+        blockers.append("preflight questions must be answered before launch")
+
+    try:
+        spec = MissionSpec.from_dict(draft.draft_spec)
+        blockers.extend(spec.validate(stage="launch"))
+    except Exception as exc:
+        blockers.append(str(exc))
+
+    summary = blockers[0] if blockers else "Launch window clear. Mission can be started now."
+    return {
+        "ready": not blockers,
+        "blockers": blockers,
+        "summary": summary,
+    }
+
+
 def _draft_payload(draft: MissionDraftV1) -> dict:
     payload = draft.to_dict()
     payload["draft_kind"] = _draft_kind(draft)
-    payload["plan_runs"] = [run.to_dict() for run in _plan_store().list_runs_for_draft(draft.id)]
-    payload["plan_versions"] = [version.to_dict() for version in _plan_store().list_versions_for_draft(draft.id)]
+    plan_runs = _plan_store().list_runs_for_draft(draft.id)
+    plan_versions = _plan_store().list_versions_for_draft(draft.id)
+    payload["plan_runs"] = [run.to_dict() for run in plan_runs]
+    payload["plan_versions"] = [version.to_dict() for version in plan_versions]
     latest_version_id = str(payload.get("validation", {}).get("latest_plan_version_id") or "")
     if latest_version_id:
         version = _plan_store().load_version(latest_version_id)
@@ -108,6 +219,7 @@ def _draft_payload(draft: MissionDraftV1) -> dict:
         "source_version_id": str(repair.get("source_version_id") or ""),
         "gate_reason": str(repair.get("gate_reason") or ""),
     }
+    payload["launch_status"] = _build_launch_status(draft, plan_runs=plan_runs, plan_versions=plan_versions)
     return payload
 
 
@@ -657,22 +769,19 @@ def _start_draft(draft_id: str) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    launch_status = _build_launch_status(draft)
+    if not launch_status["ready"]:
+        blockers = list(launch_status["blockers"] or [])
+        route_level = {
+            f"Draft status is {draft.status!r}, expected 'draft'": 409,
+            "black hole drafts cannot launch missions directly": 409,
+            "preflight questions must be answered before launch": 409,
+        }
+        if blockers and blockers[0] in route_level:
+            return route_level[blockers[0]], {"error": blockers[0], "launch_status": launch_status}
+        return 422, {"errors": blockers, "launch_status": launch_status}
 
-    if draft.status != "draft":
-        return 409, {"error": f"Draft status is {draft.status!r}, expected 'draft'"}
-    if _draft_kind(draft) != _SIMPLE_PLAN_KIND:
-        return 409, {"error": "black hole drafts cannot launch missions directly"}
-    if str(draft.validation.get("preflight_status") or "") == "pending":
-        return 409, {"error": "preflight questions must be answered before launch"}
-
-    try:
-        spec = MissionSpec.from_dict(draft.draft_spec)
-        issues = spec.validate(stage="launch")
-    except Exception as exc:
-        return 422, {"errors": [str(exc)]}
-
-    if issues:
-        return 422, {"errors": issues}
+    spec = MissionSpec.from_dict(draft.draft_spec)
 
     # Crash recovery: if mission_id was already assigned and state file exists, skip re-creation.
     existing_mid = draft.validation.get("mission_id")

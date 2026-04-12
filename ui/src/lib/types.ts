@@ -116,6 +116,13 @@ export interface MissionDraft {
   repair_answers?: Record<string, PreflightAnswer>;
   repair_issues?: RepairIssue[];
   repair_context?: RepairContext | null;
+  launch_status?: LaunchStatus | null;
+}
+
+export interface LaunchStatus {
+  ready: boolean;
+  blockers: string[];
+  summary: string;
 }
 
 export interface PlanStep {
@@ -513,12 +520,22 @@ export interface DefaultCaps {
   max_cost_usd: number;
 }
 
+export interface LabsConfig {
+  black_hole_enabled: boolean;
+  [key: string]: unknown;
+}
+
+export const DEFAULT_LABS_CONFIG: LabsConfig = {
+  black_hole_enabled: false,
+};
+
 export interface AppConfig {
   filesystem: {
     allowed_base_paths: string[];
     default_start_path: string;
   };
   default_caps: DefaultCaps;
+  labs: LabsConfig;
 }
 
 export interface Model {

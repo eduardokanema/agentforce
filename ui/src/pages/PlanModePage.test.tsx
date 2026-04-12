@@ -2,7 +2,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { MissionDraft, Model } from '../lib/types';
+import { DEFAULT_LABS_CONFIG, type MissionDraft, type Model } from '../lib/types';
 import PlanModePage from './PlanModePage';
 
 function flushPromises(): Promise<void> {
@@ -86,6 +86,40 @@ function makeDraft(overrides: Partial<MissionDraft> = {}): MissionDraft {
 
 function makeLaunchReadyDraft(overrides: Partial<MissionDraft> = {}): MissionDraft {
   return makeDraft({
+    launch_status: {
+      ready: true,
+      blockers: [],
+      summary: 'Launch window clear. Mission can be started now.',
+    },
+    plan_runs: [
+      {
+        id: 'run-1',
+        draft_id: 'draft-123',
+        base_revision: 3,
+        head_revision_seen: 3,
+        status: 'completed',
+        trigger_kind: 'follow_up',
+        trigger_message: 'Finalize the plan',
+        created_at: '2026-04-12T00:00:00Z',
+        started_at: '2026-04-12T00:00:00Z',
+        completed_at: '2026-04-12T00:01:00Z',
+        current_step: 'resolver',
+        steps: [
+          {
+            name: 'resolver',
+            status: 'completed',
+            started_at: '2026-04-12T00:00:30Z',
+            completed_at: '2026-04-12T00:01:00Z',
+            summary: 'Resolver approved the final mission draft.',
+          },
+        ],
+        result_version_id: 'version-1',
+        promoted_version_id: 'version-1',
+        error_message: '',
+        changelog: ['Resolver approved the final mission draft.'],
+        cost_usd: 0,
+      },
+    ],
     plan_versions: [
       {
         id: 'version-1',
@@ -184,6 +218,7 @@ describe('PlanModePage', () => {
             max_wall_time_minutes: 60,
             max_cost_usd: 0,
           },
+          labs: { ...DEFAULT_LABS_CONFIG },
         }), {
           headers: { 'Content-Type': 'application/json' },
         });
@@ -263,6 +298,73 @@ describe('PlanModePage', () => {
     });
   });
 
+  it('renders an existing draft from a legacy payload with top-level name and empty draft_spec', async () => {
+    const incompleteDraft = {
+      id: 'draft-123',
+      revision: 3,
+      status: 'draft',
+      name: 'Introduce A New Lab Session In',
+      goal: 'Introduce a new Lab session in settings.',
+      draft_spec: {},
+      turns: [
+        { role: 'assistant', content: 'Draft initialized.' },
+      ],
+      validation: {},
+      activity_log: [],
+      approved_models: [],
+      workspace_paths: ['/workspace/app'],
+      companion_profile: {},
+      draft_notes: [],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/config') {
+        return new Response(JSON.stringify({
+          filesystem: { allowed_base_paths: ['/workspace'], default_start_path: '/workspace' },
+          default_caps: {
+            max_concurrent_workers: 2,
+            max_retries_per_task: 3,
+            max_wall_time_minutes: 60,
+            max_cost_usd: 0,
+          },
+          labs: { ...DEFAULT_LABS_CONFIG },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.startsWith('/api/filesystem')) {
+        return new Response(JSON.stringify({
+          path: '/workspace',
+          entries: [{ name: 'app', path: '/workspace/app', is_dir: true }],
+          parent: null,
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(incompleteDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan/draft-123');
+    await flushPromises();
+
+    expect(container.textContent).toContain('Flight Director Cockpit');
+    expect(container.textContent).toContain('Prompt Follow-up');
+    expect(container.textContent).toContain('Introduce A New Lab Session In');
+
+    root.unmount();
+  });
+
   it('prefers ~/Projects for plan workspace selection and falls back to the allowed root', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -280,6 +382,7 @@ describe('PlanModePage', () => {
             max_wall_time_minutes: 60,
             max_cost_usd: 0,
           },
+          labs: { ...DEFAULT_LABS_CONFIG },
         }), {
           headers: { 'Content-Type': 'application/json' },
         });
@@ -340,6 +443,7 @@ describe('PlanModePage', () => {
             max_wall_time_minutes: 60,
             max_cost_usd: 0,
           },
+          labs: { ...DEFAULT_LABS_CONFIG },
         }), {
           headers: { 'Content-Type': 'application/json' },
         });
@@ -801,6 +905,7 @@ describe('PlanModePage', () => {
             max_wall_time_minutes: 60,
             max_cost_usd: 0,
           },
+          labs: { ...DEFAULT_LABS_CONFIG },
         }), {
           headers: { 'Content-Type': 'application/json' },
         });
@@ -1163,23 +1268,11 @@ describe('PlanModePage', () => {
       reviewer: { agent: 'codex', model: 'claude-haiku-4-5', thinking: 'low' },
     }));
 
-    const launchDraft = makeDraft({
+    const launchDraft = makeLaunchReadyDraft({
       draft_spec: {
         ...makeDraft().draft_spec,
         execution_defaults: undefined,
       },
-      plan_versions: [
-        {
-          id: 'version-1',
-          draft_id: 'draft-123',
-          source_run_id: 'run-1',
-          revision_base: 3,
-          created_at: '2026-04-12T00:00:00Z',
-          draft_spec_snapshot: makeDraft().draft_spec,
-          changelog: ['Resolver approved the final mission draft.'],
-          validation: {},
-        },
-      ],
     });
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -1301,6 +1394,146 @@ describe('PlanModePage', () => {
       root.unmount();
     });
     vi.useRealTimers();
+  });
+
+  it('keeps launch enabled when only older plan runs failed', async () => {
+    const launchDraft = makeLaunchReadyDraft({
+      plan_runs: [
+        {
+          id: 'run-latest',
+          draft_id: 'draft-123',
+          base_revision: 3,
+          head_revision_seen: 3,
+          status: 'completed',
+          trigger_kind: 'follow_up',
+          trigger_message: 'Refine the plan',
+          created_at: '2026-04-12T00:10:00Z',
+          started_at: '2026-04-12T00:10:00Z',
+          completed_at: '2026-04-12T00:11:00Z',
+          current_step: 'resolver',
+          steps: [
+            {
+              name: 'resolver',
+              status: 'completed',
+              started_at: '2026-04-12T00:10:30Z',
+              completed_at: '2026-04-12T00:11:00Z',
+              summary: 'Resolver promoted the reviewed plan.',
+            },
+          ],
+          result_version_id: 'version-1',
+          promoted_version_id: 'version-1',
+          error_message: '',
+          changelog: ['Resolver approved the final mission draft.'],
+          cost_usd: 0,
+        },
+        {
+          id: 'run-older-failed',
+          draft_id: 'draft-123',
+          base_revision: 2,
+          head_revision_seen: 2,
+          status: 'failed',
+          trigger_kind: 'auto',
+          trigger_message: 'Initial pass',
+          created_at: '2026-04-12T00:00:00Z',
+          started_at: '2026-04-12T00:00:00Z',
+          completed_at: '2026-04-12T00:05:00Z',
+          current_step: 'resolver',
+          steps: [
+            {
+              name: 'resolver',
+              status: 'failed',
+              started_at: '2026-04-12T00:04:00Z',
+              completed_at: '2026-04-12T00:05:00Z',
+              summary: 'Older resolver attempt failed.',
+            },
+          ],
+          error_message: 'Older run failed before the final revision.',
+          cost_usd: 0,
+        },
+      ],
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(launchDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const launchButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Launch Mission')) as HTMLButtonElement | undefined;
+    expect(launchButton).toBeTruthy();
+    expect(launchButton?.disabled).toBe(false);
+    expect(container.textContent).toContain('Window clear');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('uses backend launch_status to keep launch blocked', async () => {
+    const blockedDraft = makeLaunchReadyDraft({
+      launch_status: {
+        ready: false,
+        blockers: ['A newer planning run is still in progress.'],
+        summary: 'A newer planning run is still in progress.',
+      },
+      plan_runs: [
+        {
+          id: 'run-latest',
+          draft_id: 'draft-123',
+          base_revision: 3,
+          head_revision_seen: 3,
+          status: 'completed',
+          trigger_kind: 'follow_up',
+          trigger_message: 'Refine the plan',
+          created_at: '2026-04-12T00:10:00Z',
+          steps: [],
+          cost_usd: 0,
+        },
+      ],
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(blockedDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const launchButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Launch Mission')) as HTMLButtonElement | undefined;
+    expect(launchButton).toBeUndefined();
+    expect(container.textContent).toContain('Finalize Review');
+    expect(container.textContent).toContain('Launch Blocked');
+
+    act(() => {
+      root.unmount();
+    });
   });
 
   it('keeps the draft-stage content ordered with inline follow-up on the page', async () => {

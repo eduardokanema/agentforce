@@ -1,6 +1,7 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_LABS_CONFIG } from '../lib/types';
 
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
@@ -62,6 +63,7 @@ describe('SettingsPage', () => {
         max_wall_time_minutes: 60,
         max_cost_usd: 0,
       },
+      labs: { ...DEFAULT_LABS_CONFIG },
     });
     api.updateConfig.mockResolvedValue({
       filesystem: {
@@ -74,6 +76,7 @@ describe('SettingsPage', () => {
         max_wall_time_minutes: 60,
         max_cost_usd: 0,
       },
+      labs: { ...DEFAULT_LABS_CONFIG },
     });
     api.getFilesystemListing.mockImplementation(async (path: string) => {
       if (path === '~/Projects') {
@@ -106,6 +109,7 @@ describe('SettingsPage', () => {
         max_wall_time_minutes: 60,
         max_cost_usd: 0,
       },
+      labs: { ...DEFAULT_LABS_CONFIG },
     });
 
     const container = await renderPage();
@@ -166,6 +170,7 @@ describe('SettingsPage', () => {
         max_wall_time_minutes: 60,
         max_cost_usd: 0,
       },
+      labs: { ...DEFAULT_LABS_CONFIG },
     });
     api.getFilesystemListing.mockImplementation(async (path: string) => {
       if (path === '/workspace') {
@@ -196,6 +201,7 @@ describe('SettingsPage', () => {
         max_wall_time_minutes: 60,
         max_cost_usd: 0,
       },
+      labs: { ...DEFAULT_LABS_CONFIG },
     });
 
     const container = await renderPage();

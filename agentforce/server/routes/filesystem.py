@@ -29,14 +29,7 @@ def get(handler, parts: list[str], query: dict):
         fs = config.get("filesystem", {})
         raw_paths = fs.get("allowed_base_paths", [])
         expanded = [str(Path(p).expanduser().resolve()) for p in raw_paths if p]
-        filesystem_settings = caps_config.load_filesystem_settings()
-        return 200, {
-            "filesystem": {
-                "allowed_base_paths": expanded,
-                "default_start_path": filesystem_settings["default_start_path"],
-            },
-            "default_caps": caps_config.load_caps(),
-        }
+        return 200, caps_config.build_api_config_payload(allowed_base_paths=expanded)
 
     if len(parts) != 2 or parts[1] != "filesystem":
         return 404, {"error": "Not found"}

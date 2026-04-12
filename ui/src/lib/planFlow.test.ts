@@ -212,6 +212,21 @@ describe("derivePlanFlow", () => {
     expect(flow.latestRunIssue).toContain("Intervention required");
   });
 
+  it("handles drafts with missing name and goal fields without crashing", () => {
+    const flow = derivePlanFlow(
+      makeDraft({
+        draft_spec: {
+          ...makeDraft().draft_spec,
+          name: undefined as unknown as string,
+          goal: undefined as unknown as string,
+        },
+      }),
+    );
+
+    expect(flow.currentPhaseId).toBe("draft");
+    expect(flow.phases.find((phase) => phase.id === "briefing")?.summary).toContain("Mission brief configured");
+  });
+
   it("opens the launch window only when a reviewed version exists and blockers are clear", () => {
     const flow = derivePlanFlow(
       makeDraft({

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   configureConnector,
   deleteConnector,
+  getPlanDraft,
   getConnectors,
   getTaskAttempts,
   injectPrompt,
@@ -162,5 +163,37 @@ describe('connectors API client', () => {
       method: 'POST',
       headers: { Accept: 'application/json' },
     });
+  });
+
+  it('normalizes legacy draft payloads with top-level name and empty draft_spec', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        id: 'add391ae-5f8a-43f5-87b5-2240d6ff544c',
+        revision: 4,
+        status: 'draft',
+        name: 'Introduce A New Lab Session In',
+        goal: 'Introduce a new Lab session in settings.',
+        draft_spec: {},
+        turns: [],
+        validation: {},
+        activity_log: [],
+        approved_models: [],
+        workspace_paths: ['/Users/eduardo/Projects/hermes/data/projects/agentforce'],
+        companion_profile: {},
+        draft_notes: [],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const draft = await getPlanDraft('add391ae-5f8a-43f5-87b5-2240d6ff544c');
+
+    expect(draft.draft_spec.name).toBe('Introduce A New Lab Session In');
+    expect(draft.draft_spec.goal).toBe('Introduce a new Lab session in settings.');
+    expect(draft.draft_spec.tasks).toEqual([]);
+    expect(draft.draft_spec.definition_of_done).toEqual([]);
+    expect(draft.draft_spec.caps.max_retries_per_task).toBe(3);
   });
 });
