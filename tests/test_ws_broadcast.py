@@ -11,7 +11,8 @@ from agentforce.core.event_bus import EVENT_BUS
 from agentforce.core.engine import MissionEngine
 from agentforce.core.spec import Caps, MissionSpec, TaskSpec
 from agentforce.memory import Memory
-from agentforce.server.handler import DashboardHandler, _watch_state_dir, serve
+from agentforce.server.handler import DashboardHandler, serve
+from agentforce.server.watchers import _watch_state_dir
 
 
 def make_engine(tmp_path: Path) -> MissionEngine:
@@ -141,7 +142,7 @@ def test_watchdog_broadcasts_mission_list_when_state_files_change(tmp_path, monk
         else:
             stop_event.set()
 
-    monkeypatch.setattr("agentforce.server.handler._time.sleep", fake_sleep)
+    monkeypatch.setattr("agentforce.server.watchers._time.sleep", fake_sleep)
 
     with patch("agentforce.server.ws.broadcast_mission_list") as broadcast_mission_list:
         _watch_state_dir(state_dir=state_dir, stop_event=stop_event, poll_seconds=0.01)

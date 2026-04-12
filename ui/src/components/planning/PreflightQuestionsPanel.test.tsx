@@ -81,7 +81,7 @@ afterEach(() => {
 });
 
 describe("PreflightQuestionsPanel", () => {
-  it("walks one question at a time, shows review, and submits from the final step", () => {
+  it("advances to the next question when an option is selected", () => {
     const onSubmit = vi.fn();
     const onSkip = vi.fn();
     const draft = makeDraft({
@@ -116,14 +116,6 @@ describe("PreflightQuestionsPanel", () => {
       firstAnswer?.querySelector("input")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    const nextButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Next"));
-    expect(nextButton).toBeTruthy();
-
-    act(() => {
-      nextButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
     expect(container.textContent).toContain("Question 2 of 2");
     expect(container.textContent).toContain("What output should be recorded?");
     expect(container.textContent).not.toContain("How should the mission be verified?");
@@ -134,14 +126,6 @@ describe("PreflightQuestionsPanel", () => {
 
     act(() => {
       secondAnswer?.querySelector("input")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    const reviewButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.trim() === "Next");
-    expect(reviewButton).toBeTruthy();
-
-    act(() => {
-      reviewButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(container.textContent).toContain("Review");
@@ -230,14 +214,6 @@ describe("PreflightQuestionsPanel", () => {
 
     act(() => {
       firstAnswer?.querySelector("input")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    const reviewButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.trim() === "Next");
-    expect(reviewButton).toBeTruthy();
-
-    act(() => {
-      reviewButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(container.textContent).toContain("Review");

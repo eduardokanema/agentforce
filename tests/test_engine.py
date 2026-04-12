@@ -11,7 +11,22 @@ from agentforce.core.spec import Caps, ExecutionConfig, ExecutionProfile, Missio
 from agentforce.memory import Memory
 
 
-def make_engine(tmp_path, task: TaskSpec, worker_model: str = "mission-worker", reviewer_model: str = "mission-reviewer"):
+@pytest.fixture(autouse=True)
+def mock_connectors(monkeypatch):
+    monkeypatch.setattr("agentforce.connectors.claude.available", lambda: True)
+    monkeypatch.setattr("agentforce.connectors.gemini.available", lambda: False)
+    monkeypatch.setattr("agentforce.connectors.opencode.available", lambda: False)
+
+
+def make_engine(tmp_path, task: TaskSpec, worker_model: str = "mission-worker", reviewer_model: str = "mission-reviewer", monkeypatch=None):
+    if monkeypatch:
+        from agentforce.server import model_catalog
+        from agentforce.server.model_catalog import ProfileNormalizationResult
+        monkeypatch.setattr(
+            model_catalog,
+            "normalize_execution_profile",
+            lambda profile: ProfileNormalizationResult(profile=profile, valid=True, repaired=False)
+        )
     spec = MissionSpec(
         name="Test Mission",
         goal="Test goal",
@@ -44,10 +59,11 @@ def test_task_model_from_dict_defaults_to_none():
     assert task.model is None
 
 
-def test_per_task_model_overrides_worker_model(tmp_path):
+def test_per_task_model_overrides_worker_model(tmp_path, monkeypatch):
     engine = make_engine(
         tmp_path,
         TaskSpec(id="01", title="Task", description="Do it", model="claude-haiku-4-5", acceptance_criteria=["assert result == 'ok'"]),
+        monkeypatch=monkeypatch,
     )
 
     actions = engine.tick()
@@ -57,11 +73,12 @@ def test_per_task_model_overrides_worker_model(tmp_path):
     assert worker_actions[0].model == "claude-haiku-4-5"
 
 
-def test_task_model_uses_mission_default_when_not_set(tmp_path):
+def test_task_model_uses_mission_default_when_not_set(tmp_path, monkeypatch):
     engine = make_engine(
         tmp_path,
         TaskSpec(id="01", title="Task", description="Do it", acceptance_criteria=["assert result == 'ok'"]),
         worker_model="mission-default-model",
+        monkeypatch=monkeypatch,
     )
 
     actions = engine.tick()
@@ -71,11 +88,12 @@ def test_task_model_uses_mission_default_when_not_set(tmp_path):
     assert worker_actions[0].model == "mission-default-model"
 
 
-def test_per_task_model_does_not_override_reviewer_model(tmp_path):
+def test_per_task_model_does_not_override_reviewer_model(tmp_path, monkeypatch):
     engine = make_engine(
         tmp_path,
         TaskSpec(id="01", title="Task", description="Do it", model="claude-haiku-4-5", acceptance_criteria=["assert result == 'ok'"]),
         reviewer_model="mission-reviewer-default",
+        monkeypatch=monkeypatch,
     )
 
     engine.tick()
@@ -108,7 +126,14 @@ def test_outcome_memory_truncation_uses_2000_chars(tmp_path):
     assert stored_feedback == feedback[:2000]
 
 
-def test_launch_rejects_worker_execution_without_model(tmp_path):
+def test_launch_rejects_worker_execution_without_model(tmp_path, monkeypatch):
+    from agentforce.server import model_catalog
+    from agentforce.server.model_catalog import ProfileNormalizationResult
+    monkeypatch.setattr(
+        model_catalog,
+        "normalize_execution_profile",
+        lambda profile: ProfileNormalizationResult(profile=profile, valid=profile.configured(), repaired=False)
+    )
     spec = MissionSpec.from_dict({
         "name": "Execution Validation",
         "goal": "Reject invalid execution profiles at launch",
@@ -213,7 +238,11 @@ def test_resume_uses_persisted_execution_settings_not_new_launch_defaults(tmp_pa
     assert reviewer.model == "stored-reviewer-model"
 
 
-def test_launch_defaults_fill_explicit_worker_runtime_fallback_fields(tmp_path):
+def test_launch_defaults_fill_explicit_worker_runtime_fallback_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr("agentforce.connectors.claude.available", lambda: False)
+    monkeypatch.setattr("agentforce.connectors.gemini.available", lambda: False)
+    monkeypatch.setattr("agentforce.connectors.opencode.available", lambda: True)
+
     spec = MissionSpec(
         name="Fallback execution",
         goal="Fill fallback values",
@@ -268,7 +297,11 @@ def test_runtime_fallback_defaults_match_detected_agent(tmp_path, monkeypatch):
     assert engine.state.execution_defaults.reviewer.model == "auto"
 
 
-def test_change_default_models_pins_started_tasks_and_updates_pending_defaults(tmp_path):
+def test_change_default_models_pins_started_tasks_and_updates_pending_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr("agentforce.connectors.claude.available", lambda: True)
+    monkeypatch.setattr("agentforce.connectors.gemini.available", lambda: False)
+    monkeypatch.setattr("agentforce.connectors.opencode.available", lambda: False)
+
     spec = MissionSpec(
         name="Default model update",
         goal="Update pending task defaults",

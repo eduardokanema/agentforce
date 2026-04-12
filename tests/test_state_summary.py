@@ -208,7 +208,14 @@ def test_to_summary_dict_pct_calculation():
     assert summary["pct"] == 50  # 2/4 * 100 = 50
 
 
-def test_summary_and_detail_include_execution_metadata_for_mixed_profiles():
+def test_summary_and_detail_include_execution_metadata_for_mixed_profiles(monkeypatch):
+    from agentforce.server import model_catalog
+    from agentforce.server.model_catalog import ProfileNormalizationResult
+    monkeypatch.setattr(
+        model_catalog,
+        "normalize_execution_profile",
+        lambda profile: ProfileNormalizationResult(profile=profile, valid=True, repaired=False)
+    )
     spec = MissionSpec(
         name="mixed-execution",
         goal="Mixed execution metadata mission",

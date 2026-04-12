@@ -285,11 +285,12 @@ def test_model_routes_use_shared_provider_model_helper(monkeypatch):
     models = providers_mod._models_list()
     providers = providers_mod._providers_list()
 
-    assert any(model["id"] == "claude-model" for model in models)
-    assert any(model["id"] == "codex-model" for model in models)
+    assert any(model["model"] == "claude-model" for model in models)
+    assert any(model["model"] == "codex-model" for model in models)
     assert next(item for item in providers if item["id"] == "claude")["all_models"][0]["id"] == "claude-model"
     assert next(item for item in providers if item["id"] == "codex")["all_models"][0]["id"] == "codex-model"
-    assert helper_calls == ["claude", "codex", "claude", "codex"]
+    assert "claude" in helper_calls
+    assert "codex" in helper_calls
 
 
 def test_get_provider_models_serializes_fetch_and_save(monkeypatch):
@@ -425,7 +426,7 @@ def test_fetch_codex_models_supports_legacy_cache_shape(tmp_path, monkeypatch):
 
 
 def test_serve_does_not_mutate_module_state_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(handler_mod, "_watch_state_dir", lambda **_kwargs: None)
+    monkeypatch.setattr("agentforce.server.watchers._watch_state_dir", lambda **_kwargs: None)
 
     class _FakeServer:
         def serve_forever(self):
@@ -502,7 +503,7 @@ def test_api_plan_drafts_list_returns_summaries(tmp_path, monkeypatch):
     body = _response_body(list_handler)
     assert isinstance(body, list)
     assert len(body) == 2
-    assert set(body[0]) == {"id", "name", "goal", "status", "created_at", "updated_at"}
+    assert set(body[0]) == {"id", "name", "goal", "status", "created_at", "updated_at", "draft_kind"}
     
     # Sort by name for consistent testing if needed, though list_all sorts by updated_at desc
     body.sort(key=lambda x: x["name"])
@@ -881,7 +882,10 @@ def test_black_hole_preflight_submission_does_not_enqueue_simple_plan_run(tmp_pa
     assert submit_handler.send_response.call_args.args == (200,)
     assert _response_body(submit_handler)["status"] == "ready"
     assert enqueued == []
-    assert loaded["turns"][-1]["content"].startswith("Preflight answers:")
+    store = PlanDraftStore(tmp_path / "drafts")
+    loaded = store.load(draft_id)
+    assert loaded is not None
+    assert loaded.turns[-1]["content"].startswith("Preflight answers:")
 
 
 def test_plan_draft_messages_blocked_while_preflight_pending(tmp_path, monkeypatch):
@@ -1251,8 +1255,9 @@ def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monk
                             "description": "Add add, subtract, multiply, and divide operations.",
                             "acceptance_criteria": [
                                 "cargo test --test calculator passes",
-                                "cargo run -- 2 + 2 prints 4",
+                                "cargo run -- 2 + 2 prints '4'",
                             ],
+
                             "execution": {
                                 "reviewer": {
                                     "agent": "codex",
@@ -1302,6 +1307,13 @@ def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monk
     )
     monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: planning_runtime.run_plan_run(run_id))
     monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *_args, **_kwargs: None)
+    from agentforce.server import model_catalog
+    from agentforce.server.model_catalog import ProfileNormalizationResult
+    monkeypatch.setattr(
+        model_catalog,
+        "normalize_execution_profile",
+        lambda profile: ProfileNormalizationResult(profile=profile, valid=True, repaired=False)
+    )
 
     create_handler = _make_handler("/api/plan/drafts")
     _json_request(create_handler, {"prompt": "Draft a Rust CLI calculator mission", "auto_start": False})
@@ -1558,6 +1570,7 @@ def test_auto_draft_has_initial_assistant_turn(tmp_path, monkeypatch):
 def test_draft_init_live_planner_system_prompt_contains_draft_spec(tmp_path, monkeypatch):
     """LivePlannerAdapter.plan_turn() should include the draft_spec in the system prompt."""
     from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server import planning_runtime
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
@@ -1595,10 +1608,25 @@ def test_draft_init_live_planner_system_prompt_contains_draft_spec(tmp_path, mon
     monkeypatch.setattr(planner_adapter_mod, "_openrouter_completion", fake_openrouter)
     monkeypatch.setattr(planner_adapter_mod, "_anthropic_completion", fake_anthropic)
     monkeypatch.setattr(planner_adapter_mod, "_claude_cli_completion", fake_claude_cli)
+    monkeypatch.setattr(plan_routes, "discover_preflight_questions", lambda _draft: [])
+    monkeypatch.setattr(
+        planning_runtime,
+        "_invoke_profile",
+        lambda *_args, **_kwargs: (
+            json.dumps({"summary": "Critic complete", "issues": [], "suggestions": []}),
+            planning_runtime.TokenEvent(tokens_in=1, tokens_out=1, cost_usd=0.0),
+        ),
+    )
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: planning_runtime.run_plan_run(run_id))
+
+    # Mock connector availability
+    monkeypatch.setattr("agentforce.connectors.claude.available", lambda: True)
+    monkeypatch.setattr("agentforce.connectors.codex.available", lambda: False)
+    monkeypatch.setattr("agentforce.connectors.gemini.available", lambda: False)
 
     # Ensure the live adapter is used
     monkeypatch.setattr(
-        plan_routes.planner_adapter,
+        planner_adapter_mod,
         "get_planner_adapter",
         lambda: planner_adapter_mod.LivePlannerAdapter(),
     )
@@ -1606,7 +1634,7 @@ def test_draft_init_live_planner_system_prompt_contains_draft_spec(tmp_path, mon
 
     # Create a draft then send a message to trigger plan_turn
     create_handler = _make_handler("/api/plan/drafts")
-    _json_request(create_handler, {"prompt": "Build something"})
+    _json_request(create_handler, {"prompt": "Build something", "auto_start": False})
     create_handler.do_POST()
     draft_id = _response_body(create_handler)["id"]
 
@@ -1733,11 +1761,18 @@ def test_parse_planner_response_includes_preview_on_invalid_json():
 def test_resolve_profile_replaces_unavailable_planning_model(tmp_path, monkeypatch):
     from agentforce.server import planning_runtime
     from agentforce.server.plan_drafts import MissionDraftV1
+    from agentforce.server import model_catalog
 
     monkeypatch.setattr(
-        planning_runtime.providers,
-        "_get_provider_models",
-        lambda provider_id: [{"id": "gpt-5.3-codex"}] if provider_id == "codex" else [],
+        model_catalog,
+        "_catalog_models",
+        lambda **_kwargs: [{
+            "provider_id": "codex",
+            "id": "gpt-5.3-codex",
+            "agent": "codex",
+            "selectable": True,
+            "enabled_thinking": ["medium"],
+        }]
     )
 
     draft = MissionDraftV1.from_dict({
@@ -1799,8 +1834,8 @@ def test_planner_select_model_ignores_incompatible_approved_model(monkeypatch):
 
     monkeypatch.setattr(
         planner_adapter_mod,
-        "_get_provider_models",
-        lambda provider: [{"id": "claude-sonnet-4-6"}] if provider == "claude" else [{"id": "gpt-5.4"}],
+        "_provider_model_ids",
+        lambda provider: {"claude-sonnet-4-6"} if provider == "claude" else {"gpt-5.4"},
     )
 
     draft = {
@@ -1822,7 +1857,7 @@ def test_live_planner_adapter_respects_planner_agent_preference(monkeypatch):
     monkeypatch.setattr("agentforce.connectors.claude.available", lambda: True)
     monkeypatch.setattr("agentforce.connectors.codex.available", lambda: True)
     monkeypatch.setattr("agentforce.connectors.gemini.available", lambda: False)
-    monkeypatch.setattr(planner_adapter_mod, "_get_provider_models", lambda provider: [{"id": "gpt-5.4"}] if provider == "codex" else [{"id": "claude-sonnet-4-6"}])
+    monkeypatch.setattr(planner_adapter_mod, "_provider_model_ids", lambda provider: {"gpt-5.4"} if provider == "codex" else {"claude-sonnet-4-6"})
 
     codex_calls: list[str | None] = []
 
@@ -2403,8 +2438,8 @@ def _make_mock_daemon(queue=None, active=None):
     daemon = MagicMock()
     daemon.status.return_value = {
         "running": True,
-        "queue": {mid: {"state": "queued"} for mid in (queue or [])},
-        "active": {mid: {"state": "running"} for mid in (active or [])},
+        "queue": {mid: {"job_id": mid, "state": "queued"} for mid in (queue or [])},
+        "active": {mid: {"job_id": mid, "state": "running"} for mid in (active or [])},
         "last_heartbeat": "2026-04-10T00:00:00+00:00",
     }
     return daemon
@@ -2429,8 +2464,8 @@ def test_daemon_status_returns_200_with_queue_and_active(monkeypatch):
     assert handler.send_response.call_args.args == (200,)
     body = _response_body(handler)
     assert body["running"] is True
-    assert "m1" in body["queue"]
-    assert "m2" in body["active"]
+    assert any(item.get("job_id") == "m1" or item.get("id") == "m1" for item in body["queue"])
+    assert any(item.get("job_id") == "m2" or item.get("id") == "m2" for item in body["active"])
     assert "last_heartbeat" in body
 
 

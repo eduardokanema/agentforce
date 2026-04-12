@@ -165,7 +165,7 @@ class TestOpencodeConnector:
         mock_proc.returncode = 0
         mock_proc.stderr.read.return_value = ""
 
-        log_file = tmp_path / "stream.log"
+        log_file = tmp_path / "m_t.log"
         with patch("subprocess.Popen", return_value=mock_proc):
             oc_mod.run("x", str(tmp_path), stream_path=log_file)
 
@@ -440,12 +440,11 @@ class TestAutonomousDefaults:
                 with patch.object(oc_mod, "available", return_value=True):
                     assert autonomous._detect_agent() == "opencode"
 
-    def test_detect_agent_raises_when_all_missing(self):
+    def test_detect_agent_falls_back_to_opencode_when_all_missing(self):
         with patch.object(gm_mod, "available", return_value=False):
             with patch.object(cl_mod, "available", return_value=False):
                 with patch.object(oc_mod, "available", return_value=False):
-                    with pytest.raises(SystemExit):
-                        autonomous._detect_agent()
+                    assert autonomous._detect_agent() == "opencode"
 
     def test_run_agent_dispatches_to_opencode_connector(self, tmp_path):
         from agentforce.core.token_event import TokenEvent
@@ -821,7 +820,7 @@ class TestCodexConnector:
         mock_proc.returncode = 0
         mock_proc.stderr.read.return_value = ""
 
-        log_file = tmp_path / "stream.log"
+        log_file = tmp_path / "m_t.log"
         with patch("subprocess.Popen", return_value=mock_proc):
             cx_mod.run("x", str(tmp_path), stream_path=log_file)
 
@@ -838,7 +837,7 @@ class TestCodexConnector:
         mock_proc.returncode = 0
         mock_proc.stderr.read.return_value = ""
 
-        log_file = tmp_path / "stream.log"
+        log_file = tmp_path / "m_t.log"
         with patch("subprocess.Popen", return_value=mock_proc):
             cx_mod.run("x", str(tmp_path), stream_path=log_file)
 

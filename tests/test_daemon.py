@@ -770,7 +770,7 @@ def test_e2e_draft_to_daemon_execution(tmp_path, monkeypatch):
     # Step 8: GET /api/daemon/status shows the mission
     code, status_body = daemon_routes.get(None, ["", "api", "daemon"], {})
     assert code == 200
-    assert mission_id in status_body["queue"], \
+    assert any(item.get("mission_id") == mission_id or item.get("job_id") == mission_id for item in status_body["queue"]), \
         f"Expected {mission_id!r} in daemon status queue: {status_body['queue']}"
 
 

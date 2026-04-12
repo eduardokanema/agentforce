@@ -19,6 +19,7 @@ import ValidationBoard from "../components/planning/ValidationBoard";
 import {
   createPlanDraft,
   getModels,
+  getMission,
   getPlanDraft,
   patchPlanDraftSpec,
   retryPlanRun,
@@ -72,6 +73,9 @@ const PLANNING_STEP_LABELS: Record<PlanningSubstepId, string> = {
 const PLANMODE_PERSISTED_WORKSPACES_KEY = "agentforce-planmode-workspaces-v1";
 const PLANMODE_LEGACY_PROFILES_KEY = "agentforce-planmode-profiles-v1";
 const PLANMODE_PERSISTED_PROFILES_KEY = "agentforce-planmode-profiles-v2";
+const PLANMODE_PERSISTED_EXECUTION_DEFAULTS_KEY = "agentforce-planmode-execution-defaults-v1";
+const MISSION_LAUNCH_POLL_ATTEMPTS = 12;
+const MISSION_LAUNCH_POLL_DELAY_MS = 500;
 
 function readStoredJson<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") {
@@ -127,6 +131,101 @@ function normalizePlanningProfiles(value: unknown): Record<string, ExecutionProf
     acc[key] = normalizePlanningProfile(source[key]);
     return acc;
   }, {});
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function LaunchSplashScreen({
+  message,
+}: {
+  message: string;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.16),transparent_28%),rgba(4,8,14,0.88)] backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Launching mission"
+    >
+      <div className="relative w-full max-w-xl px-6">
+        <div className="absolute inset-0 rounded-[2rem] bg-cyan/10 blur-3xl" />
+        <div className="relative overflow-hidden rounded-[2rem] border border-cyan/20 bg-[linear-gradient(180deg,rgba(10,16,28,0.97),rgba(6,10,20,0.97))] px-8 py-10 text-center shadow-[0_30px_120px_rgba(0,0,0,0.55)]">
+          <div className="mx-auto flex h-28 w-28 items-center justify-center">
+            <div className="absolute h-28 w-28 rounded-full border border-cyan/20 animate-ping" />
+            <div className="absolute h-20 w-20 rounded-full border border-cyan/30 animate-pulse" />
+            <div className="h-10 w-10 rounded-full bg-cyan/70 shadow-[0_0_45px_rgba(34,211,238,0.8)]" />
+          </div>
+          <div className="mt-6 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan">
+            Mission Launch
+          </div>
+          <h2 className="mt-3 text-[clamp(1.6rem,2.3vw,2.1rem)] font-semibold tracking-[-0.04em] text-text">
+            Starting mission
+          </h2>
+          <p className="mt-4 text-sm leading-7 text-dim">
+            {message}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function normalizeExecutionDefaultProfile(value: unknown): ExecutionProfile {
+  if (!value || typeof value !== "object") {
+    return { agent: "codex", model: "", thinking: "medium" };
+  }
+  const candidate = value as Record<string, unknown>;
+  const agent = typeof candidate.agent === "string" && candidate.agent.trim() !== ""
+    ? candidate.agent
+    : "codex";
+  const model = typeof candidate.model === "string" ? candidate.model : "";
+  const thinking = typeof candidate.thinking === "string" && candidate.thinking.trim() !== ""
+    ? candidate.thinking
+    : "medium";
+  return { agent, model, thinking };
+}
+
+function normalizeExecutionDefaults(value: unknown): { worker: ExecutionProfile; reviewer: ExecutionProfile } {
+  const candidate = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    worker: normalizeExecutionDefaultProfile(candidate.worker),
+    reviewer: normalizeExecutionDefaultProfile(candidate.reviewer),
+  };
+}
+
+function hasExecutionDefaultModel(profile: ExecutionProfile | null | undefined): boolean {
+  return typeof profile?.model === "string" && profile.model.trim() !== "";
+}
+
+function draftNeedsExecutionDefaultHydration(draft: MissionDraft): boolean {
+  return !hasExecutionDefaultModel(draft.draft_spec.execution_defaults?.worker)
+    || !hasExecutionDefaultModel(draft.draft_spec.execution_defaults?.reviewer);
+}
+
+function hydrateDraftExecutionDefaults(
+  draft: MissionDraft,
+  persistedDefaults: { worker: ExecutionProfile; reviewer: ExecutionProfile },
+): { draft: MissionDraft; hydrated: boolean } {
+  const currentDefaults = draft.draft_spec.execution_defaults ?? {};
+  const nextDefaults = {
+    worker: hasExecutionDefaultModel(currentDefaults.worker) ? currentDefaults.worker : persistedDefaults.worker,
+    reviewer: hasExecutionDefaultModel(currentDefaults.reviewer) ? currentDefaults.reviewer : persistedDefaults.reviewer,
+  };
+  const hydrated = nextDefaults.worker !== currentDefaults.worker || nextDefaults.reviewer !== currentDefaults.reviewer;
+  if (!hydrated) {
+    return { draft, hydrated: false };
+  }
+  return {
+    draft: updateDraftSpec(draft, {
+      ...draft.draft_spec,
+      execution_defaults: nextDefaults,
+    }),
+    hydrated: true,
+  };
 }
 
 function getConflictMessage(caught: unknown): string | null {
@@ -954,12 +1053,14 @@ function EngineeringControls({
 function PhaseViewport({
   selectedPhase,
   draft,
+  models,
   substeps,
   retryingRunId,
   loadingModels,
   conflictMessage,
   summaryIssues,
   advisoryIssues,
+  savingDraft,
   preflightAnswers,
   submittingPreflight,
   repairAnswers,
@@ -978,15 +1079,19 @@ function PhaseViewport({
   onFollowUpChange,
   onFollowUpSend,
   onOpenSupportPanel,
+  onWorkerProfileChange,
+  onReviewerProfileChange,
 }: {
   selectedPhase: CockpitPhaseId;
   draft: MissionDraft | null;
+  models: Model[];
   substeps: ReturnType<typeof derivePlanFlow>["substeps"];
   retryingRunId: string | null;
   loadingModels: boolean;
   conflictMessage: string | null;
   summaryIssues: string[];
   advisoryIssues: string[];
+  savingDraft: boolean;
   preflightAnswers: Record<string, PreflightAnswer>;
   submittingPreflight: boolean;
   repairAnswers: Record<string, PreflightAnswer>;
@@ -1005,6 +1110,8 @@ function PhaseViewport({
   onFollowUpChange: (value: string) => void;
   onFollowUpSend: () => void;
   onOpenSupportPanel: (panel: SupportPanelId) => void;
+  onWorkerProfileChange: (value: string) => void;
+  onReviewerProfileChange: (value: string) => void;
 }) {
   const [selectedOrbitStepId, setSelectedOrbitStepId] = useState<PlanningSubstepId | null>(null);
 
@@ -1441,6 +1548,23 @@ function PhaseViewport({
           </div>
           <div className="space-y-4">
             <div className="rounded-xl border border-border bg-surface px-4 py-4">
+              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Mission Defaults</div>
+              <p className="mt-2 text-sm leading-6 text-dim">
+                Launch uses these Worker and Reviewer profiles. If this draft had no defaults yet, the last-used pair is preloaded here.
+              </p>
+              <div className="mt-4">
+                <ExecutionProfileControls
+                  draft={draft}
+                  options={models}
+                  onWorkerProfileChange={onWorkerProfileChange}
+                  onReviewerProfileChange={onReviewerProfileChange}
+                />
+              </div>
+              <div className="mt-3 text-[11px] text-dim">
+                {savingDraft ? "Saving mission defaults..." : "Mission defaults stay attached to this draft before launch."}
+              </div>
+            </div>
+            <div className="rounded-xl border border-border bg-surface px-4 py-4">
               <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Launch Telemetry</div>
               <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-dim">
                 <span className="rounded-full border border-border bg-card px-3 py-1">
@@ -1533,6 +1657,11 @@ export default function PlanModePage() {
       ),
     ),
   );
+  const [persistedExecutionDefaults, setPersistedExecutionDefaults] = useState<{ worker: ExecutionProfile; reviewer: ExecutionProfile }>(
+    normalizeExecutionDefaults(
+      readStoredJson<Record<string, unknown>>(PLANMODE_PERSISTED_EXECUTION_DEFAULTS_KEY, {}),
+    ),
+  );
   const [draft, setDraft] = useState<MissionDraft | null>(null);
   const [followUpMessage, setFollowUpMessage] = useState("");
   const [liveEvents, setLiveEvents] = useState<PlannerStreamEventView[]>([]);
@@ -1546,10 +1675,12 @@ export default function PlanModePage() {
   const [savingDraft, setSavingDraft] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [launching, setLaunching] = useState(false);
+  const [launchSplashMessage, setLaunchSplashMessage] = useState("Preparing mission launch sequence...");
   const [submittingPreflight, setSubmittingPreflight] = useState(false);
   const [preflightAnswers, setPreflightAnswers] = useState<Record<string, PreflightAnswer>>({});
   const [repairAnswers, setRepairAnswers] = useState<Record<string, PreflightAnswer>>({});
   const [submittingRepair, setSubmittingRepair] = useState(false);
+  const [pendingExecutionDefaultPersistence, setPendingExecutionDefaultPersistence] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
@@ -1562,7 +1693,9 @@ export default function PlanModePage() {
         navigate(`/black-hole/${nextDraftId}`, { replace: true });
         return;
       }
-      setDraft(loaded);
+      const hydrated = hydrateDraftExecutionDefaults(loaded, persistedExecutionDefaults);
+      setDraft(hydrated.draft);
+      setPendingExecutionDefaultPersistence(hydrated.hydrated && draftNeedsExecutionDefaultHydration(loaded));
       setStreaming(planningBusy(latestRun(loaded)));
       setPreflightAnswers(loaded.preflight_answers ?? {});
       setRepairAnswers(loaded.repair_answers ?? {});
@@ -1614,7 +1747,7 @@ export default function PlanModePage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [persistedExecutionDefaults]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1637,12 +1770,32 @@ export default function PlanModePage() {
   }, [initialPlanningProfiles]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      PLANMODE_PERSISTED_EXECUTION_DEFAULTS_KEY,
+      JSON.stringify(persistedExecutionDefaults),
+    );
+  }, [persistedExecutionDefaults]);
+
+  useEffect(() => {
+    if (!draft || !hasExecutionDefaultModel(draft.draft_spec.execution_defaults?.worker) || !hasExecutionDefaultModel(draft.draft_spec.execution_defaults?.reviewer)) {
+      return;
+    }
+    setPersistedExecutionDefaults(
+      normalizeExecutionDefaults(draft.draft_spec.execution_defaults),
+    );
+  }, [draft]);
+
+  useEffect(() => {
     if (!draftId) {
       setDraft(null);
       setLiveEvents([]);
       setAutoFollowPhase(true);
       setSelectedPhase("briefing");
       setActiveSupportPanel(null);
+      setPendingExecutionDefaultPersistence(false);
       return;
     }
     void loadDraft(draftId);
@@ -1705,9 +1858,12 @@ export default function PlanModePage() {
     setDraft((current) => (current ? updater(current) : current));
   };
 
-  const persistDraftSpec = async (): Promise<void> => {
+  const persistDraftSpec = async (
+    nextDraftSpec?: MissionSpec,
+    nextValidation?: MissionDraft["validation"],
+  ): Promise<boolean> => {
     if (!draft) {
-      return;
+      return false;
     }
     setSavingDraft(true);
     setConflictMessage(null);
@@ -1716,10 +1872,12 @@ export default function PlanModePage() {
       const response = await patchPlanDraftSpec(
         draft.id,
         draft.revision,
-        draft.draft_spec,
-        draft.validation,
+        nextDraftSpec ?? draft.draft_spec,
+        nextValidation ?? draft.validation,
       );
       await loadDraft(response.id);
+      setPendingExecutionDefaultPersistence(false);
+      return true;
     } catch (caught) {
       const conflict = getConflictMessage(caught);
       if (conflict) {
@@ -1730,6 +1888,7 @@ export default function PlanModePage() {
           caught instanceof Error ? caught.message : "Failed to save draft.",
         );
       }
+      return false;
     } finally {
       setSavingDraft(false);
     }
@@ -1818,9 +1977,34 @@ export default function PlanModePage() {
       return;
     }
     setLaunching(true);
+    setLaunchSplashMessage("Preparing mission launch sequence...");
     setPageError(null);
     try {
+      if (pendingExecutionDefaultPersistence) {
+        setLaunchSplashMessage("Saving mission defaults before launch...");
+        const saved = await persistDraftSpec(draft.draft_spec, draft.validation);
+        if (!saved) {
+          return;
+        }
+      }
       const response = await startPlanDraft(draft.id);
+      for (let attempt = 0; attempt < MISSION_LAUNCH_POLL_ATTEMPTS; attempt += 1) {
+        setLaunchSplashMessage(
+          attempt === 0
+            ? "Mission created. Waiting for Mission Control to bring it online..."
+            : `Mission created. Waiting for Mission Control to bring it online... (${attempt + 1}/${MISSION_LAUNCH_POLL_ATTEMPTS})`,
+        );
+        try {
+          await getMission(response.mission_id);
+          navigate(`/mission/${response.mission_id}`);
+          return;
+        } catch {
+          if (attempt === MISSION_LAUNCH_POLL_ATTEMPTS - 1) {
+            throw new Error("Mission launch is taking longer than expected. Please retry from Mission Control.");
+          }
+          await sleep(MISSION_LAUNCH_POLL_DELAY_MS);
+        }
+      }
       navigate(`/mission/${response.mission_id}`);
     } catch (caught) {
       setPageError(
@@ -1828,6 +2012,7 @@ export default function PlanModePage() {
       );
     } finally {
       setLaunching(false);
+      setLaunchSplashMessage("Preparing mission launch sequence...");
     }
   };
 
@@ -1962,23 +2147,20 @@ export default function PlanModePage() {
     if (!profile) {
       return;
     }
-    updateCurrentDraft((current) =>
-      updateDraftSpec(current, {
-        ...current.draft_spec,
-        execution_defaults: {
-          ...current.draft_spec.execution_defaults,
-          worker: profile,
-          reviewer: current.draft_spec.execution_defaults?.reviewer ?? {
-            agent: "codex",
-            thinking: "medium",
-            model:
-              current.draft_spec.execution_defaults?.reviewer?.model ??
-              models[0]?.id ??
-              "",
-          },
-        },
-      }),
-    );
+    if (!draft) {
+      return;
+    }
+    const nextDraftSpec = {
+      ...draft.draft_spec,
+      execution_defaults: {
+        ...draft.draft_spec.execution_defaults,
+        worker: profile,
+        reviewer: draft.draft_spec.execution_defaults?.reviewer ?? persistedExecutionDefaults.reviewer,
+      },
+    };
+    setPendingExecutionDefaultPersistence(true);
+    updateCurrentDraft((current) => updateDraftSpec(current, nextDraftSpec));
+    void persistDraftSpec(nextDraftSpec, draft.validation);
   };
   const handleReviewerProfileChange = (value: string): void => {
     const selected = models.find((model) => model.id === value);
@@ -1986,23 +2168,20 @@ export default function PlanModePage() {
     if (!profile) {
       return;
     }
-    updateCurrentDraft((current) =>
-      updateDraftSpec(current, {
-        ...current.draft_spec,
-        execution_defaults: {
-          ...current.draft_spec.execution_defaults,
-          worker: current.draft_spec.execution_defaults?.worker ?? {
-            agent: "codex",
-            thinking: "medium",
-            model:
-              current.draft_spec.execution_defaults?.worker?.model ??
-              models[0]?.id ??
-              "",
-          },
-          reviewer: profile,
-        },
-      }),
-    );
+    if (!draft) {
+      return;
+    }
+    const nextDraftSpec = {
+      ...draft.draft_spec,
+      execution_defaults: {
+        ...draft.draft_spec.execution_defaults,
+        worker: draft.draft_spec.execution_defaults?.worker ?? persistedExecutionDefaults.worker,
+        reviewer: profile,
+      },
+    };
+    setPendingExecutionDefaultPersistence(true);
+    updateCurrentDraft((current) => updateDraftSpec(current, nextDraftSpec));
+    void persistDraftSpec(nextDraftSpec, draft.validation);
   };
 
   const toggleSupportPanel = (panel: SupportPanelId): void => {
@@ -2015,7 +2194,7 @@ export default function PlanModePage() {
           title: "Edit Mission",
           description: "Mission summary, task sequencing, and execution defaults live here when you need to revise the plan.",
           label: "Edit mission panel",
-          mode: "drawer" as const,
+          mode: "modal" as const,
         },
         transcript: {
           title: "Planner Transcript",
@@ -2031,7 +2210,7 @@ export default function PlanModePage() {
         },
       }[activeSupportPanel]
     : null;
-  const supportDrawerOpen = activeSupportPanel === "edit" || activeSupportPanel === "transcript";
+  const supportDrawerOpen = activeSupportPanel === "transcript";
 
   const supportPanelContent = !draft || !activeSupportPanel ? null : (
     activeSupportPanel === "edit" ? (
@@ -2317,12 +2496,14 @@ export default function PlanModePage() {
             <PhaseViewport
               selectedPhase={selectedPhase}
               draft={draft}
+              models={models}
               substeps={planFlow.substeps}
               retryingRunId={retryingRunId}
               loadingModels={loadingModels}
               conflictMessage={conflictMessage}
               summaryIssues={validationIssues}
               advisoryIssues={advisoryIssues}
+              savingDraft={savingDraft}
               preflightAnswers={preflightAnswers}
               submittingPreflight={submittingPreflight}
               repairAnswers={repairAnswers}
@@ -2361,6 +2542,8 @@ export default function PlanModePage() {
               onOpenSupportPanel={(panel) => {
                 setActiveSupportPanel(panel);
               }}
+              onWorkerProfileChange={handleWorkerProfileChange}
+              onReviewerProfileChange={handleReviewerProfileChange}
             />
           </div>
           {supportPanelMeta && supportPanelContent ? (
@@ -2376,6 +2559,7 @@ export default function PlanModePage() {
           ) : null}
         </div>
       )}
+      {launching ? <LaunchSplashScreen message={launchSplashMessage} /> : null}
     </div>
   );
 }

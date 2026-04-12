@@ -95,6 +95,14 @@ export default function PreflightQuestionsPanel({
     setActiveStepIndex((current) => Math.min(current + 1, reviewStepIndex));
   };
 
+  const handleOptionSelect = (questionId: string, option: string): void => {
+    onAnswerChange(questionId, {
+      ...answers[questionId],
+      selected_option: option,
+    });
+    setActiveStepIndex((current) => Math.min(current + 1, reviewStepIndex));
+  };
+
   return (
     <section className="rounded-[1.15rem] border border-amber/30 bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.12),transparent_62%),var(--color-card)] p-4">
       <div className="flex items-start justify-between gap-3">
@@ -138,10 +146,7 @@ export default function PreflightQuestionsPanel({
                   name={`preflight-${currentQuestion.id}`}
                   checked={answers[currentQuestion.id]?.selected_option === option}
                   onChange={() =>
-                    onAnswerChange(currentQuestion.id, {
-                      ...answers[currentQuestion.id],
-                      selected_option: option,
-                    })}
+                    handleOptionSelect(currentQuestion.id, option)}
                 />
                 <span>{option}</span>
               </label>

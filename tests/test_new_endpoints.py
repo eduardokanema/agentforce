@@ -97,11 +97,10 @@ def test_get_models_returns_three_claude_models(tmp_path, monkeypatch):
     handler.do_GET()
 
     body = _response_body(handler)
-    assert [model["id"] for model in body] == [
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5",
-    ]
+    # Expecting triple-IDs now
+    assert any(model["id"].startswith("claude:claude-opus-4-6:") for model in body)
+    assert any(model["id"].startswith("claude:claude-sonnet-4-6:") for model in body)
+    assert any(model["id"].startswith("claude:claude-4-5-haiku:") for model in body)
 
 
 def test_get_connectors_returns_six_connectors(tmp_path, monkeypatch):

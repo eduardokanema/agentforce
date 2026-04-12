@@ -12,6 +12,13 @@ from agentforce.core.engine import MissionEngine, WorkerDelegation, ReviewerDele
 from agentforce.memory import Memory
 
 
+@pytest.fixture(autouse=True)
+def mock_connectors(monkeypatch):
+    monkeypatch.setattr("agentforce.connectors.claude.available", lambda: True)
+    monkeypatch.setattr("agentforce.connectors.gemini.available", lambda: False)
+    monkeypatch.setattr("agentforce.connectors.opencode.available", lambda: False)
+
+
 def make_engine(tmp_path, tasks=None, caps=None):
     """Helper to create an engine."""
     if tasks is None:

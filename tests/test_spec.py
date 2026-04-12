@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -411,6 +412,8 @@ def test_suggest_caps_returns_empty_when_caps_already_sufficient():
 
 def test_suggest_caps_cli_prints_advisory_and_exits_zero(tmp_path: Path):
     mission_path = tmp_path / "mission.yaml"
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
     mission_path.write_text(
         """
 name: Caps Mission
@@ -448,6 +451,7 @@ caps:
     result = subprocess.run(
         [sys.executable, "-m", "agentforce.cli.cli", "start", str(mission_path)],
         cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "HOME": str(home_dir)},
         capture_output=True,
         text=True,
         check=False,
@@ -536,7 +540,14 @@ def test_execution_round_trip_preserves_reviewer_settings():
     assert round_tripped.tasks[0].execution.reviewer.thinking == "high"
 
 
-def test_execution_validation_rejects_missing_agent_or_model_at_launch():
+def test_execution_validation_rejects_missing_agent_or_model_at_launch(monkeypatch):
+    from agentforce.server import model_catalog
+    from agentforce.server.model_catalog import ProfileNormalizationResult
+    monkeypatch.setattr(
+        model_catalog,
+        "normalize_execution_profile",
+        lambda profile: ProfileNormalizationResult(profile=profile, valid=True, repaired=False)
+    )
     spec = MissionSpec.from_dict({
         "name": "Invalid Execution",
         "goal": "Reject incomplete execution settings",

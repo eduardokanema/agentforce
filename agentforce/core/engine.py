@@ -40,7 +40,12 @@ _RUNTIME_MODEL_FALLBACKS = {
 
 
 def detect_runtime_agent() -> str:
-    """Choose the first available local runtime provider."""
+    """Choose the first available local runtime provider.
+
+    Fall back to the default runtime when connectors are unavailable so engine
+    construction, mission loading, and CLI/state operations remain usable in
+    restricted environments and tests.
+    """
     from agentforce.connectors import claude as _cl
     from agentforce.connectors import gemini as _gm
     from agentforce.connectors import opencode as _oc
@@ -51,6 +56,11 @@ def detect_runtime_agent() -> str:
         return "claude"
     if _oc.available():
         return "opencode"
+    logger.warning(
+        "No AI provider connectors available (gemini, claude, or opencode); "
+        "falling back to default runtime agent %s",
+        DEFAULT_RUNTIME_AGENT,
+    )
     return DEFAULT_RUNTIME_AGENT
 
 
@@ -851,9 +861,6 @@ class MissionEngine:
 
         self._clear_human_intervention(ts)
         ts.error_message = ""
-        # Credit back the mission retry budget for this task's previous attempts
-        self.state.total_retries = max(0, self.state.total_retries - ts.retries)
-        ts.retries = 0
         # COMPLETED means worker finished but reviewer never ran — reset fully to PENDING.
         # FAILED/NEEDS_HUMAN use RETRY so the worker picks up existing feedback context.
         ts.status = TaskStatus.PENDING if status == TaskStatus.COMPLETED.value else TaskStatus.RETRY

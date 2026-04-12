@@ -1,6 +1,6 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MissionDraft, Model } from '../lib/types';
 import PlanModePage from './PlanModePage';
@@ -84,6 +84,24 @@ function makeDraft(overrides: Partial<MissionDraft> = {}): MissionDraft {
   };
 }
 
+function makeLaunchReadyDraft(overrides: Partial<MissionDraft> = {}): MissionDraft {
+  return makeDraft({
+    plan_versions: [
+      {
+        id: 'version-1',
+        draft_id: 'draft-123',
+        source_run_id: 'run-1',
+        revision_base: 3,
+        created_at: '2026-04-12T00:00:00Z',
+        draft_spec_snapshot: makeDraft().draft_spec,
+        changelog: ['Resolver approved the final mission draft.'],
+        validation: {},
+      },
+    ],
+    ...overrides,
+  });
+}
+
 function renderPage(
   fetchMock: ReturnType<typeof vi.fn>,
   initialEntry = '/plan',
@@ -94,11 +112,17 @@ function renderPage(
   const root = createRoot(container);
 
   act(() => {
+    function MissionRouteProbe() {
+      const params = useParams();
+      return <div data-testid="mission-route-probe">Mission route {params.id}</div>;
+    }
+
     root.render(
       <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
           <Route path="/plan" element={<PlanModePage />} />
           <Route path="/plan/:id" element={<PlanModePage />} />
+          <Route path="/mission/:id" element={<MissionRouteProbe />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -138,6 +162,7 @@ describe('PlanModePage', () => {
   afterEach(() => {
     document.body.innerHTML = '';
     window.localStorage.clear();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -512,14 +537,6 @@ describe('PlanModePage', () => {
 
     await act(async () => {
       option?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    const reviewButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.trim() === 'Next');
-    expect(reviewButton).toBeTruthy();
-
-    await act(async () => {
-      reviewButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const startButton = Array.from(container.querySelectorAll('button')).find((button) =>
@@ -997,6 +1014,7 @@ describe('PlanModePage', () => {
       editButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
+    expect(container.querySelector('[role="dialog"][aria-label="Edit mission panel"]')).toBeTruthy();
     expect(container.textContent).not.toContain('Planning History');
     expect(container.querySelector('input[aria-label="Mission name"]')).toBeTruthy();
 
@@ -1041,6 +1059,189 @@ describe('PlanModePage', () => {
     act(() => {
       root.unmount();
     });
+  });
+
+  it('opens Edit Mission in a modal dialog', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft()), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Edit Mission'));
+    expect(editButton).toBeTruthy();
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const dialog = container.querySelector('[role="dialog"][aria-label="Edit mission panel"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog?.textContent).toContain('Engineering Controls');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('shows mission defaults in Launch Window and hydrates them from the last used pair', async () => {
+    window.localStorage.setItem('agentforce-planmode-execution-defaults-v1', JSON.stringify({
+      worker: { agent: 'codex', model: 'claude-sonnet-4-5', thinking: 'medium' },
+      reviewer: { agent: 'codex', model: 'claude-haiku-4-5', thinking: 'low' },
+    }));
+
+    const launchDraft = makeDraft({
+      draft_spec: {
+        ...makeDraft().draft_spec,
+        execution_defaults: undefined,
+      },
+      plan_versions: [
+        {
+          id: 'version-1',
+          draft_id: 'draft-123',
+          source_run_id: 'run-1',
+          revision_base: 3,
+          created_at: '2026-04-12T00:00:00Z',
+          draft_spec_snapshot: makeDraft().draft_spec,
+          changelog: ['Resolver approved the final mission draft.'],
+          validation: {},
+        },
+      ],
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(launchDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    expect(container.textContent).toContain('Launch Window');
+    expect(container.textContent).toContain('Mission Defaults');
+
+    const workerSelect = container.querySelector(
+      'select[aria-label="Mission default worker execution profile"]',
+    ) as HTMLSelectElement | null;
+    const reviewerSelect = container.querySelector(
+      'select[aria-label="Mission default reviewer execution profile"]',
+    ) as HTMLSelectElement | null;
+    expect(workerSelect?.value).toBe('claude-sonnet-4-5');
+    expect(reviewerSelect?.value).toBe('claude-haiku-4-5');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('blocks the screen with a launch splash and waits for mission availability before redirecting', async () => {
+    vi.useFakeTimers();
+    let missionFetches = 0;
+    const launchDraft = makeLaunchReadyDraft();
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(launchDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123/start') {
+        expect(init).toEqual(expect.objectContaining({ method: 'POST' }));
+        return new Response(JSON.stringify({
+          mission_id: 'mission-123',
+          draft_id: 'draft-123',
+          status: 'started',
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/mission/mission-123') {
+        missionFetches += 1;
+        if (missionFetches === 1) {
+          return new Response(JSON.stringify({ error: "Mission 'mission-123' not found" }), {
+            status: 404,
+            statusText: 'Not Found',
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({
+          mission_id: 'mission-123',
+          spec: launchDraft.draft_spec,
+          task_states: {},
+          started_at: '2026-04-12T00:00:00Z',
+          completed_at: null,
+          event_log: [],
+          caps_hit: {},
+          working_dir: '/workspace/app',
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const launchButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Launch Mission'));
+    expect(launchButton).toBeTruthy();
+
+    await act(async () => {
+      launchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushPromises();
+
+    const splash = container.querySelector('[role="dialog"][aria-label="Launching mission"]');
+    expect(splash).toBeTruthy();
+    expect(splash?.textContent).toContain('Starting mission');
+    expect(container.textContent).not.toContain('Mission route mission-123');
+
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
+    await flushPromises();
+
+    expect(container.textContent).toContain('Mission route mission-123');
+    expect(fetchMock).toHaveBeenCalledWith('/api/mission/mission-123', expect.anything());
+
+    act(() => {
+      root.unmount();
+    });
+    vi.useRealTimers();
   });
 
   it('keeps the draft-stage content ordered with inline follow-up on the page', async () => {
@@ -1379,14 +1580,6 @@ describe('PlanModePage', () => {
 
     await act(async () => {
       option?.querySelector('input')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
-    const reviewButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.trim() === 'Next');
-    expect(reviewButton).toBeTruthy();
-
-    await act(async () => {
-      reviewButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const resumeButton = Array.from(container.querySelectorAll('button')).find((button) =>

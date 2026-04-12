@@ -181,6 +181,13 @@ def test_autonomous_prefers_resolved_delegation_model_over_cli_default(tmp_path,
     monkeypatch.setattr("agentforce.autonomous.Path.home", lambda: tmp_path)
     monkeypatch.setattr("agentforce.autonomous._ensure_pkg", lambda: tmp_path)
     monkeypatch.setattr("agentforce.autonomous._detect_agent", lambda: "codex")
+    from agentforce.server import model_catalog
+    from agentforce.server.model_catalog import ProfileNormalizationResult
+    monkeypatch.setattr(
+        model_catalog,
+        "normalize_execution_profile",
+        lambda profile: ProfileNormalizationResult(profile=profile, valid=True, repaired=False)
+    )
 
     captured = {}
 

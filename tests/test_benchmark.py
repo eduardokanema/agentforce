@@ -3,6 +3,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+
+pytest.importorskip("lancedb", reason="lancedb not installed; install agentforce[vector]")
+pytest.importorskip("fastembed", reason="fastembed not installed; install agentforce[vector]")
+
 
 def test_benchmark_script_exists():
     assert Path("missions/benchmark_memory.py").exists(), (
