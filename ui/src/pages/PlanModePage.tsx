@@ -3,6 +3,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import FileBrowser from "../components/FileBrowser";
 import SpaceProgress from "../components/SpaceProgress";
 import ExecutionProfileSelect from "../components/ExecutionProfileSelect";
+import SupportActivityPanel from "../components/SupportActivityPanel";
 import DraftSummaryPanel from "../components/planning/DraftSummaryPanel";
 import CockpitSupportDrawer from "../components/planning/CockpitSupportDrawer";
 import ExecutionProfileControls from "../components/planning/ExecutionProfileControls";
@@ -14,7 +15,6 @@ import PreflightQuestionsPanel from "../components/planning/PreflightQuestionsPa
 import PlannerTranscriptPanel from "../components/planning/PlannerTranscriptPanel";
 import PlanningSubstepTracker from "../components/planning/PlanningSubstepTracker";
 import TaskTimelinePanel from "../components/planning/TaskTimelinePanel";
-import Terminal from "../components/Terminal";
 import ValidationBoard from "../components/planning/ValidationBoard";
 import {
   createPlanDraft,
@@ -406,91 +406,6 @@ function planningStepLabel(stepId: PlanningSubstepId): string {
   return PLANNING_STEP_LABELS[stepId];
 }
 
-function formatExecutionProfile(value: unknown): string | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-  const candidate = value as Record<string, unknown>;
-  const agent = typeof candidate.agent === "string" && candidate.agent.trim() !== ""
-    ? candidate.agent.trim()
-    : null;
-  const model = typeof candidate.model === "string" && candidate.model.trim() !== ""
-    ? candidate.model.trim()
-    : null;
-  const thinking = typeof candidate.thinking === "string" && candidate.thinking.trim() !== ""
-    ? candidate.thinking.trim()
-    : null;
-  const parts = [agent, model, thinking].filter(Boolean);
-  return parts.length > 0 ? parts.join(" / ") : null;
-}
-
-function appendLogBlock(lines: string[], title: string, value: unknown): void {
-  if (value == null) {
-    return;
-  }
-
-  const raw = typeof value === "string"
-    ? value
-    : JSON.stringify(value, null, 2);
-  if (!raw) {
-    return;
-  }
-
-  lines.push(`${title}:`);
-  for (const line of raw.split("\n")) {
-    lines.push(line);
-  }
-}
-
-function buildOrbitStepLogLines(stepId: PlanningSubstepId, step: PlanStep | null): string[] {
-  const lines = [`$ orbit-agent ${stepId}`, `> label ${planningStepLabel(stepId)}`];
-
-  if (!step) {
-    lines.push("WARN No persisted agent payload yet.");
-    lines.push("Waiting for this orbit checkpoint to start.");
-    return lines;
-  }
-
-  lines.push(`> status ${step.status}`);
-  if (step.status === "failed") {
-    lines.push("ERROR Orbit checkpoint failed.");
-  } else if (step.status === "stale") {
-    lines.push("WARN Orbit checkpoint became stale.");
-  } else if (step.status === "complete" || step.status === "completed") {
-    lines.push("PASS Orbit checkpoint completed.");
-  } else if (step.status === "running" || step.status === "started") {
-    lines.push("WARN Orbit checkpoint is still in progress.");
-  }
-
-  if (step.started_at) {
-    lines.push(`Started: ${formatDateTime(step.started_at)}`);
-  }
-  if (step.completed_at) {
-    lines.push(`Completed: ${formatDateTime(step.completed_at)}`);
-  }
-  if (typeof step.tokens_in === "number" || typeof step.tokens_out === "number") {
-    lines.push(`Tokens: in ${step.tokens_in ?? 0} | out ${step.tokens_out ?? 0}`);
-  }
-  if (typeof step.cost_usd === "number") {
-    lines.push(`Cost: ${formatCurrency(step.cost_usd)}`);
-  }
-
-  const profile = formatExecutionProfile(step.metadata?.profile);
-  if (profile) {
-    lines.push(`Profile: ${profile}`);
-  }
-
-  appendLogBlock(lines, "Summary", step.summary);
-  if (step.message && step.message !== step.summary) {
-    appendLogBlock(lines, "Message", step.message);
-  }
-  if (step.metadata && Object.keys(step.metadata).length > 0) {
-    appendLogBlock(lines, "Metadata", step.metadata);
-  }
-
-  return lines;
-}
-
 function joinIssueTitles(step: PlanStep | null | undefined): string {
   const issues = step?.metadata?.issues;
   if (!Array.isArray(issues) || issues.length === 0) {
@@ -553,9 +468,7 @@ function OrbitStepLogModal({
   step: PlanStep | null;
   onClose: () => void;
 }) {
-  const lines = useMemo(() => buildOrbitStepLogLines(stepId, step), [stepId, step]);
   const label = planningStepLabel(stepId);
-  const profile = formatExecutionProfile(step?.metadata?.profile);
 
   return (
     <CockpitSupportDrawer
@@ -565,35 +478,7 @@ function OrbitStepLogModal({
       mode="modal"
       onClose={onClose}
     >
-      <div className="space-y-5">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-xl border border-border bg-surface px-4 py-3">
-            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Status</div>
-            <div className="mt-2 text-sm font-semibold text-text">
-              {step?.status?.replaceAll("_", " ") ?? "idle"}
-            </div>
-          </div>
-          <div className="rounded-xl border border-border bg-surface px-4 py-3">
-            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Latest Timestamp</div>
-            <div className="mt-2 text-sm font-semibold text-text">
-              {formatDateTime(step?.completed_at || step?.started_at || null)}
-            </div>
-          </div>
-          <div className="rounded-xl border border-border bg-surface px-4 py-3">
-            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Usage</div>
-            <div className="mt-2 text-sm font-semibold text-text">
-              {step ? `${step.tokens_in ?? 0} in / ${step.tokens_out ?? 0} out` : "Waiting"}
-            </div>
-          </div>
-          <div className="rounded-xl border border-border bg-surface px-4 py-3">
-            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Profile</div>
-            <div className="mt-2 text-sm font-semibold text-text">
-              {profile ?? "Not recorded"}
-            </div>
-          </div>
-        </div>
-        <Terminal lines={lines} done className="min-h-0" />
-      </div>
+      <SupportActivityPanel sourceId={stepId} label={label} source={step} />
     </CockpitSupportDrawer>
   );
 }

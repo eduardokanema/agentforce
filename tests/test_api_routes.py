@@ -1887,6 +1887,43 @@ def test_invoke_profile_retries_codex_without_explicit_model_on_access_error(tmp
     assert calls == ["gpt-5.4", None]
 
 
+def test_invoke_profile_with_events_captures_structured_stream(monkeypatch, tmp_path):
+    from agentforce.server import planning_runtime
+    from agentforce.core.token_event import TokenEvent
+    from agentforce.streaming import StreamRecorder
+
+    def fake_run(*, prompt, workdir, model, timeout, variant, stream_path=None, session_id=None):
+        recorder = StreamRecorder.from_raw_stream_path(stream_path, provider="codex")
+        assert recorder is not None
+        recorder.status("running", "Running technical adversary review")
+        recorder.tool_start("tool-1", "tool run", command='rg "black hole" ui/src')
+        recorder.tool_output("tool-1", "ui/src/pages/BlackHoleModePage.tsx:42:const enabled = true;")
+        recorder.tool_end("tool-1", exit_code=0, success=True)
+        recorder.text_delta("Running technical adversary review", role="assistant")
+        recorder.usage(tokens_in=321, tokens_out=654, cost_usd=0.0123)
+        return True, "ok", "", session_id, TokenEvent(321, 654, 0.0123)
+
+    monkeypatch.setattr("agentforce.connectors.codex.run", fake_run)
+
+    output, usage, events = planning_runtime._invoke_profile_with_events(
+        planning_runtime.PlanningProfile(agent="codex", model="gpt-5.4", thinking="medium"),
+        "review this plan",
+        str(tmp_path),
+    )
+
+    assert output == "ok"
+    assert usage.tokens_out == 654
+    assert [event["kind"] for event in events] == [
+        "status",
+        "tool_start",
+        "tool_output",
+        "tool_end",
+        "text_delta",
+        "usage",
+    ]
+    assert events[1]["payload"]["command"] == 'rg "black hole" ui/src'
+
+
 def test_planner_select_model_ignores_incompatible_approved_model(monkeypatch):
     from agentforce.server import planner_adapter as planner_adapter_mod
 

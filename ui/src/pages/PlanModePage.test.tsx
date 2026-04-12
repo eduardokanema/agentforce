@@ -1498,6 +1498,89 @@ describe('PlanModePage', () => {
                   model: 'gpt-5.4',
                   thinking: 'medium',
                 },
+                stream_events: [
+                  {
+                    seq: 1,
+                    timestamp: '2026-04-12T00:02:22Z',
+                    mission_id: 'plan',
+                    task_id: 'technical_critic',
+                    provider: 'codex',
+                    role: 'system',
+                    kind: 'status',
+                    payload: {
+                      state: 'running',
+                      message: 'Running technical adversary review',
+                    },
+                  },
+                  {
+                    seq: 2,
+                    timestamp: '2026-04-12T00:02:24Z',
+                    mission_id: 'plan',
+                    task_id: 'technical_critic',
+                    provider: 'codex',
+                    role: 'assistant',
+                    kind: 'tool_start',
+                    payload: {
+                      call_id: 'tool-1',
+                      title: 'tool run',
+                      command: 'rg "black hole" ui/src',
+                    },
+                  },
+                  {
+                    seq: 3,
+                    timestamp: '2026-04-12T00:02:25Z',
+                    mission_id: 'plan',
+                    task_id: 'technical_critic',
+                    provider: 'codex',
+                    role: 'assistant',
+                    kind: 'tool_output',
+                    payload: {
+                      call_id: 'tool-1',
+                      text: 'ui/src/pages/BlackHoleModePage.tsx:42:const enabled = true;',
+                      stream: 'stdout',
+                    },
+                  },
+                  {
+                    seq: 4,
+                    timestamp: '2026-04-12T00:02:26Z',
+                    mission_id: 'plan',
+                    task_id: 'technical_critic',
+                    provider: 'codex',
+                    role: 'assistant',
+                    kind: 'tool_end',
+                    payload: {
+                      call_id: 'tool-1',
+                      success: true,
+                      exit_code: 0,
+                    },
+                  },
+                  {
+                    seq: 5,
+                    timestamp: '2026-04-12T00:02:28Z',
+                    mission_id: 'plan',
+                    task_id: 'technical_critic',
+                    provider: 'codex',
+                    role: 'assistant',
+                    kind: 'text_delta',
+                    payload: {
+                      text: 'Running technical adversary review',
+                    },
+                  },
+                  {
+                    seq: 6,
+                    timestamp: '2026-04-12T00:02:29Z',
+                    mission_id: 'plan',
+                    task_id: 'technical_critic',
+                    provider: 'codex',
+                    role: 'system',
+                    kind: 'usage',
+                    payload: {
+                      tokens_in: 321,
+                      tokens_out: 654,
+                      cost_usd: 0.0123,
+                    },
+                  },
+                ],
                 issues: [
                   {
                     severity: 'high',
@@ -1546,8 +1629,103 @@ describe('PlanModePage', () => {
     expect(dialog?.textContent).toContain('running');
     expect(dialog?.textContent).toContain('321 in / 654 out');
     expect(dialog?.textContent).toContain('codex / gpt-5.4 / medium');
+    expect(dialog?.textContent).toContain('Structured activity');
+    expect(dialog?.textContent).toContain('rg "black hole" ui/src');
+    expect(dialog?.textContent).toContain('ui/src/pages/BlackHoleModePage.tsx:42:const enabled = true;');
     expect(dialog?.textContent).toContain('Running technical adversary review');
     expect(dialog?.textContent).toContain('Missing rollback strategy');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('renders mission-plan pass fallback activity and structured validation findings', async () => {
+    const validationDraft = makeDraft({
+      plan_runs: [
+        {
+          id: 'run-validation',
+          draft_id: 'draft-123',
+          base_revision: 3,
+          head_revision_seen: 3,
+          status: 'running',
+          trigger_kind: 'auto',
+          trigger_message: 'Initial run',
+          created_at: '2026-04-12T00:00:00Z',
+          current_step: 'mission_plan_pass',
+          steps: [
+            {
+              name: 'mission_plan_pass',
+              status: 'completed',
+              started_at: '2026-04-12T00:00:10Z',
+              completed_at: '2026-04-12T00:00:12Z',
+              message: 'Mission-plan checks complete',
+              summary: 'Tasks array is empty',
+              tokens_in: 0,
+              tokens_out: 0,
+              cost_usd: 0,
+              metadata: {
+                issues: ['Tasks array is empty'],
+                warnings: ['Output artifacts are not defined yet'],
+                structured_issues: [
+                  {
+                    issue_id: 'issue-1',
+                    kind: 'draft_validation',
+                    blocking: true,
+                    reason: 'Tasks array must not be empty',
+                    original_text: 'Mission spec must contain at least one task.',
+                    task_id: null,
+                  },
+                ],
+                blocking_issues: [
+                  {
+                    issue_id: 'issue-1',
+                    kind: 'draft_validation',
+                    blocking: true,
+                    reason: 'Tasks array must not be empty',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(validationDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const orbitButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Mission Plan Pass')
+      && button.textContent?.includes('Open agent log'));
+    expect(orbitButton).toBeTruthy();
+
+    await act(async () => {
+      orbitButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const dialog = container.querySelector('[role="dialog"][aria-label="Mission Plan Pass orbit log modal"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog?.textContent).toContain('Structured activity');
+    expect(dialog?.textContent).toContain('Structured findings');
+    expect(dialog?.textContent).toContain('Tasks array must not be empty');
+    expect(dialog?.textContent).toContain('Output artifacts are not defined yet');
 
     act(() => {
       root.unmount();

@@ -7,10 +7,12 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from agentforce.core.spec import MissionSpec
 from agentforce.core.token_event import TokenEvent
+from agentforce.streaming import load_stream_events, raw_stream_path
 from agentforce.server.black_hole_analyzers import evaluate_black_hole_analyzer, normalized_progress_delta
 from agentforce.server.black_hole_runs import (
     BlackHoleCampaignRecord,
@@ -181,33 +183,103 @@ def _should_retry_without_model(agent: str, output: str, error: str) -> bool:
     )
 
 
-def _invoke_profile(profile: PlanningProfile, prompt: str, workdir: str | None) -> tuple[str, TokenEvent]:
+def _invoke_profile_internal(
+    profile: PlanningProfile,
+    prompt: str,
+    workdir: str | None,
+    *,
+    capture_events: bool,
+) -> tuple[str, TokenEvent, list[dict[str, Any]]]:
     workdir_value = workdir or str(state_io.get_agentforce_home())
-    if profile.agent == "codex":
-        from agentforce.connectors import codex
-        success, output, error, _, token_event = codex.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
-        if not success and profile.model and _should_retry_without_model(profile.agent, output, error):
+    stream_events: list[dict[str, Any]] = []
+    capture_dir: TemporaryDirectory[str] | None = None
+    capture_task_id: str | None = None
+    stream_path: Path | None = None
+
+    if capture_events:
+        capture_dir = TemporaryDirectory(prefix="agentforce-planning-stream-")
+        capture_task_id = f"{profile.agent}_{uuid.uuid4().hex}"
+        stream_path = raw_stream_path("planning", capture_task_id, Path(capture_dir.name))
+
+    try:
+        if profile.agent == "codex":
+            from agentforce.connectors import codex
             success, output, error, _, token_event = codex.run(
                 prompt=prompt,
                 workdir=workdir_value,
-                model=None,
+                model=profile.model,
                 timeout=180,
                 variant=profile.thinking,
+                stream_path=stream_path,
             )
-    elif profile.agent == "claude":
-        from agentforce.connectors import claude
-        success, output, error, _, token_event = claude.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
-    elif profile.agent == "opencode":
-        from agentforce.connectors import opencode
-        success, output, error, _, token_event = opencode.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
-    elif profile.agent == "gemini":
-        from agentforce.connectors import gemini
-        success, output, error, _, token_event = gemini.run(prompt=prompt, workdir=workdir_value, model=profile.model, timeout=180, variant=profile.thinking)
-    else:
-        raise RuntimeError(f"Unsupported planning agent: {profile.agent}")
-    if not success:
-        raise RuntimeError(error or f"{profile.agent} planning step failed")
+            if not success and profile.model and _should_retry_without_model(profile.agent, output, error):
+                success, output, error, _, token_event = codex.run(
+                    prompt=prompt,
+                    workdir=workdir_value,
+                    model=None,
+                    timeout=180,
+                    variant=profile.thinking,
+                    stream_path=stream_path,
+                )
+        elif profile.agent == "claude":
+            from agentforce.connectors import claude
+            success, output, error, _, token_event = claude.run(
+                prompt=prompt,
+                workdir=workdir_value,
+                model=profile.model,
+                timeout=180,
+                variant=profile.thinking,
+                stream_path=stream_path,
+            )
+        elif profile.agent == "opencode":
+            from agentforce.connectors import opencode
+            success, output, error, _, token_event = opencode.run(
+                prompt=prompt,
+                workdir=workdir_value,
+                model=profile.model,
+                timeout=180,
+                variant=profile.thinking,
+                stream_path=stream_path,
+            )
+        elif profile.agent == "gemini":
+            from agentforce.connectors import gemini
+            success, output, error, _, token_event = gemini.run(
+                prompt=prompt,
+                workdir=workdir_value,
+                model=profile.model,
+                timeout=180,
+                variant=profile.thinking,
+                stream_path=stream_path,
+            )
+        else:
+            raise RuntimeError(f"Unsupported planning agent: {profile.agent}")
+        if not success:
+            raise RuntimeError(error or f"{profile.agent} planning step failed")
+        if capture_events and capture_dir is not None and capture_task_id is not None:
+            stream_events = load_stream_events("planning", capture_task_id, stream_dir=Path(capture_dir.name))
+        return output, token_event, stream_events
+    finally:
+        if capture_dir is not None:
+            capture_dir.cleanup()
+
+
+def _invoke_profile(profile: PlanningProfile, prompt: str, workdir: str | None) -> tuple[str, TokenEvent]:
+    output, token_event, _ = _invoke_profile_internal(profile, prompt, workdir, capture_events=False)
     return output, token_event
+
+
+_ORIGINAL_INVOKE_PROFILE = _invoke_profile
+
+
+def _invoke_profile_with_events(
+    profile: PlanningProfile,
+    prompt: str,
+    workdir: str | None,
+) -> tuple[str, TokenEvent, list[dict[str, Any]]]:
+    if _invoke_profile is not _ORIGINAL_INVOKE_PROFILE:
+        output, token_event = _invoke_profile(profile, prompt, workdir)
+        return output, token_event, []
+    return _invoke_profile_internal(profile, prompt, workdir, capture_events=True)
 
 
 def _record_step(
@@ -867,7 +939,7 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
     )
 
     run = _record_step(run, name="technical_critic", status="started", message="Running technical adversary review")
-    technical_text, technical_usage = _invoke_profile(
+    technical_text, technical_usage, technical_events = _invoke_profile_with_events(
         critic_technical_profile,
         _critic_prompt("technical", draft.draft_spec.get("goal") or "", spec_dict),
         draft.draft_spec.get("working_dir"),
@@ -880,11 +952,11 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
         message="Technical adversary review complete",
         summary=technical.get("summary") or "Technical review stored",
         token_event=technical_usage,
-        metadata=technical,
+        metadata={**technical, "profile": critic_technical_profile.__dict__, "stream_events": technical_events},
     )
 
     run = _record_step(run, name="practical_critic", status="started", message="Running practical adversary review")
-    practical_text, practical_usage = _invoke_profile(
+    practical_text, practical_usage, practical_events = _invoke_profile_with_events(
         critic_practical_profile,
         _critic_prompt("practical", draft.draft_spec.get("goal") or "", spec_dict),
         draft.draft_spec.get("working_dir"),
@@ -897,7 +969,7 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
         message="Practical adversary review complete",
         summary=practical.get("summary") or "Practical review stored",
         token_event=practical_usage,
-        metadata=practical,
+        metadata={**practical, "profile": critic_practical_profile.__dict__, "stream_events": practical_events},
     )
 
     run = _record_step(run, name="resolver", status="started", message="Resolving critic findings")
@@ -1435,7 +1507,7 @@ def _synthesize_black_hole_child_plan(
         message="Technical adversary review complete",
         summary=technical.get("summary") or "Technical review skipped",
         token_event=technical_usage,
-        metadata=technical,
+        metadata={**technical, "profile": technical_profile.__dict__},
     )
 
     practical: dict[str, Any] = {"summary": "", "issues": [], "suggestions": []}
@@ -1456,7 +1528,7 @@ def _synthesize_black_hole_child_plan(
         message="Practical adversary review complete",
         summary=practical.get("summary") or "Practical review skipped",
         token_event=practical_usage,
-        metadata=practical,
+        metadata={**practical, "profile": practical_profile.__dict__},
     )
 
     changelog = _resolver_changelog(validation, technical, practical)
