@@ -25,6 +25,15 @@ def supported_thinking_for_provider(provider_id: str) -> list[str]:
     return list(_FIXED_MEDIUM_THINKING)
 
 
+def supported_thinking_for_model(provider_id: str, model: dict[str, Any]) -> list[str]:
+    configured = model.get("supported_thinking")
+    if isinstance(configured, list):
+        normalized = [str(item).strip().lower() for item in configured if str(item).strip()]
+        if normalized:
+            return normalized
+    return supported_thinking_for_provider(provider_id)
+
+
 def _provider_sources() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     from agentforce.server.routes import providers
 
@@ -83,13 +92,13 @@ def _catalog_models(*, include_disabled: bool = False) -> list[dict[str, Any]]:
         active = _provider_active(provider_id, provider_meta, catalogue)
         enabled_models = provider_meta.get("enabled_models")
         models = _provider_models(provider_id, provider_meta, catalogue)
-        supported_thinking = supported_thinking_for_provider(provider_id)
         provider_name = str(catalogue.get("display_name") or provider_id)
 
         for model in models:
             model_id = str(model.get("id") or "").strip()
             if not model_id:
                 continue
+            supported_thinking = supported_thinking_for_model(provider_id, model)
             dedupe_key = (provider_id, model_id)
             if dedupe_key in seen_keys:
                 continue

@@ -354,6 +354,12 @@ def test_fetch_codex_models_reads_current_cache_schema_and_skips_hidden_models(t
                         "slug": "gpt-5.4",
                         "display_name": "GPT-5.4",
                         "description": "Latest frontier agentic coding model.",
+                        "supported_reasoning_levels": [
+                            {"effort": "low"},
+                            {"effort": "medium"},
+                            {"effort": "high"},
+                            {"effort": "xhigh"},
+                        ],
                         "visibility": "list",
                     },
                     {
@@ -379,6 +385,7 @@ def test_fetch_codex_models_reads_current_cache_schema_and_skips_hidden_models(t
     assert [model["id"] for model in models] == ["gpt-5.4", "gpt-5.4-mini"]
     assert models[0]["name"] == "GPT-5.4"
     assert models[0]["latency_label"] == "Standard"
+    assert models[0]["supported_thinking"] == ["low", "medium", "high", "xhigh"]
     assert models[1]["latency_label"] == "Fast"
 
 
@@ -412,6 +419,7 @@ def test_fetch_codex_models_supports_legacy_cache_shape(tmp_path, monkeypatch):
             "cost_per_1k_input": 1.25,
             "cost_per_1k_output": 2.5,
             "latency_label": "Fast",
+            "supported_thinking": [],
         }
     ]
 

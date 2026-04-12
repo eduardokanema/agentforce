@@ -215,6 +215,20 @@ def _codex_latency_label(model_id: str, description: str | None) -> str:
     return "Standard"
 
 
+def _normalize_supported_reasoning_levels(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            effort = str(item.get("effort") or "").strip().lower()
+        else:
+            effort = str(item or "").strip().lower()
+        if effort and effort not in normalized:
+            normalized.append(effort)
+    return normalized
+
+
 def _normalize_codex_model(model: Any) -> dict[str, Any] | None:
     if not isinstance(model, dict):
         return None
@@ -229,6 +243,7 @@ def _normalize_codex_model(model: Any) -> dict[str, Any] | None:
         "cost_per_1k_output": float(model.get("cost_per_1k_output", 0.0) or 0.0),
         "latency_label": str(model.get("latency_label") or _codex_latency_label(model_id, description)),
         "visibility": str(model.get("visibility") or "").strip().lower(),
+        "supported_thinking": _normalize_supported_reasoning_levels(model.get("supported_reasoning_levels")),
     }
 
 
@@ -250,6 +265,7 @@ def _fetch_codex_models() -> list[dict]:
                         "cost_per_1k_input": item["cost_per_1k_input"],
                         "cost_per_1k_output": item["cost_per_1k_output"],
                         "latency_label": item["latency_label"],
+                        "supported_thinking": list(item.get("supported_thinking") or []),
                     }
                     for item in source
                 ]

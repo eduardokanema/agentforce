@@ -18,7 +18,7 @@ def test_list_execution_profiles_returns_combined_selectable_profiles(monkeypatc
                 "cost_per_1k_input": 0.0,
                 "cost_per_1k_output": 0.0,
                 "latency_label": "Standard",
-                "supported_thinking": ["medium"],
+                "supported_thinking": ["low", "medium", "high", "xhigh"],
                 "selectable": True,
             },
             {
@@ -51,15 +51,52 @@ def test_list_execution_profiles_returns_combined_selectable_profiles(monkeypatc
     profiles = model_catalog.list_execution_profiles()
 
     assert [profile["id"] for profile in profiles] == [
+        "codex:gpt-5.4:low",
         "codex:gpt-5.4:medium",
+        "codex:gpt-5.4:high",
+        "codex:gpt-5.4:xhigh",
         "opencode:anthropic/claude-sonnet-4-6:low",
         "opencode:anthropic/claude-sonnet-4-6:medium",
         "opencode:anthropic/claude-sonnet-4-6:high",
         "opencode:anthropic/claude-sonnet-4-6:xhigh",
+        "claude:claude-sonnet-4-6:medium",
     ]
     assert profiles[0]["model_id"] == "gpt-5.4"
-    assert profiles[0]["thinking"] == "medium"
-    assert profiles[0]["label"] == "Codex CLI · GPT-5.4 · medium"
+    assert profiles[0]["thinking"] == "low"
+    assert profiles[3]["label"] == "Codex CLI · GPT-5.4 · xhigh"
+
+
+def test_catalog_models_uses_model_specific_supported_thinking(monkeypatch):
+    monkeypatch.setattr(
+        model_catalog,
+        "_provider_sources",
+        lambda: (
+            {
+                "codex": {
+                    "display_name": "Codex CLI",
+                    "type": "cli",
+                    "binary": "codex",
+                }
+            },
+            {"codex": {}},
+        ),
+    )
+    monkeypatch.setattr(model_catalog, "_provider_active", lambda provider_id, provider_meta, catalogue: True)
+    monkeypatch.setattr(
+        model_catalog,
+        "_provider_models",
+        lambda provider_id, provider_meta, catalogue: [
+            {
+                "id": "gpt-5.4",
+                "name": "GPT-5.4",
+                "supported_thinking": ["low", "medium", "high", "xhigh"],
+            }
+        ],
+    )
+
+    models = model_catalog.list_provider_models()
+
+    assert models["codex"][0]["supported_thinking"] == ["low", "medium", "high", "xhigh"]
 
 
 def test_normalize_execution_profile_repairs_same_provider_only(monkeypatch):
