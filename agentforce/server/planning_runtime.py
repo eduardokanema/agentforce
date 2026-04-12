@@ -24,7 +24,7 @@ from agentforce.server import state_io, ws
 from agentforce.server import model_catalog
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunRecord, PlanRunStore, PlanStepRecord
-from agentforce.server.routes import providers
+from agentforce.server.routes import caps_config, providers
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,15 @@ class PlanningProfile:
     agent: str
     model: str
     thinking: str
+
+
+_PLANNING_STEP_ORDER = [
+    "planner_synthesis",
+    "mission_plan_pass",
+    "technical_critic",
+    "practical_critic",
+    "resolver",
+]
 
 
 def _available_models_for_agent(agent: str) -> list[str]:
@@ -72,6 +81,67 @@ def _plan_store() -> PlanRunStore:
 
 def _draft_store() -> PlanDraftStore:
     return PlanDraftStore()
+
+
+def _planning_retry_limit() -> int:
+    try:
+        limit = int(caps_config.load_caps().get("max_retries_per_task") or 3)
+    except Exception:
+        limit = 3
+    return max(1, limit)
+
+
+def _planning_intervention_generation(validation: dict[str, Any] | None) -> int:
+    if not isinstance(validation, dict):
+        return 0
+    try:
+        return max(0, int(validation.get("planning_retry_generation") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _step_index(step_name: str | None) -> int:
+    if step_name not in _PLANNING_STEP_ORDER:
+        return -1
+    return _PLANNING_STEP_ORDER.index(step_name)
+
+
+def _checkpointed_run(
+    run: PlanRunRecord,
+    *,
+    step_name: str,
+    state_key: str | None = None,
+    state_value: Any = None,
+) -> PlanRunRecord:
+    resume_state = dict(run.resume_state or {})
+    if state_key is not None:
+        resume_state[state_key] = state_value
+    updated = run.copy_with(resume_state=resume_state, failed_step=step_name)
+    _plan_store().save_run(updated)
+    return updated
+
+
+def _reused_steps_for_retry(run: PlanRunRecord) -> list[PlanStepRecord]:
+    failed_index = _step_index(run.failed_step or run.current_step)
+    if failed_index <= 0:
+        return []
+    reused: list[PlanStepRecord] = []
+    for step in run.steps:
+        index = _step_index(step.name)
+        if index < 0 or index >= failed_index or step.status != "completed":
+            continue
+        reused.append(
+            PlanStepRecord(
+                name=step.name,
+                status="completed",
+                started_at=step.started_at,
+                completed_at=step.completed_at,
+                message=step.message,
+                summary=step.summary,
+                metadata={**dict(step.metadata or {}), "reused": True, "reused_from_run_id": run.id},
+            )
+        )
+    return reused
 
 
 def _normalize_preflight_questions(payload: Any) -> list[dict[str, Any]]:
@@ -133,14 +203,40 @@ def create_plan_run_for_draft(
     *,
     trigger_kind: str,
     trigger_message: str,
+    retry_group_id: str | None = None,
+    retry_of_run_id: str | None = None,
+    retry_attempt: int = 0,
+    retry_limit: int | None = None,
+    retry_locked: bool = False,
+    failed_step: str | None = None,
+    intervention_generation: int | None = None,
+    resume_state: dict[str, Any] | None = None,
+    reused_steps: list[PlanStepRecord] | None = None,
 ) -> PlanRunRecord:
+    run_id = str(uuid.uuid4())
     run = _plan_store().create_run(
-        str(uuid.uuid4()),
+        run_id,
         draft_id=draft.id,
         base_revision=draft.revision,
         trigger_kind=trigger_kind,
         trigger_message=trigger_message,
     )
+    run = run.copy_with(
+        retry_group_id=retry_group_id or run.id,
+        retry_of_run_id=retry_of_run_id,
+        retry_attempt=max(0, int(retry_attempt or 0)),
+        retry_limit=max(1, int(retry_limit or _planning_retry_limit())),
+        retry_locked=retry_locked,
+        failed_step=failed_step,
+        intervention_generation=(
+            _planning_intervention_generation(draft.validation)
+            if intervention_generation is None
+            else max(0, int(intervention_generation))
+        ),
+        resume_state=dict(resume_state or {}),
+        steps=list(reused_steps or []),
+    )
+    _plan_store().save_run(run)
     _emit("plan_run_queued", {
         "draft_id": draft.id,
         "plan_run_id": run.id,
@@ -343,6 +439,23 @@ def _record_step(
         },
     )
     return updated
+
+
+def _mark_failed_step(run: PlanRunRecord, error_message: str) -> PlanRunRecord:
+    step_name = run.current_step or run.failed_step
+    if not step_name:
+        return run
+    return _record_step(
+        run,
+        name=step_name,
+        status="failed",
+        message=error_message,
+        summary=error_message,
+        metadata={
+            **dict((next((step.metadata for step in run.steps if step.name == step_name), {}) or {})),
+            "error_message": error_message,
+        },
+    )
 
 
 def _sum_token_events(*events: TokenEvent | None) -> TokenEvent:
@@ -882,10 +995,12 @@ def run_plan_run(run_id: str) -> None:
         error_msg = str(exc)
         # Reload to get latest step state
         latest = store.load_run(run_id) or run
+        latest = _mark_failed_step(latest, error_msg)
         failed = latest.copy_with(
             status="failed",
             error_message=error_msg,
             completed_at=_now_iso(),
+            failed_step=latest.current_step or latest.failed_step,
         )
         store.save_run(failed)
         _emit("plan_run_failed", {
@@ -914,63 +1029,98 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
 
     from agentforce.server import planner_adapter
 
-    run = _record_step(run, name="planner_synthesis", status="started", message="Generating initial plan")
-    adapter = planner_adapter.get_planner_adapter()
-    turn = adapter.plan_turn(draft.to_dict(), run.trigger_message or draft.draft_spec.get("goal") or "")
-    spec_dict = turn.draft_spec
-    run = _record_step(
-        run,
-        name="planner_synthesis",
-        status="completed",
-        message=turn.assistant_message,
-        summary=turn.assistant_message,
-        metadata={"profile": synthesis_profile.__dict__},
-    )
+    resume_state = dict(run.resume_state or {})
+    start_step = run.failed_step if run.retry_of_run_id else None
+    spec_dict = dict(resume_state.get("spec_dict") or {})
+    validation = dict(resume_state.get("validation") or {})
+    technical = dict(resume_state.get("technical") or {})
+    practical = dict(resume_state.get("practical") or {})
 
-    run = _record_step(run, name="mission_plan_pass", status="started", message="Applying mission-plan checks")
-    validation = _mission_plan_validation(spec_dict)
-    run = _record_step(
-        run,
-        name="mission_plan_pass",
-        status="completed",
-        message="Mission-plan checks complete",
-        summary="; ".join(validation.get("issues") or validation.get("warnings") or ["No issues"]),
-        metadata=validation,
-    )
+    if not start_step or _step_index(start_step) <= _step_index("planner_synthesis"):
+        run = _record_step(run, name="planner_synthesis", status="started", message="Generating initial plan")
+        adapter = planner_adapter.get_planner_adapter()
+        turn = adapter.plan_turn(draft.to_dict(), run.trigger_message or draft.draft_spec.get("goal") or "")
+        spec_dict = turn.draft_spec
+        run = _record_step(
+            run,
+            name="planner_synthesis",
+            status="completed",
+            message=turn.assistant_message,
+            summary=turn.assistant_message,
+            metadata={"profile": synthesis_profile.__dict__},
+        )
+        run = _checkpointed_run(
+            run,
+            step_name="planner_synthesis",
+            state_key="spec_dict",
+            state_value=spec_dict,
+        )
 
-    run = _record_step(run, name="technical_critic", status="started", message="Running technical adversary review")
-    technical_text, technical_usage, technical_events = _invoke_profile_with_events(
-        critic_technical_profile,
-        _critic_prompt("technical", draft.draft_spec.get("goal") or "", spec_dict),
-        draft.draft_spec.get("working_dir"),
-    )
-    technical = _parse_critic_output(technical_text)
-    run = _record_step(
-        run,
-        name="technical_critic",
-        status="completed",
-        message="Technical adversary review complete",
-        summary=technical.get("summary") or "Technical review stored",
-        token_event=technical_usage,
-        metadata={**technical, "profile": critic_technical_profile.__dict__, "stream_events": technical_events},
-    )
+    if not start_step or _step_index(start_step) <= _step_index("mission_plan_pass"):
+        run = _record_step(run, name="mission_plan_pass", status="started", message="Applying mission-plan checks")
+        validation = _mission_plan_validation(spec_dict)
+        run = _record_step(
+            run,
+            name="mission_plan_pass",
+            status="completed",
+            message="Mission-plan checks complete",
+            summary="; ".join(validation.get("issues") or validation.get("warnings") or ["No issues"]),
+            metadata=validation,
+        )
+        run = _checkpointed_run(
+            run,
+            step_name="mission_plan_pass",
+            state_key="validation",
+            state_value=validation,
+        )
 
-    run = _record_step(run, name="practical_critic", status="started", message="Running practical adversary review")
-    practical_text, practical_usage, practical_events = _invoke_profile_with_events(
-        critic_practical_profile,
-        _critic_prompt("practical", draft.draft_spec.get("goal") or "", spec_dict),
-        draft.draft_spec.get("working_dir"),
-    )
-    practical = _parse_critic_output(practical_text)
-    run = _record_step(
-        run,
-        name="practical_critic",
-        status="completed",
-        message="Practical adversary review complete",
-        summary=practical.get("summary") or "Practical review stored",
-        token_event=practical_usage,
-        metadata={**practical, "profile": critic_practical_profile.__dict__, "stream_events": practical_events},
-    )
+    if not start_step or _step_index(start_step) <= _step_index("technical_critic"):
+        run = _record_step(run, name="technical_critic", status="started", message="Running technical adversary review")
+        technical_text, technical_usage, technical_events = _invoke_profile_with_events(
+            critic_technical_profile,
+            _critic_prompt("technical", draft.draft_spec.get("goal") or "", spec_dict),
+            draft.draft_spec.get("working_dir"),
+        )
+        technical = _parse_critic_output(technical_text)
+        run = _record_step(
+            run,
+            name="technical_critic",
+            status="completed",
+            message="Technical adversary review complete",
+            summary=technical.get("summary") or "Technical review stored",
+            token_event=technical_usage,
+            metadata={**technical, "profile": critic_technical_profile.__dict__, "stream_events": technical_events},
+        )
+        run = _checkpointed_run(
+            run,
+            step_name="technical_critic",
+            state_key="technical",
+            state_value=technical,
+        )
+
+    if not start_step or _step_index(start_step) <= _step_index("practical_critic"):
+        run = _record_step(run, name="practical_critic", status="started", message="Running practical adversary review")
+        practical_text, practical_usage, practical_events = _invoke_profile_with_events(
+            critic_practical_profile,
+            _critic_prompt("practical", draft.draft_spec.get("goal") or "", spec_dict),
+            draft.draft_spec.get("working_dir"),
+        )
+        practical = _parse_critic_output(practical_text)
+        run = _record_step(
+            run,
+            name="practical_critic",
+            status="completed",
+            message="Practical adversary review complete",
+            summary=practical.get("summary") or "Practical review stored",
+            token_event=practical_usage,
+            metadata={**practical, "profile": critic_practical_profile.__dict__, "stream_events": practical_events},
+        )
+        run = _checkpointed_run(
+            run,
+            step_name="practical_critic",
+            state_key="practical",
+            state_value=practical,
+        )
 
     run = _record_step(run, name="resolver", status="started", message="Resolving critic findings")
     changelog = _resolver_changelog(validation, technical, practical)
@@ -1053,6 +1203,18 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
         summary=" ".join(changelog),
         token_event=_sum_token_events(resolver_usage, repair_usage),
         metadata={"version_id": version.id, "repair_status": (repair_state or {}).get("status", "not_needed")},
+    )
+    run = _checkpointed_run(
+        run,
+        step_name="resolver",
+        state_key="resolved_spec_dict",
+        state_value=spec_dict,
+    )
+    run = _checkpointed_run(
+        run,
+        step_name="resolver",
+        state_key="resolved_validation",
+        state_value=validation,
     )
     _emit(
         "plan_version_created",

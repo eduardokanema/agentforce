@@ -1398,7 +1398,7 @@ def test_get_config_returns_default_caps(tmp_path, monkeypatch):
     assert "default_caps" in body
     caps = body["default_caps"]
     assert caps["max_concurrent_workers"] == 2
-    assert caps["max_retries_per_task"] == 2
+    assert caps["max_retries_per_task"] == 3
     assert caps["max_wall_time_minutes"] == 60
     assert caps["max_cost_usd"] == 0
     assert body["filesystem"]["default_start_path"] == "~/Projects"
@@ -1804,6 +1804,400 @@ def test_plan_run_retry_creates_new_retry_run(tmp_path, monkeypatch):
     assert body["status"] == "queued"
     assert body["plan_run_id"] != run.id
     assert enqueued == [body["plan_run_id"]]
+
+
+def test_plan_run_retry_resumes_failed_step_and_reuses_prior_steps(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server.planning_runtime import create_plan_run_for_draft
+    from agentforce.server.plan_runs import PlanStepRecord, PlanRunStore
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    config_handler = _make_handler("/api/config")
+    _json_request(config_handler, {"default_caps": {"max_retries_per_task": 3}})
+    config_handler.do_POST()
+    assert config_handler.send_response.call_args.args == (200,)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Retry this plan", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+
+    initial = create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Initial planning attempt",
+    )
+    store = PlanRunStore()
+    store.save_run(
+        initial.copy_with(
+            status="failed",
+            current_step="practical_critic",
+            failed_step="practical_critic",
+            retry_group_id=initial.id,
+            retry_attempt=0,
+            retry_limit=3,
+            intervention_generation=0,
+            error_message="planner timed out on practical critic",
+            resume_state={
+                "spec_dict": {
+                    "name": "Retry This Plan",
+                    "goal": "Retry this plan",
+                    "definition_of_done": [],
+                    "tasks": [],
+                    "caps": {
+                        "max_tokens_per_task": 100000,
+                        "max_retries_global": 3,
+                        "max_retries_per_task": 3,
+                        "max_wall_time_minutes": 120,
+                        "max_human_interventions": 2,
+                        "max_cost_usd": None,
+                        "max_concurrent_workers": 1,
+                    },
+                },
+                "validation": {
+                    "issues": [],
+                    "warnings": [],
+                    "blocking_issues": [],
+                },
+                "technical": {
+                    "summary": "Technical review stored",
+                    "issues": [],
+                    "warnings": [],
+                    "suggestions": [],
+                },
+            },
+            steps=[
+                PlanStepRecord(
+                    name="planner_synthesis",
+                    status="completed",
+                    started_at="2026-04-12T00:00:00Z",
+                    completed_at="2026-04-12T00:00:10Z",
+                    summary="Planner complete",
+                    message="Planner complete",
+                    metadata={"profile": {"agent": "codex", "model": "gpt-5.4", "thinking": "medium"}},
+                ),
+                PlanStepRecord(
+                    name="mission_plan_pass",
+                    status="completed",
+                    started_at="2026-04-12T00:00:11Z",
+                    completed_at="2026-04-12T00:00:12Z",
+                    summary="Checks complete",
+                    message="Checks complete",
+                    metadata={"issues": [], "warnings": []},
+                ),
+                PlanStepRecord(
+                    name="technical_critic",
+                    status="completed",
+                    started_at="2026-04-12T00:00:13Z",
+                    completed_at="2026-04-12T00:00:20Z",
+                    summary="Technical review stored",
+                    message="Technical review stored",
+                    metadata={"issues": [], "warnings": [], "suggestions": []},
+                ),
+                PlanStepRecord(
+                    name="practical_critic",
+                    status="failed",
+                    started_at="2026-04-12T00:00:21Z",
+                    completed_at="2026-04-12T00:03:00Z",
+                    summary="planner timed out on practical critic",
+                    message="planner timed out on practical critic",
+                ),
+            ],
+        ),
+    )
+
+    enqueued: list[str] = []
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
+
+    retry_handler = _make_handler(f"/api/plan/runs/{initial.id}/retry")
+    retry_handler.do_POST()
+
+    assert retry_handler.send_response.call_args.args == (200,)
+    body = _response_body(retry_handler)
+    retry = store.load_run(body["plan_run_id"])
+    assert retry is not None
+    assert retry.retry_group_id == initial.id
+    assert retry.retry_of_run_id == initial.id
+    assert retry.retry_attempt == 1
+    assert retry.retry_limit == 3
+    assert retry.failed_step == "practical_critic"
+    assert [step.name for step in retry.steps] == [
+        "planner_synthesis",
+        "mission_plan_pass",
+        "technical_critic",
+    ]
+    assert all(step.metadata.get("reused_from_run_id") == initial.id for step in retry.steps)
+    assert all(step.metadata.get("reused") is True for step in retry.steps)
+    assert enqueued == [retry.id]
+
+
+def test_plan_run_retry_blocks_after_retry_limit_without_intervention(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server.planning_runtime import create_plan_run_for_draft
+    from agentforce.server.plan_runs import PlanRunStore
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    config_handler = _make_handler("/api/config")
+    _json_request(config_handler, {"default_caps": {"max_retries_per_task": 3}})
+    config_handler.do_POST()
+    assert config_handler.send_response.call_args.args == (200,)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Retry this plan", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+
+    root = create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Initial planning attempt",
+    )
+    store = PlanRunStore()
+    store.save_run(
+        root.copy_with(
+            status="failed",
+            failed_step="resolver",
+            current_step="resolver",
+            retry_group_id=root.id,
+            retry_attempt=0,
+            retry_limit=3,
+            intervention_generation=0,
+            error_message="resolver timed out",
+        ),
+    )
+
+    previous_id = root.id
+    for attempt in range(1, 4):
+        retry_handler = _make_handler(f"/api/plan/runs/{previous_id}/retry")
+        retry_handler.do_POST()
+        assert retry_handler.send_response.call_args.args == (200,)
+        next_id = _response_body(retry_handler)["plan_run_id"]
+        retried = store.load_run(next_id)
+        assert retried is not None
+        store.save_run(
+            retried.copy_with(
+                status="failed",
+                failed_step="resolver",
+                current_step="resolver",
+                error_message=f"resolver timed out {attempt}",
+            ),
+        )
+        previous_id = next_id
+
+    blocked_handler = _make_handler(f"/api/plan/runs/{previous_id}/retry")
+    blocked_handler.do_POST()
+
+    assert blocked_handler.send_response.call_args.args == (409,)
+    body = _response_body(blocked_handler)
+    assert "intervention" in body["error"].lower()
+    assert body["retry_limit"] == 3
+
+
+def test_plan_run_retry_resets_after_follow_up_intervention(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server.planning_runtime import create_plan_run_for_draft
+    from agentforce.server.plan_runs import PlanRunStore
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda _run_id: None)
+
+    config_handler = _make_handler("/api/config")
+    _json_request(config_handler, {"default_caps": {"max_retries_per_task": 3}})
+    config_handler.do_POST()
+    assert config_handler.send_response.call_args.args == (200,)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Retry this plan", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+
+    root = create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Initial planning attempt",
+    )
+    store = PlanRunStore()
+    store.save_run(
+        root.copy_with(
+            status="failed",
+            failed_step="resolver",
+            current_step="resolver",
+            retry_group_id=root.id,
+            retry_attempt=0,
+            retry_limit=3,
+            intervention_generation=0,
+            error_message="resolver timed out",
+        ),
+    )
+
+    current_id = root.id
+    for attempt in range(3):
+        status, body = plan_routes._retry_plan_run(current_id)
+        assert status == 200, (attempt, status, body)
+        current_id = body["plan_run_id"]
+        current = store.load_run(current_id)
+        assert current is not None
+        store.save_run(
+            current.copy_with(
+                status="failed",
+                failed_step="resolver",
+                current_step="resolver",
+                error_message=f"resolver timed out {attempt}",
+            ),
+        )
+
+    status, body = plan_routes._retry_plan_run(current_id)
+    assert status == 409, body
+
+    message_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
+    _json_request(message_handler, {"content": "Focus only on the resolver timeout and keep prior critic results."})
+    message_handler.do_POST()
+    assert message_handler.send_response.call_args.args == (200,)
+
+    status, body = plan_routes._retry_plan_run(current_id)
+    assert status == 200, body
+    retried = store.load_run(body["plan_run_id"])
+    assert retried is not None
+    assert retried.retry_attempt == 1
+    assert retried.intervention_generation == 1
+
+
+def test_run_plan_run_internal_resumes_from_failed_step_checkpoint(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server import planning_runtime
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a calculator mission", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+
+    class FakePlanner:
+        def plan_turn(self, draft_payload, user_message):
+            raise AssertionError("planner_synthesis should not run when retry resumes from practical_critic")
+
+    monkeypatch.setattr(planner_adapter_mod, "get_planner_adapter", lambda: FakePlanner())
+    invoke_calls: list[str] = []
+
+    def fake_invoke(profile, prompt, workdir):
+        invoke_calls.append(prompt)
+        return (
+            json.dumps({"summary": "Practical review complete", "issues": [], "warnings": [], "suggestions": []}),
+            planning_runtime.TokenEvent(tokens_in=5, tokens_out=3, cost_usd=0.0),
+        )
+
+    monkeypatch.setattr(planning_runtime, "_invoke_profile", fake_invoke)
+
+    initial = create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Initial planning attempt",
+        failed_step="practical_critic",
+        retry_group_id="group-1",
+        retry_of_run_id="run-root",
+        retry_attempt=1,
+        retry_limit=3,
+        intervention_generation=0,
+        resume_state={
+            "spec_dict": _VALID_DRAFT_SPEC,
+            "validation": {"issues": [], "warnings": [], "blocking_issues": []},
+            "technical": {"summary": "Technical review stored", "issues": [], "warnings": [], "suggestions": []},
+        },
+        reused_steps=[
+            planning_runtime.PlanStepRecord(name="planner_synthesis", status="completed", summary="reused"),
+            planning_runtime.PlanStepRecord(name="mission_plan_pass", status="completed", summary="reused"),
+            planning_runtime.PlanStepRecord(name="technical_critic", status="completed", summary="reused"),
+        ],
+    )
+
+    planning_runtime.run_plan_run(initial.id)
+
+    stored = planning_runtime._plan_store().load_run(initial.id)
+    assert stored is not None
+    assert stored.status == "completed"
+    assert [step.name for step in stored.steps] == [
+        "planner_synthesis",
+        "mission_plan_pass",
+        "technical_critic",
+        "practical_critic",
+        "resolver",
+    ]
+    assert len(invoke_calls) == 1
+
+
+def test_run_plan_run_marks_current_step_failed_on_exception(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server import planning_runtime
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(plan_routes, "_active_daemon", None)
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a calculator mission", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+
+    class FakePlanner:
+        def plan_turn(self, draft_payload, user_message):
+            updated = dict(_VALID_DRAFT_SPEC)
+            return planner_adapter_mod.PlannerTurnResult(
+                events=[],
+                assistant_message="Seeded draft.",
+                draft_spec=updated,
+            )
+
+    monkeypatch.setattr(planner_adapter_mod, "get_planner_adapter", lambda: FakePlanner())
+
+    def failing_invoke(profile, prompt, workdir):
+        if "technical adversary" in prompt.lower():
+            raise RuntimeError("technical critic timeout")
+        return (
+            json.dumps({"summary": "Critic complete", "issues": [], "warnings": [], "suggestions": []}),
+            planning_runtime.TokenEvent(tokens_in=2, tokens_out=1, cost_usd=0.0),
+        )
+
+    monkeypatch.setattr(planning_runtime, "_invoke_profile", failing_invoke)
+
+    run = create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Initial planning attempt",
+    )
+
+    with pytest.raises(RuntimeError, match="technical critic timeout"):
+        planning_runtime.run_plan_run(run.id)
+
+    stored = planning_runtime._plan_store().load_run(run.id)
+    assert stored is not None
+    assert stored.status == "failed"
+    assert stored.failed_step == "technical_critic"
+    failed_step = next(step for step in stored.steps if step.name == "technical_critic")
+    assert failed_step.status == "failed"
+    assert "technical critic timeout" in failed_step.summary
 
 
 def test_parse_planner_response_includes_preview_on_invalid_json():

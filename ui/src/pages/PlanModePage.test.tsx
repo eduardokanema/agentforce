@@ -747,7 +747,7 @@ describe('PlanModePage', () => {
     await flushPromises();
 
     const retryButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Retry Latest Run'));
+      button.textContent?.includes('Restart from failed step'));
     expect(retryButton).toBeTruthy();
 
     await act(async () => {
@@ -1325,9 +1325,9 @@ describe('PlanModePage', () => {
 
     const text = container.textContent ?? '';
     expect(text.indexOf('Planning Flow')).toBeGreaterThanOrEqual(0);
-    expect(text.indexOf('Planner standing by')).toBeGreaterThan(text.indexOf('Planning Flow'));
-    expect(text.indexOf('Live Planning Orbit')).toBeGreaterThan(text.indexOf('Planner standing by'));
-    expect(text.indexOf('Prompt Follow-up')).toBeGreaterThan(text.indexOf('Live Planning Orbit'));
+    expect(text.indexOf('Planner Synthesis')).toBeGreaterThan(text.indexOf('Planning Flow'));
+    expect(text.indexOf('Prompt Follow-up')).toBeGreaterThan(text.indexOf('Planner Synthesis'));
+    expect(text.indexOf('Live Planning Orbit')).toBeGreaterThan(text.indexOf('Prompt Follow-up'));
     expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeTruthy();
 
     act(() => {
@@ -1427,9 +1427,17 @@ describe('PlanModePage', () => {
           steps: [
             {
               name: 'technical_critic',
-              status: 'running',
+              status: 'failed',
               started_at: '2026-04-12T00:00:01Z',
+              completed_at: '2026-04-12T00:00:11Z',
               summary: 'Running technical adversary review',
+              message: 'Planner response was incomplete.',
+              metadata: {
+                retry_count: 1,
+                max_retries: 3,
+                human_intervention_needed: true,
+                human_intervention_message: 'Intervention required before retrying the failed critic step.',
+              },
             },
           ],
           error_message: 'codex planning step failed',
@@ -1460,6 +1468,10 @@ describe('PlanModePage', () => {
     expect(container.textContent).toContain('Current Planning Status');
     expect(container.textContent).toContain('Planning stopped');
     expect(container.textContent).toContain('codex planning step failed');
+    expect(container.textContent).toContain('1 failed step');
+    expect(container.textContent).toContain('Retry 1/3');
+    expect(container.textContent).toContain('Intervention required');
+    expect(container.textContent).toContain('Restart from failed step');
     expect(container.textContent).toContain('Stress Test Orbit');
     expect(container.textContent).not.toContain('Live now');
     expect(container.textContent).not.toContain('Technical Criticrunning');

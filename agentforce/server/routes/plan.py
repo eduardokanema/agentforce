@@ -14,7 +14,10 @@ from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunStore
 from agentforce.server.planning_runtime import (
     _answered_repair_state,
+    _planning_intervention_generation,
+    _planning_retry_limit,
     _repair_state_from_validation,
+    _reused_steps_for_retry,
     create_plan_run_for_draft,
     discover_preflight_questions,
     enqueue_black_hole_campaign,
@@ -133,6 +136,12 @@ def _draft_kind_from_validation(validation: dict | None) -> str:
         if isinstance(validation.get("black_hole_config"), dict) and validation.get("black_hole_config"):
             return _BLACK_HOLE_KIND
     return _SIMPLE_PLAN_KIND
+
+
+def _bump_planning_retry_generation(validation: dict | None) -> dict:
+    payload = dict(validation or {})
+    payload["planning_retry_generation"] = _planning_intervention_generation(payload) + 1
+    return payload
 
 
 def _count_workspace_files(workspace_path: str) -> int:
@@ -298,6 +307,7 @@ def _create_draft(body: dict) -> tuple[int, dict]:
     validation = {
         **validation,
         "draft_kind": draft_kind,
+        "planning_retry_generation": _planning_intervention_generation(validation),
     }
 
     draft = _store().create(
@@ -373,7 +383,7 @@ def _patch_spec(draft_id: str, body: dict) -> tuple[int, dict]:
 
     updated = draft.copy_with(
         draft_spec=dict(draft_spec),
-        validation=dict(validation) if isinstance(validation, dict) else draft.validation,
+        validation=_bump_planning_retry_generation(dict(validation) if isinstance(validation, dict) else draft.validation),
         activity_log=list(draft.activity_log) + [{"type": "draft_spec_patched"}],
     )
     save_result = _store().save(updated, expected_revision=expected_revision)
@@ -412,6 +422,7 @@ def _import_yaml(draft_id: str, body: dict) -> tuple[int, dict]:
 
     updated = draft.copy_with(
         draft_spec=mission_spec.to_dict(),
+        validation=_bump_planning_retry_generation(draft.validation),
         activity_log=list(draft.activity_log) + [{"type": "draft_yaml_imported"}],
     )
     save_result = _store().save(updated, expected_revision=expected_revision)
@@ -445,6 +456,7 @@ def _stream_turn(handler, draft_id: str, body: dict) -> tuple[int, dict]:
 
     updated = draft.copy_with(
         turns=list(draft.turns) + [{"role": "user", "content": user_message}],
+        validation=_bump_planning_retry_generation(draft.validation),
         activity_log=list(draft.activity_log) + [{"type": "plan_follow_up_requested"}],
     )
     save_result = _store().save(updated, expected_revision=draft.revision)
@@ -502,7 +514,7 @@ def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
 
     updated = draft.copy_with(
         validation={
-            **draft.validation,
+            **_bump_planning_retry_generation(draft.validation),
             "draft_kind": _draft_kind(draft),
             "preflight_status": "skipped" if skip else "answered",
             "preflight_answers": normalized_answers,
@@ -593,7 +605,7 @@ def _submit_repair(draft_id: str, body: dict) -> tuple[int, dict]:
 
     updated = draft.copy_with(
         validation={
-            **draft.validation,
+            **_bump_planning_retry_generation(draft.validation),
             "repair": _answered_repair_state(repair, normalized_answers),
         },
         turns=list(draft.turns) + (
@@ -848,10 +860,45 @@ def _retry_plan_run(run_id: str) -> tuple[int, dict]:
     if error is not None:
         return error
 
+    if run.status not in {"failed", "stale"}:
+        return 409, {"error": f"Plan run {run_id!r} is not retryable"}
+
+    if run.status == "stale":
+        retry = create_plan_run_for_draft(
+            draft,
+            trigger_kind="retry",
+            trigger_message=f"Retry of run {run_id}",
+        )
+        _enqueue_plan_run(retry.id)
+        return 200, {"draft_id": draft.id, "plan_run_id": retry.id, "status": "queued"}
+
+    current_generation = _planning_intervention_generation(draft.validation)
+    retry_limit = _planning_retry_limit()
+    next_attempt = int(run.retry_attempt or 0) + 1
+    if run.intervention_generation == current_generation and next_attempt > retry_limit:
+        locked = run.copy_with(retry_limit=retry_limit, retry_locked=True)
+        _plan_store().save_run(locked)
+        return 409, {
+            "error": "Planning retry limit reached. Provide new guidance or edit the draft before retrying again.",
+            "retry_limit": retry_limit,
+            "retry_attempt": int(run.retry_attempt or 0),
+            "failed_step": run.failed_step or run.current_step,
+            "intervention_required": True,
+        }
+
     retry = create_plan_run_for_draft(
         draft,
         trigger_kind="retry",
         trigger_message=f"Retry of run {run_id}",
+        retry_group_id=run.retry_group_id or run.id,
+        retry_of_run_id=run.id,
+        retry_attempt=1 if run.intervention_generation != current_generation else next_attempt,
+        retry_limit=retry_limit,
+        retry_locked=False,
+        failed_step=run.failed_step or run.current_step,
+        intervention_generation=current_generation,
+        resume_state=dict(run.resume_state or {}),
+        reused_steps=_reused_steps_for_retry(run),
     )
     _enqueue_plan_run(retry.id)
     return 200, {"draft_id": draft.id, "plan_run_id": retry.id, "status": "queued"}

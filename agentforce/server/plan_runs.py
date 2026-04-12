@@ -86,6 +86,14 @@ class PlanRunRecord:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    retry_group_id: str = ""
+    retry_of_run_id: str | None = None
+    retry_attempt: int = 0
+    retry_limit: int = 0
+    retry_locked: bool = False
+    failed_step: str | None = None
+    intervention_generation: int = 0
+    resume_state: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +118,14 @@ class PlanRunRecord:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "cost_usd": self.cost_usd,
+            "retry_group_id": self.retry_group_id or self.id,
+            "retry_of_run_id": self.retry_of_run_id,
+            "retry_attempt": self.retry_attempt,
+            "retry_limit": self.retry_limit,
+            "retry_locked": self.retry_locked,
+            "failed_step": self.failed_step,
+            "intervention_generation": self.intervention_generation,
+            "resume_state": self.resume_state,
         }
 
     @classmethod
@@ -140,6 +156,14 @@ class PlanRunRecord:
             tokens_in=int(payload.get("tokens_in") or 0),
             tokens_out=int(payload.get("tokens_out") or 0),
             cost_usd=float(payload.get("cost_usd") or 0.0),
+            retry_group_id=str(payload.get("retry_group_id") or payload.get("id") or ""),
+            retry_of_run_id=payload.get("retry_of_run_id"),
+            retry_attempt=int(payload.get("retry_attempt") or 0),
+            retry_limit=int(payload.get("retry_limit") or 0),
+            retry_locked=bool(payload.get("retry_locked") or False),
+            failed_step=payload.get("failed_step"),
+            intervention_generation=int(payload.get("intervention_generation") or 0),
+            resume_state=dict(payload.get("resume_state") or {}),
         )
 
     def copy_with(self, **changes: Any) -> PlanRunRecord:

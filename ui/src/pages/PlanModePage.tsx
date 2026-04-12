@@ -333,6 +333,78 @@ function latestFailedRun(draft: MissionDraft | null): PlanRun | null {
   return (draft?.plan_runs ?? []).find((run) => run.status === "failed" || run.status === "stale") ?? null;
 }
 
+function stepMetadata(step: PlanStep | null | undefined): Record<string, unknown> {
+  return step?.metadata && typeof step.metadata === "object" ? step.metadata : {};
+}
+
+function metadataNumber(step: PlanStep | null | undefined, keys: string[]): number | null {
+  const metadata = stepMetadata(step);
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function metadataBoolean(step: PlanStep | null | undefined, keys: string[]): boolean {
+  const metadata = stepMetadata(step);
+  return keys.some((key) => metadata[key] === true);
+}
+
+function metadataString(step: PlanStep | null | undefined, keys: string[]): string | null {
+  const metadata = stepMetadata(step);
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim() !== "") {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function failedPlanningStepCount(run: PlanRun | null): number {
+  return (run?.steps ?? []).filter((step) => step.status === "failed" || step.status === "stale").length;
+}
+
+function failedPlanningRunCount(draft: MissionDraft | null): number {
+  return (draft?.plan_runs ?? []).filter((run) => run.status === "failed" || run.status === "stale").length;
+}
+
+function retryProgressLabel(draft: MissionDraft | null, run: PlanRun | null, step: PlanStep | null | undefined): string | null {
+  const maxRetries = metadataNumber(step, ["max_retries"]) ?? draft?.draft_spec.caps.max_retries_global ?? null;
+  if (!maxRetries || maxRetries <= 0) {
+    return null;
+  }
+  const retryCount = metadataNumber(step, ["retry_count", "retries"])
+    ?? (run ? failedPlanningStepCount(run) : failedPlanningRunCount(draft));
+  if (!retryCount || retryCount <= 0) {
+    return `Retry 1/${maxRetries}`;
+  }
+  return `Retry ${Math.min(retryCount, maxRetries)}/${maxRetries}`;
+}
+
+function interventionRequiredLabel(step: PlanStep | null | undefined): string | null {
+  if (!step) {
+    return null;
+  }
+  if (
+    step.human_intervention_needed
+    || metadataBoolean(step, [
+      "human_intervention_needed",
+      "intervention_required",
+      "requires_human_intervention",
+    ])
+  ) {
+    return "Intervention required";
+  }
+  const message = metadataString(step, ["human_intervention_message", "intervention_message"]);
+  return message && message.toLowerCase().includes("intervention required")
+    ? "Intervention required"
+    : null;
+}
+
 function planningStatusBanner(run: PlanRun | null): { tone: string; title: string; detail: string } | null {
   if (!run) {
     return null;
@@ -427,15 +499,29 @@ function joinIssueTitles(step: PlanStep | null | undefined): string {
 function StepFindingCard({
   title,
   step,
+  retryLabel,
+  interventionLabel,
+  onRestart,
+  restarting,
 }: {
   title: string;
   step: PlanStep | null | undefined;
+  retryLabel?: string | null;
+  interventionLabel?: string | null;
+  onRestart?: () => void;
+  restarting?: boolean;
 }) {
   const status = step?.status ?? "idle";
   const issueCount = countStepIssues(step);
+  const failed = status === "failed" || status === "stale";
+  const toneClass = status === "failed"
+    ? "border-red/30 bg-red/8"
+    : status === "stale"
+      ? "border-amber/30 bg-amber/8"
+      : "border-border bg-card";
 
   return (
-    <article className="rounded-[1.05rem] border border-border bg-card px-4 py-3">
+    <article className={`rounded-[1.05rem] border px-4 py-3 ${toneClass}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
@@ -445,16 +531,45 @@ function StepFindingCard({
             {status.replace("_", " ")}
           </div>
         </div>
-        <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
-          {issueCount} issue{issueCount === 1 ? "" : "s"}
+        <div className="flex flex-wrap justify-end gap-2">
+          <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
+            {issueCount} issue{issueCount === 1 ? "" : "s"}
+          </div>
+          {retryLabel ? (
+            <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
+              {retryLabel}
+            </div>
+          ) : null}
+          {interventionLabel ? (
+            <div className="rounded-full border border-amber/30 bg-amber/10 px-3 py-1 font-mono text-[11px] text-amber">
+              {interventionLabel}
+            </div>
+          ) : null}
         </div>
       </div>
       <p className="mt-2 text-[12px] leading-5 text-dim">
         {joinIssueTitles(step)}
       </p>
+      {failed && step?.summary ? (
+        <p className="mt-2 text-[12px] leading-5 text-dim">
+          {step.summary}
+        </p>
+      ) : null}
       <div className="mt-3 font-mono text-[11px] text-dim">
         {formatDateTime(step?.completed_at || step?.started_at || null)}
       </div>
+      {failed && onRestart ? (
+        <div className="mt-3 flex justify-end">
+          <button
+            type="button"
+            className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-xs font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={restarting}
+            onClick={onRestart}
+          >
+            {restarting ? "Restarting..." : "Restart from failed step"}
+          </button>
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -560,15 +675,15 @@ function PhaseHero({
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <span>{latestRunIssue}</span>
                 {latestFailed ? (
-                  <button
-                    type="button"
-                    className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-xs font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={retryingRunId === latestFailed.id}
-                    onClick={() => onRetryLatestRun(latestFailed.id)}
-                  >
-                    {retryingRunId === latestFailed.id ? "Retrying..." : "Retry Latest Run"}
-                  </button>
-                ) : null}
+                <button
+                  type="button"
+                  className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-xs font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={retryingRunId === latestFailed.id}
+                  onClick={() => onRetryLatestRun(latestFailed.id)}
+                >
+                  {retryingRunId === latestFailed.id ? "Restarting..." : "Restart from failed step"}
+                </button>
+              ) : null}
               </div>
             </div>
           ) : null}
@@ -784,8 +899,8 @@ function PlanHistoryPanel({
                   {run.trigger_kind === "follow_up"
                     ? "Follow-up run"
                     : run.trigger_kind === "retry"
-                      ? "Retry run"
-                      : "Initial run"}
+                    ? "Restart from failed step"
+                    : "Initial run"}
                 </div>
                 <div className="rounded-full border border-border bg-card px-2.5 py-1 font-mono text-[11px] text-dim">
                   {run.status}
@@ -819,7 +934,7 @@ function PlanHistoryPanel({
                     disabled={retryingRunId === run.id}
                     onClick={() => onRetryRun(run.id)}
                   >
-                    {retryingRunId === run.id ? "Retrying..." : "Retry run"}
+                    {retryingRunId === run.id ? "Restarting..." : "Restart from failed step"}
                   </button>
                 </div>
               ) : null}
@@ -1006,6 +1121,7 @@ function PhaseViewport({
   const currentVersion = latestVersion(draft);
   const latestFailed = latestFailedRun(draft);
   const workersActive = planningBusy(currentRun) || streaming;
+  const failedStepCount = failedPlanningStepCount(currentRun);
   const activeSubstep = substeps.find((step) => step.status === "running" || step.status === "failed" || step.status === "stale")
     ?? [...substeps].reverse().find((step) => step.status === "complete")
     ?? substeps[0];
@@ -1022,6 +1138,12 @@ function PhaseViewport({
   const selectedOrbitStep = selectedOrbitStepId
     ? (stepsById.get(selectedOrbitStepId) ?? null)
     : null;
+  const latestFailedStep = currentRun?.steps
+    .slice()
+    .reverse()
+    .find((step) => step.status === "failed" || step.status === "stale") ?? null;
+  const latestRetryLabel = retryProgressLabel(draft, currentRun, latestFailedStep);
+  const latestInterventionLabel = interventionRequiredLabel(latestFailedStep);
 
   useEffect(() => {
     setSelectedOrbitStepId(null);
@@ -1193,7 +1315,7 @@ function PhaseViewport({
                   disabled={retryingRunId === latestFailed.id}
                   onClick={() => onRetryRun(latestFailed.id)}
                 >
-                  {retryingRunId === latestFailed.id ? "Retrying..." : "Retry Latest Run"}
+                  {retryingRunId === latestFailed.id ? "Restarting..." : "Restart from failed step"}
                 </button>
               ) : null}
               <button
@@ -1268,7 +1390,7 @@ function PhaseViewport({
                   disabled={retryingRunId === latestFailed.id}
                   onClick={() => onRetryRun(latestFailed.id)}
                 >
-                  {retryingRunId === latestFailed.id ? "Retrying..." : "Retry Latest Run"}
+                  {retryingRunId === latestFailed.id ? "Restarting..." : "Restart from failed step"}
                 </button>
               ) : null}
               <button
@@ -1298,13 +1420,61 @@ function PhaseViewport({
           onSelectStep={setSelectedOrbitStepId}
         />
         <div className="space-y-3">
-          <StepFindingCard title="Technical Critic" step={stepsById.get("technical_critic")} />
-          <StepFindingCard title="Practical Critic" step={stepsById.get("practical_critic")} />
-          <StepFindingCard title="Resolver" step={stepsById.get("resolver")} />
+          <StepFindingCard
+            title="Technical Critic"
+            step={stepsById.get("technical_critic")}
+            retryLabel={retryProgressLabel(draft, currentRun, stepsById.get("technical_critic"))}
+            interventionLabel={interventionRequiredLabel(stepsById.get("technical_critic"))}
+            onRestart={latestFailed ? () => onRetryRun(latestFailed.id) : undefined}
+            restarting={retryingRunId === latestFailed?.id}
+          />
+          <StepFindingCard
+            title="Practical Critic"
+            step={stepsById.get("practical_critic")}
+            retryLabel={retryProgressLabel(draft, currentRun, stepsById.get("practical_critic"))}
+            interventionLabel={interventionRequiredLabel(stepsById.get("practical_critic"))}
+            onRestart={latestFailed ? () => onRetryRun(latestFailed.id) : undefined}
+            restarting={retryingRunId === latestFailed?.id}
+          />
+          <StepFindingCard
+            title="Resolver"
+            step={stepsById.get("resolver")}
+            retryLabel={retryProgressLabel(draft, currentRun, stepsById.get("resolver"))}
+            interventionLabel={interventionRequiredLabel(stepsById.get("resolver"))}
+            onRestart={latestFailed ? () => onRetryRun(latestFailed.id) : undefined}
+            restarting={retryingRunId === latestFailed?.id}
+          />
         </div>
         {latestFailed ? (
           <div className="rounded-xl border border-red/20 bg-red/8 px-4 py-4 text-sm text-red">
-            Newest run issue: {latestFailed.error_message || `Run ${latestFailed.id} requires intervention.`}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span>
+                Newest run issue: {latestFailed.error_message || `Run ${latestFailed.id} requires intervention.`}
+              </span>
+              <button
+                type="button"
+                className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-xs font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={retryingRunId === latestFailed.id}
+                onClick={() => onRetryRun(latestFailed.id)}
+              >
+                {retryingRunId === latestFailed.id ? "Restarting..." : "Restart from failed step"}
+              </button>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-red/90">
+              <span className="rounded-full border border-red/20 bg-red/5 px-3 py-1 font-mono">
+                {failedStepCount} failed step{failedStepCount === 1 ? "" : "s"}
+              </span>
+              {latestRetryLabel ? (
+                <span className="rounded-full border border-red/20 bg-red/5 px-3 py-1 font-mono">
+                  {latestRetryLabel}
+                </span>
+              ) : null}
+              {latestInterventionLabel ? (
+                <span className="rounded-full border border-amber/30 bg-amber/10 px-3 py-1 font-mono text-amber">
+                  {latestInterventionLabel}
+                </span>
+              ) : null}
+            </div>
           </div>
         ) : null}
         {selectedOrbitStepId ? (

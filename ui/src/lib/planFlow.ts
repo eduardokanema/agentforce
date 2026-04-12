@@ -93,6 +93,32 @@ function latestStep(run: PlanRun | null): PlanStep | null {
   return run.steps[run.steps.length - 1] ?? null;
 }
 
+function latestFailedStep(run: PlanRun | null): PlanStep | null {
+  if (!run) {
+    return null;
+  }
+  return [...run.steps]
+    .reverse()
+    .find((step) => step.status === 'failed' || step.status === 'stale')
+    ?? null;
+}
+
+function stepFailureLabel(step: PlanStep | null): string | null {
+  if (!step || (step.status !== 'failed' && step.status !== 'stale')) {
+    return null;
+  }
+  const label = SUBSTEP_LABELS[step.name as PlanningSubstepId] ?? step.name.replace(/_/g, ' ');
+  const detail = step.summary || step.message || '';
+  const interventionRequired = Boolean(
+    step.human_intervention_needed
+      || step.metadata?.human_intervention_needed
+      || step.metadata?.intervention_required
+      || step.metadata?.requires_human_intervention,
+  );
+  const suffix = interventionRequired ? ' Intervention required.' : '';
+  return detail ? `${label} ${step.status === 'stale' ? 'went stale' : 'failed'}: ${detail}${suffix}` : `${label} ${step.status === 'stale' ? 'went stale' : 'failed'}.${suffix}`;
+}
+
 function phaseIndex(id: CockpitPhaseId): number {
   return PHASE_ORDER.indexOf(id);
 }
@@ -351,9 +377,11 @@ export function derivePlanFlow(
     currentPhaseId = stepToPhase(run.current_step);
   } else if (run?.status === 'failed' || run?.status === 'stale') {
     currentPhaseId = stepToPhase(run.current_step || latestStep(run)?.name);
-    latestRunIssue = run.error_message || (run.status === 'stale'
-      ? 'Latest run became stale.'
-      : 'Latest run failed.');
+    latestRunIssue = stepFailureLabel(latestFailedStep(run))
+      || run.error_message
+      || (run.status === 'stale'
+        ? 'Latest run became stale.'
+        : 'Latest run failed.');
   } else if (version) {
     currentPhaseId = readiness.ready ? 'launch' : 'finalize';
   } else if (run) {

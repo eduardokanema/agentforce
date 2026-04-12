@@ -10,7 +10,7 @@ from agentforce.server import state_io
 
 DEFAULT_CAPS: dict = {
     "max_concurrent_workers": 2,
-    "max_retries_per_task": 2,
+    "max_retries_per_task": 3,
     "max_wall_time_minutes": 60,
     "max_cost_usd": 0,
 }

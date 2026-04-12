@@ -128,6 +128,12 @@ export interface PlanStep {
   tokens_in?: number;
   tokens_out?: number;
   cost_usd?: number;
+  retry_count?: number;
+  retries?: number;
+  max_retries?: number;
+  human_intervention_needed?: boolean;
+  human_intervention_message?: string;
+  human_intervention_kind?: string;
   metadata?: Record<string, unknown>;
 }
 

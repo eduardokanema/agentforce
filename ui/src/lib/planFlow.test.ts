@@ -182,6 +182,36 @@ describe("derivePlanFlow", () => {
     expect(flow.phases.find((phase) => phase.id === "launch")?.status).toBe("up_next");
   });
 
+  it("surfaces failed step details and intervention guidance for a failed run", () => {
+    const flow = derivePlanFlow(
+      makeDraft({
+        plan_runs: [
+          makeRun({
+            status: "failed",
+            current_step: "technical_critic",
+            error_message: "codex planning step failed",
+            steps: [
+              {
+                name: "technical_critic",
+                status: "failed",
+                started_at: "2026-04-11T00:01:00Z",
+                completed_at: "2026-04-11T00:02:00Z",
+                summary: "Planner response was incomplete.",
+                metadata: {
+                  human_intervention_needed: true,
+                },
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    expect(flow.currentPhaseId).toBe("stress_test");
+    expect(flow.latestRunIssue).toContain("Technical Critic failed");
+    expect(flow.latestRunIssue).toContain("Intervention required");
+  });
+
   it("opens the launch window only when a reviewed version exists and blockers are clear", () => {
     const flow = derivePlanFlow(
       makeDraft({
