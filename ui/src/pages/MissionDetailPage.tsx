@@ -2,6 +2,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import ConfirmDialog from "../components/ConfirmDialog";
 import Breadcrumb from "../components/Breadcrumb";
+import ExecutionProfileSelect from "../components/ExecutionProfileSelect";
 import EventLogTable from "../components/EventLogTable";
 import StatusBadge from "../components/StatusBadge";
 import TokenMeter from "../components/TokenMeter";
@@ -9,9 +10,8 @@ import { createReadjustedDraft, finishMission, getModels, restartMission, stopMi
 import { useMission } from "../hooks/useMission";
 import { useToast } from "../hooks/useToast";
 import SpaceProgress from "../components/SpaceProgress";
+import { executionProfileFromOption, optionIdFromExecutionProfile } from "../lib/executionProfiles";
 import type { EventLogEntry, Model, TaskSpec, TaskState, TaskStatus } from "../lib/types";
-
-const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 
 type MissionBadgeStatus =
   | "active"
@@ -196,10 +196,8 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   const [eventTypeFilter, setEventTypeFilter] = useState("");
   const [showDefaultModels, setShowDefaultModels] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
-  const [defaultWorkerModel, setDefaultWorkerModel] = useState("");
-  const [defaultReviewerModel, setDefaultReviewerModel] = useState("");
-  const [defaultWorkerThinking, setDefaultWorkerThinking] = useState("medium");
-  const [defaultReviewerThinking, setDefaultReviewerThinking] = useState("medium");
+  const [defaultWorkerProfileId, setDefaultWorkerProfileId] = useState("");
+  const [defaultReviewerProfileId, setDefaultReviewerProfileId] = useState("");
   const [troubleshootPrompt, setTroubleshootPrompt] = useState("");
   const [troubleshootSaving, setTroubleshootSaving] = useState(false);
   const [pendingAction, setPendingAction] = useState<null | {
@@ -256,10 +254,8 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   const workerExecution = formatExecutionProfile(mission.execution?.defaults.worker);
   const reviewerExecution = formatExecutionProfile(mission.execution?.defaults.reviewer);
   const missionDefaultsDirty = (
-    defaultWorkerModel !== (mission.execution?.defaults.worker?.model ?? mission.worker_model ?? "")
-    || defaultReviewerModel !== (mission.execution?.defaults.reviewer?.model ?? "")
-    || defaultWorkerThinking !== (mission.execution?.defaults.worker?.thinking ?? "medium")
-    || defaultReviewerThinking !== (mission.execution?.defaults.reviewer?.thinking ?? "medium")
+    defaultWorkerProfileId !== optionIdFromExecutionProfile(mission.execution?.defaults.worker, models)
+    || defaultReviewerProfileId !== optionIdFromExecutionProfile(mission.execution?.defaults.reviewer, models)
   );
   const planning = mission.planning;
   let runningTaskIndex = 0;
@@ -283,27 +279,23 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   };
 
   const openDefaultModelControls = (): void => {
-    setDefaultWorkerModel(mission.execution?.defaults.worker?.model ?? mission.worker_model ?? "");
-    setDefaultReviewerModel(mission.execution?.defaults.reviewer?.model ?? "");
-    setDefaultWorkerThinking(mission.execution?.defaults.worker?.thinking ?? "medium");
-    setDefaultReviewerThinking(mission.execution?.defaults.reviewer?.thinking ?? "medium");
+    setDefaultWorkerProfileId(optionIdFromExecutionProfile(mission.execution?.defaults.worker, models));
+    setDefaultReviewerProfileId(optionIdFromExecutionProfile(mission.execution?.defaults.reviewer, models));
     setShowDefaultModels((current) => !current);
   };
 
   const saveDefaultModels = async (): Promise<void> => {
-    const workerModel = defaultWorkerModel.trim();
-    const reviewerModel = defaultReviewerModel.trim();
-    const workerAgent = models.find((model) => model.id === workerModel)?.provider_id ?? null;
-    const reviewerAgent = models.find((model) => model.id === reviewerModel)?.provider_id ?? null;
+    const workerProfile = executionProfileFromOption(models.find((model) => model.id === defaultWorkerProfileId));
+    const reviewerProfile = executionProfileFromOption(models.find((model) => model.id === defaultReviewerProfileId));
 
     try {
       const result = await updateMissionDefaultModels(missionId, {
-        worker_agent: workerAgent,
-        worker_model: workerModel || null,
-        worker_thinking: defaultWorkerThinking,
-        reviewer_agent: reviewerAgent,
-        reviewer_model: reviewerModel || null,
-        reviewer_thinking: defaultReviewerThinking,
+        worker_agent: workerProfile?.agent ?? null,
+        worker_model: workerProfile?.model ?? null,
+        worker_thinking: workerProfile?.thinking ?? null,
+        reviewer_agent: reviewerProfile?.agent ?? null,
+        reviewer_model: reviewerProfile?.model ?? null,
+        reviewer_thinking: reviewerProfile?.thinking ?? null,
       });
       addToast(
         `Default models updated for not-started tasks; pinned ${result.pinned_tasks} started task${result.pinned_tasks === 1 ? "" : "s"}`,
@@ -488,51 +480,23 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
         <div className="mb-4 grid gap-3 rounded-lg border border-border bg-surface p-3 md:grid-cols-[1fr_1fr_auto]">
           <label className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
             Worker
-            <select
+            <ExecutionProfileSelect
               className="mt-1 w-full rounded border border-border bg-card px-3 py-2 font-mono text-[12px] normal-case tracking-normal text-text outline-none focus:border-cyan"
-              value={defaultWorkerModel}
-              onChange={(event) => setDefaultWorkerModel(event.currentTarget.value)}
-            >
-              <option value="">{models.length === 0 ? "Loading models..." : "Keep current worker default"}</option>
-              {models.map((model) => (
-                <option key={`worker-${model.id}`} value={model.id}>{model.name}</option>
-              ))}
-            </select>
-            <select
-              className="mt-2 w-full rounded border border-border bg-card px-3 py-2 font-mono text-[12px] normal-case tracking-normal text-text outline-none focus:border-cyan"
-              value={defaultWorkerThinking}
-              onChange={(event) => setDefaultWorkerThinking(event.currentTarget.value)}
-            >
-              {THINKING_LEVELS.map((level) => (
-                <option key={`default-worker-thinking-${level}`} value={level}>
-                  Thinking · {level}
-                </option>
-              ))}
-            </select>
+              options={models}
+              value={defaultWorkerProfileId}
+              onChange={setDefaultWorkerProfileId}
+              ariaLabel="Mission default worker execution profile"
+            />
           </label>
           <label className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
             Reviewer
-            <select
+            <ExecutionProfileSelect
               className="mt-1 w-full rounded border border-border bg-card px-3 py-2 font-mono text-[12px] normal-case tracking-normal text-text outline-none focus:border-cyan"
-              value={defaultReviewerModel}
-              onChange={(event) => setDefaultReviewerModel(event.currentTarget.value)}
-            >
-              <option value="">{models.length === 0 ? "Loading models..." : "Keep current reviewer default"}</option>
-              {models.map((model) => (
-                <option key={`reviewer-${model.id}`} value={model.id}>{model.name}</option>
-              ))}
-            </select>
-            <select
-              className="mt-2 w-full rounded border border-border bg-card px-3 py-2 font-mono text-[12px] normal-case tracking-normal text-text outline-none focus:border-cyan"
-              value={defaultReviewerThinking}
-              onChange={(event) => setDefaultReviewerThinking(event.currentTarget.value)}
-            >
-              {THINKING_LEVELS.map((level) => (
-                <option key={`default-reviewer-thinking-${level}`} value={level}>
-                  Thinking · {level}
-                </option>
-              ))}
-            </select>
+              options={models}
+              value={defaultReviewerProfileId}
+              onChange={setDefaultReviewerProfileId}
+              ariaLabel="Mission default reviewer execution profile"
+            />
           </label>
           <div className="flex items-end gap-2">
             <button

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import FileBrowser from "../components/FileBrowser";
-import ModelSelector from "../components/ModelSelector";
+import ExecutionProfileSelect from "../components/ExecutionProfileSelect";
 import BlackHoleConfigPanel from "../components/planning/BlackHoleConfigPanel";
 import BlackHoleHero from "../components/planning/BlackHoleHero";
 import BlackHoleLedger from "../components/planning/BlackHoleLedger";
@@ -25,6 +25,7 @@ import {
   normalizeBlackHoleConfig,
 } from "../lib/blackHole";
 import { BLACK_HOLE_DRAFT_KIND, isBlackHoleDraft } from "../lib/draftKinds";
+import { executionProfileFromOption, optionIdFromExecutionProfile } from "../lib/executionProfiles";
 import type {
   BlackHoleCampaignState,
   BlackHoleConfig,
@@ -48,9 +49,8 @@ const PLANNING_PROFILE_KEYS = [
 ] as const;
 
 const BLACK_HOLE_WORKSPACES_KEY = "agentforce-black-hole-workspaces-v1";
-const BLACK_HOLE_MODELS_KEY = "agentforce-black-hole-models-v1";
-const BLACK_HOLE_PROFILES_KEY = "agentforce-black-hole-profiles-v1";
-const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+const BLACK_HOLE_LEGACY_PROFILES_KEY = "agentforce-black-hole-profiles-v1";
+const BLACK_HOLE_PROFILES_KEY = "agentforce-black-hole-profiles-v2";
 
 function readStoredJson<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") {
@@ -89,8 +89,7 @@ function normalizePlanningProfile(value: unknown): ExecutionProfile {
     ? candidate.agent
     : "claude";
   const model = typeof candidate.model === "string" ? candidate.model : "";
-  const thinking = typeof candidate.thinking === "string"
-    && THINKING_LEVELS.includes(candidate.thinking as typeof THINKING_LEVELS[number])
+  const thinking = typeof candidate.thinking === "string" && candidate.thinking.trim() !== ""
     ? candidate.thinking
     : "medium";
   return { agent, model, thinking };
@@ -119,11 +118,13 @@ export default function BlackHoleModePage(): JSX.Element {
     readStoredJson<string[]>(BLACK_HOLE_WORKSPACES_KEY, []),
   );
   const [models, setModels] = useState<Model[]>([]);
-  const [selectedModels, setSelectedModels] = useState<string[]>(
-    readStoredJson<string[]>(BLACK_HOLE_MODELS_KEY, []),
-  );
   const [planningProfiles, setPlanningProfiles] = useState<Record<string, ExecutionProfile>>(
-    normalizePlanningProfiles(readStoredJson<Record<string, unknown>>(BLACK_HOLE_PROFILES_KEY, getDefaultPlanProfiles())),
+    normalizePlanningProfiles(
+      readStoredJson<Record<string, unknown>>(
+        BLACK_HOLE_PROFILES_KEY,
+        readStoredJson<Record<string, unknown>>(BLACK_HOLE_LEGACY_PROFILES_KEY, getDefaultPlanProfiles()),
+      ),
+    ),
   );
   const [draft, setDraft] = useState<MissionDraft | null>(null);
   const [campaignState, setCampaignState] = useState<BlackHoleCampaignState | null>(null);
@@ -136,15 +137,9 @@ export default function BlackHoleModePage(): JSX.Element {
   const [syncingCampaign, setSyncingCampaign] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
 
-  const effectiveSelectedModels = useMemo(
-    () => (selectedModels.length > 0 ? selectedModels : models.map((model) => model.id)),
-    [models, selectedModels],
-  );
-
   const canCreateDraft =
     prompt.trim() !== ""
     && workspaces.length > 0
-    && effectiveSelectedModels.length > 0
     && (planningProfiles.planner.model ?? "").trim() !== "";
 
   const loadDraft = async (nextDraftId: string): Promise<void> => {
@@ -180,22 +175,13 @@ export default function BlackHoleModePage(): JSX.Element {
           return;
         }
         setModels(loadedModels);
-        const defaultModel = loadedModels[0]?.id || "";
-        const defaultAgent = loadedModels[0]?.provider_id || "codex";
-        const availableModelIds = new Set(loadedModels.map((model) => model.id));
-        setSelectedModels((current) => {
-          const valid = current.filter((modelId) => availableModelIds.has(modelId));
-          return valid.length > 0 ? valid : loadedModels.map((model) => model.id);
-        });
         setPlanningProfiles((current) => {
           const next = { ...current };
           (Object.keys(next) as Array<keyof typeof next>).forEach((key) => {
-            if (!availableModelIds.has(String(next[key].model || ""))) {
-              next[key] = {
-                ...next[key],
-                model: defaultModel,
-                agent: defaultAgent,
-              };
+            const optionId = optionIdFromExecutionProfile(next[key], loadedModels);
+            const selected = loadedModels.find((model) => model.id === optionId) ?? loadedModels[0];
+            if (selected) {
+              next[key] = executionProfileFromOption(selected) ?? next[key];
             }
           });
           return next;
@@ -223,13 +209,6 @@ export default function BlackHoleModePage(): JSX.Element {
     }
     window.localStorage.setItem(BLACK_HOLE_WORKSPACES_KEY, JSON.stringify(normalizeWorkspacePaths(workspaces)));
   }, [workspaces]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    window.localStorage.setItem(BLACK_HOLE_MODELS_KEY, JSON.stringify(selectedModels));
-  }, [selectedModels]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -281,7 +260,6 @@ export default function BlackHoleModePage(): JSX.Element {
     try {
       const created = await createPlanDraft({
         prompt,
-        approved_models: effectiveSelectedModels,
         workspace_paths: workspaces,
         companion_profile: {
           id: "planner",
@@ -455,63 +433,38 @@ export default function BlackHoleModePage(): JSX.Element {
           </div>
 
           <div className="mt-4">
-            <div className="mb-2 text-sm font-medium text-text">Approved models</div>
-            <ModelSelector
-              models={models}
-              selected={effectiveSelectedModels}
-              onChange={setSelectedModels}
-            />
+            <div className="mb-2 text-sm font-medium text-text">Planning Stack</div>
+            <p className="text-xs text-dim">
+              Choose the exact `Model + Thinking` profile for each recursive planning role.
+            </p>
           </div>
 
-          <div className="mt-6">
-            <div className="mb-3 text-sm font-medium text-text">Planning Stack</div>
+          <div className="mt-4">
             <div className="grid gap-4 sm:grid-cols-2">
               {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
-                const profile = planningProfiles[key];
+                const selectedProfileId = optionIdFromExecutionProfile(planningProfiles[key], models);
                 return (
                   <div key={key} className="rounded-xl border border-border bg-surface p-3">
                     <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
                       {label}
                     </div>
-                    <div className="grid gap-2">
-                      <select
-                        className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-amber"
-                        value={profile.model ?? ""}
-                        onChange={(event) => {
-                          const modelId = event.target.value;
-                          const model = models.find((item) => item.id === modelId);
-                          setPlanningProfiles((current) => ({
-                            ...current,
-                            [key]: {
-                              ...profile,
-                              model: modelId,
-                              agent: model?.provider_id || profile.agent,
-                            },
-                          }));
-                        }}
-                      >
-                        {models.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            [{model.provider}] {model.name}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-amber"
-                        value={profile.thinking ?? ""}
-                        onChange={(event) =>
-                          setPlanningProfiles((current) => ({
-                            ...current,
-                            [key]: { ...profile, thinking: event.target.value },
-                          }))}
-                      >
-                        {THINKING_LEVELS.map((thinking) => (
-                          <option key={thinking} value={thinking}>
-                            {thinking}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                    <ExecutionProfileSelect
+                      options={models}
+                      value={selectedProfileId}
+                      onChange={(value) => {
+                        const selected = models.find((item) => item.id === value);
+                        const profile = executionProfileFromOption(selected);
+                        if (!profile) {
+                          return;
+                        }
+                        setPlanningProfiles((current) => ({
+                          ...current,
+                          [key]: profile,
+                        }));
+                      }}
+                      className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-amber"
+                      ariaLabel={`${label} execution profile`}
+                    />
                   </div>
                 );
               })}
@@ -520,7 +473,7 @@ export default function BlackHoleModePage(): JSX.Element {
 
           <div className="mt-5 flex items-center justify-between gap-3">
             <span className="text-[11px] text-dim">
-              {loadingModels ? "Loading models..." : `${effectiveSelectedModels.length} approved model(s) armed`}
+              {loadingModels ? "Loading models..." : `${PLANNING_PROFILE_KEYS.length} execution profile(s) armed`}
             </span>
             <button
               type="button"
@@ -624,7 +577,7 @@ export default function BlackHoleModePage(): JSX.Element {
                   {draft.workspace_paths.length} workspace{draft.workspace_paths.length === 1 ? "" : "s"}
                 </span>
                 <span className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
-                  {draft.approved_models.length} approved model{draft.approved_models.length === 1 ? "" : "s"}
+                  {PLANNING_PROFILE_KEYS.length} planning profiles
                 </span>
                 <span className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
                   {campaign?.current_loop ?? 0} loop{campaign?.current_loop === 1 ? "" : "s"}

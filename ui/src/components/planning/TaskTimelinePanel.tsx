@@ -1,3 +1,5 @@
+import ExecutionProfileSelect from '../ExecutionProfileSelect';
+import { executionProfileFromOption, optionIdFromExecutionProfile } from '../../lib/executionProfiles';
 import type { ExecutionConfig, MissionDraft, Model, TaskSpec } from '../../lib/types';
 
 interface TaskTimelinePanelProps {
@@ -27,8 +29,8 @@ export default function TaskTimelinePanel({
   onSave,
 }: TaskTimelinePanelProps) {
   const tasks = draft.draft_spec.tasks;
-  const defaultWorkerModel = draft.draft_spec.execution_defaults?.worker?.model ?? '';
-  const defaultReviewerModel = draft.draft_spec.execution_defaults?.reviewer?.model ?? '';
+  const defaultWorkerProfile = draft.draft_spec.execution_defaults?.worker ?? null;
+  const defaultReviewerProfile = draft.draft_spec.execution_defaults?.reviewer ?? null;
 
   return (
     <section className="rounded-lg border border-border bg-card p-4">
@@ -56,24 +58,26 @@ export default function TaskTimelinePanel({
             (dep) => !tasks.find((t) => t.id === dep),
           );
           const taskStatusColor = hasBadDeps ? 'border-amber text-amber bg-amber-bg/20' : 'border-border text-muted bg-card';
-          const taskWorkerModel = task.execution?.worker?.model ?? '';
-          const taskReviewerModel = task.execution?.reviewer?.model ?? '';
+          const taskWorkerProfileId = optionIdFromExecutionProfile(task.execution?.worker ?? null, models);
+          const taskReviewerProfileId = optionIdFromExecutionProfile(task.execution?.reviewer ?? null, models);
 
-          const handleWorkerModelChange = (value: string): void => {
-            const execution: ExecutionConfig | null = value
-              ? { worker: { agent: 'claude', thinking: 'medium', model: value }, reviewer: task.execution?.reviewer ?? null }
+          const handleWorkerProfileChange = (value: string): void => {
+            const worker = executionProfileFromOption(models.find((model) => model.id === value));
+            const execution: ExecutionConfig | null = worker
+              ? { worker, reviewer: task.execution?.reviewer ?? null }
               : task.execution?.reviewer
-              ? { worker: null, reviewer: task.execution.reviewer }
-              : null;
+                ? { worker: null, reviewer: task.execution.reviewer }
+                : null;
             onTaskChange(task.id, { execution });
           };
 
-          const handleReviewerModelChange = (value: string): void => {
-            const execution: ExecutionConfig | null = value
-              ? { worker: task.execution?.worker ?? null, reviewer: { agent: 'claude', thinking: 'medium', model: value } }
+          const handleReviewerProfileChange = (value: string): void => {
+            const reviewer = executionProfileFromOption(models.find((model) => model.id === value));
+            const execution: ExecutionConfig | null = reviewer
+              ? { worker: task.execution?.worker ?? null, reviewer }
               : task.execution?.worker
-              ? { worker: task.execution.worker, reviewer: null }
-              : null;
+                ? { worker: task.execution.worker, reviewer: null }
+                : null;
             onTaskChange(task.id, { execution });
           };
 
@@ -182,40 +186,38 @@ export default function TaskTimelinePanel({
                 <div className="grid grid-cols-[1fr_1fr_80px] gap-3 items-end">
                   <div>
                     <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
-                      Worker Model
+                      Worker Profile
                     </div>
-                    <select
+                    <ExecutionProfileSelect
                       aria-label={`Task ${task.id} worker model`}
                       className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-text outline-none focus:border-cyan"
-                      value={taskWorkerModel}
-                      onChange={(event) => handleWorkerModelChange(event.currentTarget.value)}
-                    >
-                      <option value="">Inherit ({defaultWorkerModel || 'default'})</option>
-                      {models.map((model) => (
-                        <option key={`w-${task.id}-${model.id}`} value={model.id}>
-                          {model.name}
-                        </option>
-                      ))}
-                    </select>
+                      value={taskWorkerProfileId}
+                      onChange={handleWorkerProfileChange}
+                      options={models}
+                      emptyLabel={
+                        defaultWorkerProfile
+                          ? `Inherit (${defaultWorkerProfile.agent} · ${defaultWorkerProfile.model} · ${defaultWorkerProfile.thinking ?? 'medium'})`
+                          : 'Inherit default worker profile'
+                      }
+                    />
                   </div>
 
                   <div>
                     <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
-                      Reviewer Model
+                      Reviewer Profile
                     </div>
-                    <select
+                    <ExecutionProfileSelect
                       aria-label={`Task ${task.id} reviewer model`}
                       className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-text outline-none focus:border-cyan"
-                      value={taskReviewerModel}
-                      onChange={(event) => handleReviewerModelChange(event.currentTarget.value)}
-                    >
-                      <option value="">Inherit ({defaultReviewerModel || 'default'})</option>
-                      {models.map((model) => (
-                        <option key={`r-${task.id}-${model.id}`} value={model.id}>
-                          {model.name}
-                        </option>
-                      ))}
-                    </select>
+                      value={taskReviewerProfileId}
+                      onChange={handleReviewerProfileChange}
+                      options={models}
+                      emptyLabel={
+                        defaultReviewerProfile
+                          ? `Inherit (${defaultReviewerProfile.agent} · ${defaultReviewerProfile.model} · ${defaultReviewerProfile.thinking ?? 'medium'})`
+                          : 'Inherit default reviewer profile'
+                      }
+                    />
                   </div>
 
                   <div>

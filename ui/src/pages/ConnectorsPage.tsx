@@ -1,16 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../hooks/useToast';
-import type { Model, Provider, ProviderModel } from '../lib/types';
+import type { Provider, ProviderModel } from '../lib/types';
 import {
   activateProvider,
   configureProvider,
   deactivateProvider,
   deleteProvider,
-  getDefaultModel,
   getProviders,
   refreshProviderModels,
-  setDefaultModel,
   testProvider,
   updateProviderModels,
 } from '../lib/api';
@@ -25,87 +23,18 @@ const PROVIDER_META: Record<string, { emoji: string }> = {
   codex: { emoji: '○' },
 };
 
-// ── Default Model selector ────────────────────────────────────────────────────
-
-function DefaultModelSelector({ allModels }: { allModels: Model[] }) {
-  const { addToast } = useToast();
-  const [current, setCurrent] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    getDefaultModel()
-      .then((r) => setCurrent(r.model))
-      .catch(() => {});
-  }, []);
-
-  const handleChange = async (modelId: string) => {
-    const value = modelId || null;
-    setSaving(true);
-    try {
-      await setDefaultModel(value);
-      setCurrent(value);
-      addToast(value ? 'Default model updated' : 'Default model cleared', 'success');
-    } catch (err) {
-      addToast(err instanceof Error ? err.message : 'Failed to update', 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <section className="rounded-lg border border-cyan/20 bg-cyan/5 p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <span className="text-lg">⭐</span>
-        <div>
-          <h2 className="font-semibold">Default Model</h2>
-          <p className="text-[11px] text-dim">
-            Used for all tasks and plan generation unless overridden per-provider or per-task.
-            Includes models from all active providers and CLIs.
-          </p>
-        </div>
-      </div>
-      <select
-        aria-label="Default model"
-        value={current ?? ''}
-        disabled={saving || allModels.length === 0}
-        onChange={(e) => void handleChange(e.target.value)}
-        className="w-full max-w-lg rounded border border-border bg-surface px-3 py-2 text-sm text-text outline-none focus:border-cyan/50 disabled:opacity-40"
-      >
-        <option value="">— no default (choose per task) —</option>
-        {allModels.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.name} · {m.provider}
-            {m.cost_per_1k_input > 0
-              ? ` · $${m.cost_per_1k_input.toFixed(4)}/1k`
-              : m.latency_label === 'Local' ? ' · free' : ' · Plan'}
-          </option>
-        ))}
-      </select>
-      {allModels.length === 0 && (
-        <p className="mt-2 text-[11px] text-muted">
-          Connect a provider or install a CLI below to enable model selection.
-        </p>
-      )}
-    </section>
-  );
-}
-
 // ── Model row ─────────────────────────────────────────────────────────────────
 
 function ModelRow({
   model,
   enabled,
-  isDefault,
   isCli,
   onToggle,
-  onSetDefault,
 }: {
   model: ProviderModel;
   enabled: boolean;
-  isDefault: boolean;
   isCli: boolean;
   onToggle: (id: string, checked: boolean) => void;
-  onSetDefault: (id: string) => void;
 }) {
   return (
     <div className="flex items-center gap-3 rounded px-1 py-1 hover:bg-surface">
@@ -128,16 +57,12 @@ function ModelRow({
           </span>
         )}
         <span className="ml-2 text-[10px] text-dim">{model.latency_label}</span>
+        {Array.isArray(model.supported_thinking) && model.supported_thinking.length > 0 ? (
+          <span className="ml-2 text-[10px] text-dim">
+            Thinking {model.supported_thinking.join('/')}
+          </span>
+        ) : null}
       </label>
-      <button
-        type="button"
-        aria-label={isDefault ? 'Default model' : 'Set as default'}
-        title={isDefault ? 'Default model' : 'Set as default'}
-        className={`text-[13px] transition-opacity ${isDefault ? 'opacity-100' : 'opacity-20 hover:opacity-60'}`}
-        onClick={() => onSetDefault(model.id)}
-      >
-        ⭐
-      </button>
     </div>
   );
 }
@@ -178,18 +103,15 @@ function ProviderCard({
   const [enabledIds, setEnabledIds] = useState<string[]>(
     provider.enabled_models ?? allModelIds,
   );
-  const [defaultModel, setProviderDefaultModel] = useState<string | null>(
-    provider.default_model ?? null,
-  );
   const [modelFilter, setModelFilter] = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const saveModels = useCallback(
-    (ids: string[], def: string | null) => {
+    (ids: string[]) => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(async () => {
         try {
-          await updateProviderModels(provider.id, ids, def ?? undefined);
+          await updateProviderModels(provider.id, ids);
         } catch (err) {
           addToast(err instanceof Error ? err.message : 'Failed to update models', 'error');
         }
@@ -201,13 +123,7 @@ function ProviderCard({
   const handleToggle = (modelId: string, checked: boolean) => {
     const next = checked ? [...enabledIds, modelId] : enabledIds.filter((id) => id !== modelId);
     setEnabledIds(next);
-    saveModels(next, defaultModel);
-  };
-
-  const handleSetDefault = (modelId: string) => {
-    const next = modelId === defaultModel ? null : modelId;
-    setProviderDefaultModel(next);
-    saveModels(enabledIds, next);
+    saveModels(next);
   };
 
   const handleSaveKey = async () => {
@@ -318,26 +234,26 @@ function ProviderCard({
   const selectAll = () => {
     const ids = provider.all_models.map((m) => m.id);
     setEnabledIds(ids);
-    saveModels(ids, defaultModel);
+    saveModels(ids);
   };
 
   const selectNone = () => {
     setEnabledIds([]);
-    saveModels([], defaultModel);
+    saveModels([]);
   };
 
   const selectFiltered = () => {
     const fids = filteredModels.map((m) => m.id);
     const merged = [...new Set([...enabledIds, ...fids])];
     setEnabledIds(merged);
-    saveModels(merged, defaultModel);
+    saveModels(merged);
   };
 
   const deselectFiltered = () => {
     const fset = new Set(filteredModels.map((m) => m.id));
     const remaining = enabledIds.filter((id) => !fset.has(id));
     setEnabledIds(remaining);
-    saveModels(remaining, defaultModel);
+    saveModels(remaining);
   };
 
   return (
@@ -571,10 +487,8 @@ function ProviderCard({
                 key={model.id}
                 model={model}
                 enabled={enabledIds.includes(model.id)}
-                isDefault={defaultModel === model.id}
                 isCli={isCli}
                 onToggle={handleToggle}
-                onSetDefault={handleSetDefault}
               />
             ))}
             {filteredModels.length === 0 && modelFilter && (
@@ -627,32 +541,6 @@ function ProviderCard({
   );
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
-
-function toModelList(providers: Provider[]): Model[] {
-  const models: Model[] = [];
-  const seen = new Set<string>();
-  for (const p of providers) {
-    if (!p.active) continue;
-    const enabled = p.enabled_models;
-    for (const m of p.all_models) {
-      if (seen.has(m.id)) continue;
-      if (enabled === null || enabled.includes(m.id)) {
-        seen.add(m.id);
-        models.push({
-          id: m.id,
-          name: m.name,
-          provider: p.display_name,
-          cost_per_1k_input: m.cost_per_1k_input,
-          cost_per_1k_output: m.cost_per_1k_output,
-          latency_label: m.latency_label,
-        });
-      }
-    }
-  }
-  return models;
-}
-
 export default function ConnectorsPage() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
@@ -672,8 +560,6 @@ export default function ConnectorsPage() {
 
   useEffect(() => { void load(); }, [load]);
 
-  const allModels = toModelList(providers);
-
   return (
     <div className="flex flex-col gap-6">
       <header className="page-head">
@@ -682,8 +568,6 @@ export default function ConnectorsPage() {
           Configure AI providers and CLI executors — all can run LLM commands for your missions
         </p>
       </header>
-
-      <DefaultModelSelector allModels={allModels} />
 
       {error && (
         <div className="rounded-lg border border-red/30 bg-red/10 px-4 py-3 text-sm text-red">

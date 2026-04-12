@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib import request as urllib_request
 
-from .. import state_io
+from .. import model_catalog, state_io
 from ...utils import fmt_duration_seconds
 
 
@@ -303,63 +303,7 @@ def _get_provider_models(provider_name: str) -> list[dict]:
 
 
 def _models_list() -> list[dict]:
-    try:
-        import keyring as _keyring
-    except Exception:
-        _keyring = None  # type: ignore[assignment]
-
-    metadata = _provider_metadata()
-    models: list[dict] = []
-    seen: set[str] = set()
-
-    for provider_id, catalogue in _PROVIDER_CATALOGUE.items():
-        meta = metadata.get(provider_id, {})
-        enabled = meta.get("enabled_models")
-        provider_type = catalogue.get("type", "api")
-
-        if provider_type == "cli":
-            if not _check_agent_binary(catalogue.get("binary", provider_id)):
-                continue
-            if provider_id == "opencode":
-                source: list[dict] = metadata.get("openrouter", {}).get("cached_models", [])
-            elif provider_id in {"claude", "codex", "gemini"}:
-                source = _get_provider_models(provider_id)
-            elif "cached_models" in meta:
-                source = meta["cached_models"]
-            else:
-                source = []
-        elif provider_id == "ollama":
-            try:
-                source = _fetch_ollama_models()
-            except Exception:
-                continue
-        else:
-            token = None
-            if _keyring is not None:
-                try:
-                    token = _keyring.get_password("agentforce-provider", provider_id)
-                except Exception:
-                    pass
-            if not token:
-                continue
-            source = meta.get("cached_models", [])
-
-        for model in source:
-            mid = model["id"]
-            if mid in seen:
-                continue
-            if enabled is None or mid in enabled:
-                seen.add(mid)
-                models.append({
-                    "id": mid,
-                    "name": model["name"],
-                    "provider": catalogue["display_name"],
-                    "provider_id": provider_id,
-                    "cost_per_1k_input": model["cost_per_1k_input"],
-                    "cost_per_1k_output": model["cost_per_1k_output"],
-                    "latency_label": model["latency_label"],
-                })
-    return models
+    return model_catalog.list_execution_profiles()
 
 
 def _providers_list() -> list[dict]:
@@ -372,6 +316,7 @@ def _providers_list() -> list[dict]:
     agents_meta = metadata.get("_agents", {})
     default_agent = agents_meta.get("default_agent")
 
+    provider_models = model_catalog.list_provider_models()
     result = []
     for provider_id, catalogue in _PROVIDER_CATALOGUE.items():
         meta = metadata.get(provider_id, {})
@@ -381,14 +326,7 @@ def _providers_list() -> list[dict]:
         if provider_type == "cli":
             binary = catalogue.get("binary", provider_id)
             active = _check_agent_binary(binary)
-            if provider_id == "opencode":
-                all_models: list[dict] = metadata.get("openrouter", {}).get("cached_models", [])
-            elif provider_id in {"claude", "codex", "gemini"}:
-                all_models = _get_provider_models(provider_id)
-            elif "cached_models" in meta:
-                all_models = meta["cached_models"]
-            else:
-                all_models = []
+            all_models = list(provider_models.get(provider_id, []))
             result.append({
                 "id": provider_id,
                 "display_name": catalogue["display_name"],
@@ -405,14 +343,8 @@ def _providers_list() -> list[dict]:
             })
         else:
             if provider_id == "ollama":
-                active = False
-                live_models: list[dict] = []
-                try:
-                    live_models = _fetch_ollama_models()
-                    active = True
-                except Exception:
-                    pass
-                all_models = live_models
+                all_models = list(provider_models.get(provider_id, []))
+                active = any(bool(model.get("active")) for model in all_models)
             else:
                 token = None
                 if _keyring is not None:
@@ -421,7 +353,7 @@ def _providers_list() -> list[dict]:
                     except Exception:
                         pass
                 active = token is not None
-                all_models = meta.get("cached_models", [])
+                all_models = list(provider_models.get(provider_id, []))
             result.append({
                 "id": provider_id,
                 "display_name": catalogue["display_name"],

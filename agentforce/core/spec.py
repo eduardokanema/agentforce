@@ -586,6 +586,15 @@ class MissionSpec:
             resolved = cli_default if resolved is None else resolved.merged(cli_default)
         if runtime_fallback and runtime_fallback.configured():
             resolved = runtime_fallback if resolved is None else resolved.merged(runtime_fallback)
+        if resolved and resolved.configured():
+            try:
+                from agentforce.server import model_catalog
+
+                normalized = model_catalog.normalize_execution_profile(resolved)
+                if normalized.valid:
+                    return normalized.profile
+            except Exception:
+                pass
         return resolved
 
     def effective_execution_profile(self, task: TaskSpec, role: str) -> Optional[ExecutionProfile]:

@@ -550,8 +550,10 @@ describe('TaskDetailPage', () => {
     expect(apiHarness.changeTaskModel).toHaveBeenCalledWith('mission-123', 'task-1', {
       worker_agent: 'codex',
       worker_model: 'gpt-5',
+      worker_thinking: 'medium',
       reviewer_agent: 'claude',
       reviewer_model: 'claude-sonnet-4-6',
+      reviewer_thinking: 'medium',
     });
 
     act(() => {

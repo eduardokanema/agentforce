@@ -5,10 +5,11 @@ import json as _jsonlib
 from pathlib import Path
 
 from agentforce.core.engine import MissionEngine
+from agentforce.core.spec import ExecutionProfile
 from agentforce.memory import Memory
 from agentforce.streaming import StreamRecorder, load_stream_events
 
-from .. import state_io
+from .. import model_catalog, state_io
 from .providers import _now_iso
 
 
@@ -226,34 +227,21 @@ def _post_task_resolve(mission_id: str, task_id: str, body: dict) -> tuple[int, 
 
 
 def _post_task_change_model(mission_id: str, task_id: str, body: dict) -> tuple[int, dict]:
-    legacy_model = body.get("model")
-    worker_model = body.get("worker_model")
-    reviewer_model = body.get("reviewer_model")
-    worker_agent = body.get("worker_agent")
-    reviewer_agent = body.get("reviewer_agent")
-    worker_thinking = body.get("worker_thinking")
-    reviewer_thinking = body.get("reviewer_thinking")
-    if not isinstance(worker_model, str) and isinstance(legacy_model, str):
-        worker_model = legacy_model
-    if not isinstance(worker_model, str):
-        worker_model = None
-    if not isinstance(reviewer_model, str):
-        reviewer_model = None
-    if not isinstance(worker_agent, str):
-        worker_agent = None
-    if not isinstance(reviewer_agent, str):
-        reviewer_agent = None
-    if not isinstance(worker_thinking, str):
-        worker_thinking = None
-    if not isinstance(reviewer_thinking, str):
-        reviewer_thinking = None
-    worker_model = worker_model.strip() if worker_model else None
-    reviewer_model = reviewer_model.strip() if reviewer_model else None
-    worker_agent = worker_agent.strip() if worker_agent else None
-    reviewer_agent = reviewer_agent.strip() if reviewer_agent else None
-    worker_thinking = worker_thinking.strip() if worker_thinking else None
-    reviewer_thinking = reviewer_thinking.strip() if reviewer_thinking else None
-    if not worker_model and not reviewer_model and not worker_agent and not reviewer_agent and not worker_thinking and not reviewer_thinking:
+    try:
+        worker_profile = _normalized_role_profile(body.get("worker_profile"), role="worker")
+        reviewer_profile = _normalized_role_profile(body.get("reviewer_profile"), role="reviewer")
+        if worker_profile is None:
+            worker_profile = _normalized_legacy_role_profile(body, role="worker")
+        if reviewer_profile is None:
+            reviewer_profile = _normalized_legacy_role_profile(body, role="reviewer")
+
+        legacy_model = body.get("model")
+        if worker_profile is None and isinstance(legacy_model, str):
+            worker_profile = _normalized_legacy_model(legacy_model)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+
+    if worker_profile is None and reviewer_profile is None:
         return 400, {"error": "worker_model, reviewer_model, worker_agent, reviewer_agent, worker_thinking, or reviewer_thinking is required"}
 
     engine = _load_engine(mission_id)
@@ -265,12 +253,12 @@ def _post_task_change_model(mission_id: str, task_id: str, body: dict) -> tuple[
     try:
         retried = engine.change_models(
             task_id,
-            worker_model=worker_model,
-            reviewer_model=reviewer_model,
-            worker_agent=worker_agent,
-            reviewer_agent=reviewer_agent,
-            worker_thinking=worker_thinking,
-            reviewer_thinking=reviewer_thinking,
+            worker_model=worker_profile.model if worker_profile else None,
+            reviewer_model=reviewer_profile.model if reviewer_profile else None,
+            worker_agent=worker_profile.agent if worker_profile else None,
+            reviewer_agent=reviewer_profile.agent if reviewer_profile else None,
+            worker_thinking=worker_profile.thinking if worker_profile else None,
+            reviewer_thinking=reviewer_profile.thinking if reviewer_profile else None,
         )
     except ValueError as exc:
         return 409, {"error": str(exc)}
@@ -286,14 +274,50 @@ def _post_task_change_model(mission_id: str, task_id: str, body: dict) -> tuple[
         _broadcast_mission_refresh(state)
 
     return 200, {
-        "worker_agent": worker_agent,
-        "worker_model": worker_model,
-        "worker_thinking": worker_thinking,
-        "reviewer_agent": reviewer_agent,
-        "reviewer_model": reviewer_model,
-        "reviewer_thinking": reviewer_thinking,
+        "worker_agent": worker_profile.agent if worker_profile else None,
+        "worker_model": worker_profile.model if worker_profile else None,
+        "worker_thinking": worker_profile.thinking if worker_profile else None,
+        "reviewer_agent": reviewer_profile.agent if reviewer_profile else None,
+        "reviewer_model": reviewer_profile.model if reviewer_profile else None,
+        "reviewer_thinking": reviewer_profile.thinking if reviewer_profile else None,
         "retried": retried,
     }
+
+
+def _normalized_role_profile(value: object, *, role: str) -> ExecutionProfile | None:
+    if not isinstance(value, dict):
+        return None
+    normalized = model_catalog.normalize_profile_dict(value)
+    if not normalized.valid:
+        raise ValueError(f"{role}_profile is not selectable: {normalized.reason}")
+    return normalized.profile
+
+
+def _normalized_legacy_role_profile(body: dict, *, role: str) -> ExecutionProfile | None:
+    legacy = ExecutionProfile(
+        agent=body.get(f"{role}_agent") if isinstance(body.get(f"{role}_agent"), str) else None,
+        model=body.get(f"{role}_model") if isinstance(body.get(f"{role}_model"), str) else None,
+        thinking=body.get(f"{role}_thinking") if isinstance(body.get(f"{role}_thinking"), str) else None,
+    )
+    if not legacy.configured():
+        return None
+    normalized = model_catalog.normalize_execution_profile(legacy)
+    if not normalized.valid:
+        raise ValueError(f"{role}_profile is not selectable: {normalized.reason}")
+    return normalized.profile
+
+
+def _normalized_legacy_model(model_id: str) -> ExecutionProfile | None:
+    model_id = model_id.strip()
+    if not model_id:
+        return None
+    for profile in model_catalog.list_execution_profiles():
+        if profile.get("model") == model_id:
+            normalized = model_catalog.normalize_profile_dict(profile)
+            if normalized.valid:
+                return normalized.profile
+            break
+    raise ValueError(f"worker_profile is not selectable: legacy_model_not_found")
 
 
 def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:

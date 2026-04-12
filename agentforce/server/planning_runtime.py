@@ -18,6 +18,7 @@ from agentforce.server.black_hole_runs import (
     is_terminal_campaign_status,
 )
 from agentforce.server import state_io, ws
+from agentforce.server import model_catalog
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunRecord, PlanRunStore, PlanStepRecord
 from agentforce.server.routes import providers
@@ -31,16 +32,7 @@ class PlanningProfile:
 
 
 def _available_models_for_agent(agent: str) -> list[str]:
-    if agent not in {"claude", "codex", "gemini"}:
-        return []
-    try:
-        return [
-            str(model.get("id") or "").strip()
-            for model in providers._get_provider_models(agent)
-            if isinstance(model, dict) and str(model.get("id") or "").strip()
-        ]
-    except Exception:
-        return []
+    return model_catalog.available_models_for_provider(agent)
 
 
 def _fallback_model_for_agent(agent: str) -> str:
@@ -162,13 +154,19 @@ def _resolve_profile(draft: MissionDraftV1, key: str) -> PlanningProfile:
     agent = str(configured.get("agent") or default.agent)
     configured_model = str(configured.get("model") or "").strip()
     model = configured_model or default.model
-    available_models = _available_models_for_agent(agent)
-    if available_models and model and model not in available_models:
-        model = available_models[0]
+    normalized = model_catalog.normalize_execution_profile(
+        model_catalog.parse_profile_id(model_catalog.profile_id(agent, model, str(configured.get("thinking") or default.thinking)))
+    )
+    if normalized.valid:
+        agent = str(normalized.profile.agent or agent)
+        model = str(normalized.profile.model or model)
+        thinking = str(normalized.profile.thinking or configured.get("thinking") or default.thinking)
+    else:
+        thinking = str(configured.get("thinking") or default.thinking)
     return PlanningProfile(
         agent=agent,
         model=model,
-        thinking=str(configured.get("thinking") or default.thinking),
+        thinking=thinking,
     )
 
 

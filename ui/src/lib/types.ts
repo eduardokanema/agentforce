@@ -434,6 +434,11 @@ export interface ProviderModel {
   cost_per_1k_input: number;
   cost_per_1k_output: number;
   latency_label: string;
+  provider_id?: string;
+  supported_thinking?: string[];
+  active?: boolean;
+  enabled?: boolean;
+  selectable?: boolean;
 }
 
 export interface Provider {
@@ -479,9 +484,15 @@ export interface AppConfig {
 
 export interface Model {
   id: string;
+  label?: string;
   name: string;
   provider: string;
   provider_id?: string;
+  agent?: string;
+  model?: string;
+  model_id?: string;
+  thinking?: string;
+  supported_thinking?: string[];
   cost_per_1k_input: number;
   cost_per_1k_output: number;
   latency_label: string;

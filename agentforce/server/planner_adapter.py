@@ -8,7 +8,8 @@ from typing import Any, Iterable
 from urllib import request as urllib_request
 
 from agentforce.core.spec import MissionSpec
-from agentforce.server.routes.providers import _get_provider_models, _ssl_context
+from agentforce.server import model_catalog
+from agentforce.server.routes.providers import _ssl_context
 
 
 @dataclass(frozen=True)
@@ -171,16 +172,7 @@ def _preferred_planner_agent(draft: dict[str, Any]) -> str:
 
 
 def _provider_model_ids(provider: str) -> set[str]:
-    if provider not in {"claude", "codex", "gemini"}:
-        return set()
-    try:
-        return {
-            str(model.get("id") or "").strip()
-            for model in _get_provider_models(provider)
-            if isinstance(model, dict) and str(model.get("id") or "").strip()
-        }
-    except Exception:
-        return set()
+    return set(model_catalog.available_models_for_provider(provider))
 
 
 def _provider_default_model(provider: str, *, use_openrouter: bool) -> str | None:
@@ -210,13 +202,8 @@ def _select_model(draft: dict[str, Any], *, provider: str, use_openrouter: bool)
     planner = _planning_profile(draft)
     planner_model = str(planner.get("model") or "").strip()
     planner_agent = str(planner.get("agent") or "").strip()
-    approved_models = list(draft.get("approved_models") or [])
     if planner_agent == provider and _model_supported_by_provider(planner_model, provider):
         return planner_model
-    for model in approved_models:
-        model_value = str(model or "").strip()
-        if _model_supported_by_provider(model_value, provider):
-            return model_value
     return _provider_default_model(provider, use_openrouter=use_openrouter)
 
 

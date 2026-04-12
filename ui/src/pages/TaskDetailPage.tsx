@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import ConfirmDialog from '../components/ConfirmDialog';
 import Breadcrumb from '../components/Breadcrumb';
+import ExecutionProfileSelect from '../components/ExecutionProfileSelect';
 import RetryHistory from '../components/RetryHistory';
 import ReviewPanel from '../components/ReviewPanel';
 import StatusBadge from '../components/StatusBadge';
@@ -9,12 +10,12 @@ import StatsBar from '../components/StatsBar';
 import StructuredStream from '../components/StructuredStream';
 import TokenMeter from '../components/TokenMeter';
 import { changeTaskModel, getModels, injectPrompt, markTaskFailed, resolveHumanBlock, retryTask, stopTask } from '../lib/api';
+import { executionProfileFromOption, optionIdFromExecutionProfile } from '../lib/executionProfiles';
 import { useMission } from '../hooks/useMission';
 import { useTaskStream } from '../hooks/useTaskStream';
 import { useToast } from '../hooks/useToast';
 import type { Model, TaskSpec, TaskState, TaskStatus } from '../lib/types';
-
-const THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+import type { StreamEventRecord } from '../lib/ws';
 
 function formatDuration(startedAt?: string | null, completedAt?: string | null): string {
   if (!startedAt) {
@@ -155,12 +156,26 @@ function LoadingState({ message }: { message: string }) {
 function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: string }) {
   const { mission, loading, error } = useMission(missionId);
   const { addToast } = useToast();
-  const { events, done } = useTaskStream(missionId, taskId);
+  const taskStream = useTaskStream(missionId, taskId);
+  const events: StreamEventRecord[] = Array.isArray(taskStream.events)
+    ? taskStream.events
+    : Array.isArray((taskStream as { lines?: string[] }).lines)
+      ? (taskStream as { lines: string[] }).lines.map((line, index) => ({
+          seq: index + 1,
+          mission_id: missionId,
+          task_id: taskId,
+          kind: 'raw_line',
+          role: 'worker',
+          provider: 'worker',
+          payload: { text: line, meta: { provider_event_type: 'non_json' } },
+          raw_line: line,
+          timestamp: new Date(0).toISOString(),
+        }))
+      : [];
+  const done = taskStream.done;
   const [injectMsg, setInjectMsg] = useState('');
-  const [changeModelInput, setChangeModelInput] = useState('');
-  const [changeReviewerModelInput, setChangeReviewerModelInput] = useState('');
-  const [changeWorkerThinkingInput, setChangeWorkerThinkingInput] = useState('medium');
-  const [changeReviewerThinkingInput, setChangeReviewerThinkingInput] = useState('medium');
+  const [changeWorkerProfileId, setChangeWorkerProfileId] = useState('');
+  const [changeReviewerProfileId, setChangeReviewerProfileId] = useState('');
   const [showChangeModel, setShowChangeModel] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [destructiveChoiceId, setDestructiveChoiceId] = useState('approve_once');
@@ -215,10 +230,14 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
     ?? mission?.execution?.defaults.reviewer?.thinking
     ?? 'medium';
   const changeModelDirty = (
-    changeModelInput !== (currentModel ?? '')
-    || changeReviewerModelInput !== (currentReviewerModel ?? '')
-    || changeWorkerThinkingInput !== currentWorkerThinking
-    || changeReviewerThinkingInput !== currentReviewerThinking
+    changeWorkerProfileId !== optionIdFromExecutionProfile(
+      { agent: taskSpec?.execution?.worker?.agent ?? mission?.execution?.tasks?.[taskId]?.worker?.agent ?? mission?.execution?.defaults.worker?.agent ?? null, model: currentModel, thinking: currentWorkerThinking },
+      models,
+    )
+    || changeReviewerProfileId !== optionIdFromExecutionProfile(
+      { agent: taskSpec?.execution?.reviewer?.agent ?? mission?.execution?.tasks?.[taskId]?.reviewer?.agent ?? mission?.execution?.defaults.reviewer?.agent ?? null, model: currentReviewerModel, thinking: currentReviewerThinking },
+      models,
+    )
   );
   const hasReviewPanel = Boolean(
     reviewFeedback.trim()
@@ -280,29 +299,25 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
   };
 
   const handleChangeModel = async (): Promise<void> => {
-    const workerModel = changeModelInput.trim();
-    const reviewerModel = changeReviewerModelInput.trim();
     if (!changeModelDirty) {
       return;
     }
 
-    const workerAgent = models.find((model) => model.id === workerModel)?.provider_id ?? null;
-    const reviewerAgent = models.find((model) => model.id === reviewerModel)?.provider_id ?? null;
+    const workerProfile = executionProfileFromOption(models.find((model) => model.id === changeWorkerProfileId));
+    const reviewerProfile = executionProfileFromOption(models.find((model) => model.id === changeReviewerProfileId));
 
     try {
       const result = await changeTaskModel(missionId, taskId, {
-        worker_agent: workerAgent,
-        worker_model: workerModel || null,
-        worker_thinking: changeWorkerThinkingInput,
-        reviewer_agent: reviewerAgent,
-        reviewer_model: reviewerModel || null,
-        reviewer_thinking: changeReviewerThinkingInput,
+        worker_agent: workerProfile?.agent ?? null,
+        worker_model: workerProfile?.model ?? null,
+        worker_thinking: workerProfile?.thinking ?? null,
+        reviewer_agent: reviewerProfile?.agent ?? null,
+        reviewer_model: reviewerProfile?.model ?? null,
+        reviewer_thinking: reviewerProfile?.thinking ?? null,
       });
       addToast(result.retried ? 'Models changed — task re-queued' : 'Models updated', 'success');
-      setChangeModelInput('');
-      setChangeReviewerModelInput('');
-      setChangeWorkerThinkingInput('medium');
-      setChangeReviewerThinkingInput('medium');
+      setChangeWorkerProfileId('');
+      setChangeReviewerProfileId('');
       setShowChangeModel(false);
     } catch (error) {
       addToast(error instanceof Error ? error.message : 'Failed to change model', 'error');
@@ -444,10 +459,16 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
           className="rounded border border-cyan/30 px-3 py-1 text-[12px] text-cyan transition-colors hover:bg-cyan/10"
           onClick={() => {
             setShowChangeModel((v) => !v);
-            setChangeModelInput(currentModel ?? '');
-            setChangeReviewerModelInput(currentReviewerModel ?? '');
-            setChangeWorkerThinkingInput(currentWorkerThinking);
-            setChangeReviewerThinkingInput(currentReviewerThinking);
+            setChangeWorkerProfileId(optionIdFromExecutionProfile({
+              agent: taskSpec?.execution?.worker?.agent ?? mission?.execution?.tasks?.[taskId]?.worker?.agent ?? mission?.execution?.defaults.worker?.agent ?? null,
+              model: currentModel,
+              thinking: currentWorkerThinking,
+            }, models));
+            setChangeReviewerProfileId(optionIdFromExecutionProfile({
+              agent: taskSpec?.execution?.reviewer?.agent ?? mission?.execution?.tasks?.[taskId]?.reviewer?.agent ?? mission?.execution?.defaults.reviewer?.agent ?? null,
+              model: currentReviewerModel,
+              thinking: currentReviewerThinking,
+            }, models));
           }}
         >
           Change Model
@@ -457,74 +478,22 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
       {showChangeModel ? (
         <div className="mb-4 grid gap-2 md:grid-cols-[1fr_1fr_auto_auto]">
           <div className="grid gap-2">
-            <select
+            <ExecutionProfileSelect
               className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan disabled:opacity-50"
-              value={changeModelInput}
-              disabled={models.length === 0}
-              onChange={(event) => { setChangeModelInput(event.target.value); }}
-              aria-label="Worker model"
-            >
-              <option value="">{models.length === 0 ? 'Loading models…' : 'Worker model…'}</option>
-              {Object.entries(
-                models.reduce<Record<string, Model[]>>((acc, m) => {
-                  (acc[m.provider] ??= []).push(m);
-                  return acc;
-                }, {}),
-              ).map(([provider, providerModels]) => (
-                <optgroup key={provider} label={provider}>
-                  {providerModels.map((m) => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-            <select
-              className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan"
-              value={changeWorkerThinkingInput}
-              onChange={(event) => { setChangeWorkerThinkingInput(event.target.value); }}
-              aria-label="Worker thinking"
-            >
-              {THINKING_LEVELS.map((level) => (
-                <option key={`worker-thinking-${level}`} value={level}>
-                  Thinking · {level}
-                </option>
-              ))}
-            </select>
+              options={models}
+              value={changeWorkerProfileId}
+              onChange={setChangeWorkerProfileId}
+              ariaLabel="Worker execution profile"
+            />
           </div>
           <div className="grid gap-2">
-            <select
+            <ExecutionProfileSelect
               className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan disabled:opacity-50"
-              value={changeReviewerModelInput}
-              disabled={models.length === 0}
-              onChange={(event) => { setChangeReviewerModelInput(event.target.value); }}
-              aria-label="Reviewer model"
-            >
-              <option value="">{models.length === 0 ? 'Loading models…' : 'Reviewer model…'}</option>
-              {Object.entries(
-                models.reduce<Record<string, Model[]>>((acc, m) => {
-                  (acc[m.provider] ??= []).push(m);
-                  return acc;
-                }, {}),
-              ).map(([provider, providerModels]) => (
-                <optgroup key={provider} label={provider}>
-                  {providerModels.map((m) => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-            <select
-              className="flex-1 rounded border border-border bg-surface px-3 py-1 font-mono text-[12px] text-text outline-none transition-colors focus:border-cyan"
-              value={changeReviewerThinkingInput}
-              onChange={(event) => { setChangeReviewerThinkingInput(event.target.value); }}
-              aria-label="Reviewer thinking"
-            >
-              {THINKING_LEVELS.map((level) => (
-                <option key={`reviewer-thinking-${level}`} value={level}>
-                  Thinking · {level}
-                </option>
-              ))}
-            </select>
+              options={models}
+              value={changeReviewerProfileId}
+              onChange={setChangeReviewerProfileId}
+              ariaLabel="Reviewer execution profile"
+            />
           </div>
           <button
             type="button"
@@ -539,10 +508,8 @@ function TaskDetailContent({ missionId, taskId }: { missionId: string; taskId: s
             className="rounded border border-border px-3 py-1 text-[12px] text-dim transition-colors hover:bg-surface"
             onClick={() => {
               setShowChangeModel(false);
-              setChangeModelInput('');
-              setChangeReviewerModelInput('');
-              setChangeWorkerThinkingInput('medium');
-              setChangeReviewerThinkingInput('medium');
+              setChangeWorkerProfileId('');
+              setChangeReviewerProfileId('');
             }}
           >
             Cancel

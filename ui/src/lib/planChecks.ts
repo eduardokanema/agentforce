@@ -102,15 +102,13 @@ function collectDependencyWarnings(tasks: MissionDraft['draft_spec']['tasks']): 
 
 function collectModelWarnings(draft: MissionDraft, activeModelIds: Set<string>): string[] {
   const warnings: string[] = [];
-  const approvedModels = new Set(draft.approved_models);
-  const allowedModels = new Set([...approvedModels].filter((model) => activeModelIds.has(model)));
 
   const checkProfile = (model: string | null | undefined, label: string): void => {
     if (!model) {
       return;
     }
-    if (!allowedModels.has(model)) {
-      warnings.push(`${label} uses model ${model} outside the approved active set.`);
+    if (!activeModelIds.has(model)) {
+      warnings.push(`${label} uses inactive model ${model}.`);
     }
   };
 

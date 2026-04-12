@@ -17,6 +17,7 @@ import type {
   TaskSpec,
   TaskState,
   TelemetryData,
+  ExecutionProfile,
 } from './types';
 
 export const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -50,6 +51,30 @@ async function requestVoid(path: string, init?: RequestInit): Promise<void> {
   if (!response.ok) {
     throw new Error(`Request failed with status ${response.status} ${response.statusText}`);
   }
+}
+
+function withLegacyExecutionFields<T extends {
+  worker_profile?: ExecutionProfile | null;
+  reviewer_profile?: ExecutionProfile | null;
+  worker_agent?: string | null;
+  worker_model?: string | null;
+  worker_thinking?: string | null;
+  reviewer_agent?: string | null;
+  reviewer_model?: string | null;
+  reviewer_thinking?: string | null;
+}>(payload: T): T {
+  const next = { ...payload };
+  if (next.worker_profile) {
+    next.worker_agent ??= next.worker_profile.agent ?? null;
+    next.worker_model ??= next.worker_profile.model ?? null;
+    next.worker_thinking ??= next.worker_profile.thinking ?? null;
+  }
+  if (next.reviewer_profile) {
+    next.reviewer_agent ??= next.reviewer_profile.agent ?? null;
+    next.reviewer_model ??= next.reviewer_profile.model ?? null;
+    next.reviewer_thinking ??= next.reviewer_profile.thinking ?? null;
+  }
+  return next;
 }
 
 export function getMissions(): Promise<MissionSummary[]> {
@@ -126,9 +151,11 @@ export function finishMission(id: string): Promise<void> {
 export function updateMissionDefaultModels(
   id: string,
   models: {
+    worker_profile?: ExecutionProfile | null;
     worker_agent?: string | null;
     worker_model?: string | null;
     worker_thinking?: string | null;
+    reviewer_profile?: ExecutionProfile | null;
     reviewer_agent?: string | null;
     reviewer_model?: string | null;
     reviewer_thinking?: string | null;
@@ -155,7 +182,7 @@ export function updateMissionDefaultModels(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(models),
+      body: JSON.stringify(withLegacyExecutionFields(models)),
     },
   );
 }
@@ -207,9 +234,11 @@ export function changeTaskModel(
   missionId: string,
   taskId: string,
   modelOrModels: string | {
+    worker_profile?: ExecutionProfile | null;
     worker_agent?: string | null;
     worker_model?: string | null;
     worker_thinking?: string | null;
+    reviewer_profile?: ExecutionProfile | null;
     reviewer_agent?: string | null;
     reviewer_model?: string | null;
     reviewer_thinking?: string | null;
@@ -237,7 +266,7 @@ export function changeTaskModel(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(withLegacyExecutionFields(body)),
     },
   );
 }
@@ -297,7 +326,7 @@ export function createMission(yaml: string): Promise<{ id: string }> {
 
 export function createPlanDraft(payload: {
   prompt: string;
-  approved_models: string[];
+  approved_models?: string[];
   workspace_paths: string[];
   companion_profile: Record<string, unknown>;
   validation?: Record<string, unknown>;

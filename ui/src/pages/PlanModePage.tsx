@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import FileBrowser from "../components/FileBrowser";
-import ModelSelector from "../components/ModelSelector";
 import SpaceProgress from "../components/SpaceProgress";
+import ExecutionProfileSelect from "../components/ExecutionProfileSelect";
 import DraftSummaryPanel from "../components/planning/DraftSummaryPanel";
 import CockpitSupportDrawer from "../components/planning/CockpitSupportDrawer";
 import ExecutionProfileControls from "../components/planning/ExecutionProfileControls";
@@ -32,6 +32,11 @@ import {
   type PlanningSubstepId,
 } from "../lib/planFlow";
 import { collectAdvisoryFlightChecks } from "../lib/planChecks";
+import {
+  executionProfileFromOption,
+  optionIdFromExecutionProfile,
+  profileLabel,
+} from "../lib/executionProfiles";
 import type {
   ExecutionProfile,
   MissionDraft,
@@ -55,9 +60,8 @@ const PLANNING_PROFILE_KEYS = [
 ] as const;
 
 const PLANMODE_PERSISTED_WORKSPACES_KEY = "agentforce-planmode-workspaces-v1";
-const PLANMODE_PERSISTED_MODELS_KEY = "agentforce-planmode-models-v1";
-const PLANMODE_PERSISTED_PROFILES_KEY = "agentforce-planmode-profiles-v1";
-const THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+const PLANMODE_LEGACY_PROFILES_KEY = "agentforce-planmode-profiles-v1";
+const PLANMODE_PERSISTED_PROFILES_KEY = "agentforce-planmode-profiles-v2";
 
 function readStoredJson<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") {
@@ -97,8 +101,7 @@ function normalizePlanningProfile(value: unknown): ExecutionProfile {
     ? candidate.agent
     : "claude";
   const model = typeof candidate.model === "string" ? candidate.model : "";
-  const thinking = typeof candidate.thinking === "string"
-    && THINKING_LEVELS.includes(candidate.thinking as typeof THINKING_LEVELS[number])
+  const thinking = typeof candidate.thinking === "string" && candidate.thinking.trim() !== ""
     ? candidate.thinking
     : "medium";
   return { agent, model, thinking };
@@ -494,10 +497,9 @@ function PlanningProfilesSummary({
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
           const profile = getProfileValue(draft, key);
-          const modelObj = models.find((model) => model.id === profile.model);
-          const modelName = modelObj
-            ? `[${modelObj.provider}] ${modelObj.name}`
-            : profile.model || "Default";
+          const optionId = optionIdFromExecutionProfile(profile, models);
+          const modelObj = models.find((model) => model.id === optionId);
+          const modelName = modelObj ? profileLabel(modelObj) : profile.model || "Default";
           return (
             <div key={key} className="rounded-lg border border-border bg-surface p-3">
               <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
@@ -505,9 +507,6 @@ function PlanningProfilesSummary({
               </div>
               <div className="truncate text-sm font-semibold text-text" title={modelName}>
                 {modelName}
-              </div>
-              <div className="mt-1 text-xs text-dim">
-                Thinking <span className="font-medium text-text">{profile.thinking}</span>
               </div>
             </div>
           );
@@ -656,10 +655,8 @@ function EngineeringControls({
   onNameChange,
   onGoalChange,
   onDodChange,
-  onWorkerModelChange,
-  onReviewerModelChange,
-  onWorkerThinkingChange,
-  onReviewerThinkingChange,
+  onWorkerProfileChange,
+  onReviewerProfileChange,
 }: {
   draft: MissionDraft;
   models: Model[];
@@ -669,10 +666,8 @@ function EngineeringControls({
   onNameChange: (value: string) => void;
   onGoalChange: (value: string) => void;
   onDodChange: (value: string[]) => void;
-  onWorkerModelChange: (value: string) => void;
-  onReviewerModelChange: (value: string) => void;
-  onWorkerThinkingChange: (value: string) => void;
-  onReviewerThinkingChange: (value: string) => void;
+  onWorkerProfileChange: (value: string) => void;
+  onReviewerProfileChange: (value: string) => void;
 }) {
   return (
     <section className="space-y-5 rounded-[1.15rem] border border-border bg-card p-5">
@@ -705,11 +700,9 @@ function EngineeringControls({
       />
       <ExecutionProfileControls
         draft={draft}
-        models={models}
-        onWorkerModelChange={onWorkerModelChange}
-        onReviewerModelChange={onReviewerModelChange}
-        onWorkerThinkingChange={onWorkerThinkingChange}
-        onReviewerThinkingChange={onReviewerThinkingChange}
+        options={models}
+        onWorkerProfileChange={onWorkerProfileChange}
+        onReviewerProfileChange={onReviewerProfileChange}
       />
       <PlanningProfilesSummary draft={draft} models={models} />
     </section>
@@ -814,7 +807,7 @@ function PhaseViewport({
                   {draft.workspace_paths.length} workspace{draft.workspace_paths.length === 1 ? "" : "s"}
                 </span>
                 <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] text-dim">
-                  {draft.approved_models.length} approved model{draft.approved_models.length === 1 ? "" : "s"}
+                  {PLANNING_PROFILE_KEYS.length} planning profiles
                 </span>
                 <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] text-dim">
                   {draft.draft_spec.tasks.length} task{draft.draft_spec.tasks.length === 1 ? "" : "s"}
@@ -1144,11 +1137,13 @@ export default function PlanModePage() {
     normalizeWorkspacePaths(readStoredJson<string[]>(PLANMODE_PERSISTED_WORKSPACES_KEY, [])),
   );
   const [models, setModels] = useState<Model[]>([]);
-  const [selectedModels, setSelectedModels] = useState<string[]>(
-    readStoredJson<string[]>(PLANMODE_PERSISTED_MODELS_KEY, []),
-  );
   const [initialPlanningProfiles, setInitialPlanningProfiles] = useState<Record<string, ExecutionProfile>>(
-    normalizePlanningProfiles(readStoredJson<Record<string, unknown>>(PLANMODE_PERSISTED_PROFILES_KEY, getDefaultPlanProfiles())),
+    normalizePlanningProfiles(
+      readStoredJson<Record<string, unknown>>(
+        PLANMODE_PERSISTED_PROFILES_KEY,
+        readStoredJson<Record<string, unknown>>(PLANMODE_LEGACY_PROFILES_KEY, getDefaultPlanProfiles()),
+      ),
+    ),
   );
   const [draft, setDraft] = useState<MissionDraft | null>(null);
   const [followUpMessage, setFollowUpMessage] = useState("");
@@ -1167,14 +1162,6 @@ export default function PlanModePage() {
   const [preflightAnswers, setPreflightAnswers] = useState<Record<string, PreflightAnswer>>({});
   const [pageError, setPageError] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
-
-  const effectiveSelectedModels = useMemo(
-    () =>
-      selectedModels.length > 0
-        ? selectedModels
-        : models.map((model) => model.id),
-    [models, selectedModels],
-  );
 
   const loadDraft = async (nextDraftId: string): Promise<void> => {
     setLoadingDraft(true);
@@ -1208,26 +1195,13 @@ export default function PlanModePage() {
           return;
         }
         setModels(loadedModels);
-        const defaultModel = loadedModels[0]?.id || "";
-        const defaultAgent = loadedModels[0]?.provider_id || "codex";
-        const availableModelIds = new Set(loadedModels.map((model) => model.id));
-        setSelectedModels((current) => {
-          const valid = normalizeWorkspacePaths(current).filter((modelId) => availableModelIds.has(modelId));
-          if (valid.length > 0) {
-            return valid;
-          }
-          return loadedModels.map((model) => model.id);
-        });
-
         setInitialPlanningProfiles((current) => {
           const next = { ...current };
           (Object.keys(next) as Array<keyof typeof next>).forEach((key) => {
-            if (!availableModelIds.has(String(next[key].model || ""))) {
-              next[key] = {
-                ...next[key],
-                model: defaultModel,
-                agent: defaultAgent,
-              };
+            const optionId = optionIdFromExecutionProfile(next[key], loadedModels);
+            const selected = loadedModels.find((model) => model.id === optionId) ?? loadedModels[0];
+            if (selected) {
+              next[key] = executionProfileFromOption(selected) ?? next[key];
             }
           });
           return next;
@@ -1260,16 +1234,6 @@ export default function PlanModePage() {
       JSON.stringify(normalizeWorkspacePaths(workspaces)),
     );
   }, [workspaces]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    window.localStorage.setItem(
-      PLANMODE_PERSISTED_MODELS_KEY,
-      JSON.stringify(selectedModels),
-    );
-  }, [selectedModels]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1342,7 +1306,6 @@ export default function PlanModePage() {
   const canCreateDraft =
     prompt.trim() !== "" &&
     workspaces.length > 0 &&
-    effectiveSelectedModels.length > 0 &&
     (initialPlanningProfiles.planner.model ?? "").trim() !== "";
 
   const updateCurrentDraft = (
@@ -1391,7 +1354,6 @@ export default function PlanModePage() {
     try {
       const created = await createPlanDraft({
         prompt,
-        approved_models: effectiveSelectedModels,
         workspace_paths: workspaces,
         companion_profile: {
           id: "planner",
@@ -1508,7 +1470,7 @@ export default function PlanModePage() {
         ? []
         : collectAdvisoryFlightChecks(
           draft,
-          models.map((model) => model.id),
+          Array.from(new Set(models.map((model) => model.model ?? model.model_id ?? model.id))),
         ),
     [draft, loadingModels, models],
   );
@@ -1585,19 +1547,18 @@ export default function PlanModePage() {
       }),
     );
   };
-  const handleWorkerModelChange = (value: string): void => {
+  const handleWorkerProfileChange = (value: string): void => {
+    const selected = models.find((model) => model.id === value);
+    const profile = executionProfileFromOption(selected);
+    if (!profile) {
+      return;
+    }
     updateCurrentDraft((current) =>
       updateDraftSpec(current, {
         ...current.draft_spec,
         execution_defaults: {
           ...current.draft_spec.execution_defaults,
-          worker: {
-            agent:
-              current.draft_spec.execution_defaults?.worker?.agent ?? "codex",
-            thinking:
-              current.draft_spec.execution_defaults?.worker?.thinking ?? "medium",
-            model: value,
-          },
+          worker: profile,
           reviewer: current.draft_spec.execution_defaults?.reviewer ?? {
             agent: "codex",
             thinking: "medium",
@@ -1610,7 +1571,12 @@ export default function PlanModePage() {
       }),
     );
   };
-  const handleReviewerModelChange = (value: string): void => {
+  const handleReviewerProfileChange = (value: string): void => {
+    const selected = models.find((model) => model.id === value);
+    const profile = executionProfileFromOption(selected);
+    if (!profile) {
+      return;
+    }
     updateCurrentDraft((current) =>
       updateDraftSpec(current, {
         ...current.draft_spec,
@@ -1624,67 +1590,7 @@ export default function PlanModePage() {
               models[0]?.id ??
               "",
           },
-          reviewer: {
-            agent:
-              current.draft_spec.execution_defaults?.reviewer?.agent ?? "codex",
-            thinking:
-              current.draft_spec.execution_defaults?.reviewer?.thinking ?? "medium",
-            model: value,
-          },
-        },
-      }),
-    );
-  };
-  const handleWorkerThinkingChange = (value: string): void => {
-    updateCurrentDraft((current) =>
-      updateDraftSpec(current, {
-        ...current.draft_spec,
-        execution_defaults: {
-          ...current.draft_spec.execution_defaults,
-          worker: {
-            agent:
-              current.draft_spec.execution_defaults?.worker?.agent ?? "codex",
-            model:
-              current.draft_spec.execution_defaults?.worker?.model ??
-              models[0]?.id ??
-              "",
-            thinking: value,
-          },
-          reviewer: current.draft_spec.execution_defaults?.reviewer ?? {
-            agent: "codex",
-            model:
-              current.draft_spec.execution_defaults?.reviewer?.model ??
-              models[0]?.id ??
-              "",
-            thinking: "medium",
-          },
-        },
-      }),
-    );
-  };
-  const handleReviewerThinkingChange = (value: string): void => {
-    updateCurrentDraft((current) =>
-      updateDraftSpec(current, {
-        ...current.draft_spec,
-        execution_defaults: {
-          ...current.draft_spec.execution_defaults,
-          worker: current.draft_spec.execution_defaults?.worker ?? {
-            agent: "codex",
-            model:
-              current.draft_spec.execution_defaults?.worker?.model ??
-              models[0]?.id ??
-              "",
-            thinking: "medium",
-          },
-          reviewer: {
-            agent:
-              current.draft_spec.execution_defaults?.reviewer?.agent ?? "codex",
-            model:
-              current.draft_spec.execution_defaults?.reviewer?.model ??
-              models[0]?.id ??
-              "",
-            thinking: value,
-          },
+          reviewer: profile,
         },
       }),
     );
@@ -1733,10 +1639,8 @@ export default function PlanModePage() {
           onNameChange={handleNameChange}
           onGoalChange={handleGoalChange}
           onDodChange={handleDodChange}
-          onWorkerModelChange={handleWorkerModelChange}
-          onReviewerModelChange={handleReviewerModelChange}
-          onWorkerThinkingChange={handleWorkerThinkingChange}
-          onReviewerThinkingChange={handleReviewerThinkingChange}
+          onWorkerProfileChange={handleWorkerProfileChange}
+          onReviewerProfileChange={handleReviewerProfileChange}
         />
       </div>
     ) : activeSupportPanel === "transcript" ? (
@@ -1856,22 +1760,20 @@ export default function PlanModePage() {
 
             <div className="mt-4">
               <div className="mb-2 text-sm font-medium text-text">
-                Approved models
-              </div>
-              <ModelSelector
-                models={models}
-                selected={effectiveSelectedModels}
-                onChange={setSelectedModels}
-              />
-            </div>
-
-            <div className="mt-6">
-              <div className="mb-3 text-sm font-medium text-text">
                 Planning Stack
               </div>
+              <p className="text-xs text-dim">
+                Choose the exact `Model + Thinking` profile for each planning role.
+              </p>
+            </div>
+
+            <div className="mt-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
-                  const profile = initialPlanningProfiles[key];
+                  const selectedProfileId = optionIdFromExecutionProfile(
+                    initialPlanningProfiles[key],
+                    models,
+                  );
                   return (
                     <div
                       key={key}
@@ -1880,45 +1782,23 @@ export default function PlanModePage() {
                       <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
                         {label}
                       </div>
-                      <div className="grid gap-2">
-                        <select
-                          className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
-                          value={profile.model ?? ""}
-                          onChange={(event) => {
-                            const modelId = event.target.value;
-                            const model = models.find((item) => item.id === modelId);
-                            setInitialPlanningProfiles((current) => ({
-                              ...current,
-                              [key]: {
-                                ...profile,
-                                model: modelId,
-                                agent: model?.provider_id || profile.agent,
-                              },
-                            }));
-                          }}
-                        >
-                          {models.map((model) => (
-                            <option key={model.id} value={model.id}>
-                              [{model.provider}] {model.name}
-                            </option>
-                          ))}
-                        </select>
-                        <select
-                          className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
-                          value={profile.thinking ?? ""}
-                          onChange={(event) =>
-                            setInitialPlanningProfiles((current) => ({
-                              ...current,
-                              [key]: { ...profile, thinking: event.target.value },
-                            }))}
-                        >
-                          {THINKING_LEVELS.map((thinking) => (
-                            <option key={thinking} value={thinking}>
-                              {thinking}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                      <ExecutionProfileSelect
+                        options={models}
+                        value={selectedProfileId}
+                        onChange={(value) => {
+                          const selected = models.find((item) => item.id === value);
+                          const profile = executionProfileFromOption(selected);
+                          if (!profile) {
+                            return;
+                          }
+                          setInitialPlanningProfiles((current) => ({
+                            ...current,
+                            [key]: profile,
+                          }));
+                        }}
+                        className="w-full rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-text outline-none focus:border-cyan"
+                        ariaLabel={`${label} execution profile`}
+                      />
                     </div>
                   );
                 })}
@@ -1929,7 +1809,7 @@ export default function PlanModePage() {
               <span className="text-[11px] text-dim">
                 {loadingModels
                   ? "Loading models..."
-                  : `${effectiveSelectedModels.length} approved model(s) armed`}
+                  : `${PLANNING_PROFILE_KEYS.length} execution profile(s) armed`}
               </span>
               <button
                 type="button"

@@ -173,13 +173,16 @@ function buildPhaseCopy(
 ): { summary: string; railSummary: string; timestamp?: string | null } {
   const step = latestStep(run);
   const workspaceCount = draft.workspace_paths.length;
-  const modelCount = draft.approved_models.length;
+  const planningProfiles = Object.values((draft.validation?.planning_profiles as Record<string, unknown> | undefined) ?? {})
+    .filter((value): value is { model?: string | null } => Boolean(value) && typeof value === 'object')
+    .filter((value) => typeof value.model === 'string' && value.model.trim() !== '');
+  const profileCount = planningProfiles.length;
 
   switch (phaseId) {
     case 'briefing':
       return {
         summary: draft.draft_spec.name.trim()
-          ? `${draft.draft_spec.name.trim()} is staged with ${countLabel(workspaceCount, 'workspace')} and ${countLabel(modelCount, 'approved model')}.`
+          ? `${draft.draft_spec.name.trim()} is staged with ${countLabel(workspaceCount, 'workspace')} and ${countLabel(profileCount, 'planning profile')}.`
           : 'Mission brief configured and ready for the first planning pass.',
         railSummary: draft.draft_spec.name.trim() ? 'Mission brief locked' : 'Brief pending',
       };

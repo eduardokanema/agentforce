@@ -10,11 +10,12 @@ from pathlib import Path
 import yaml
 
 from agentforce.core.engine import MissionEngine
-from agentforce.core.spec import TaskSpec
+from agentforce.core.spec import ExecutionProfile, TaskSpec
 from agentforce.memory import Memory
 from agentforce.telemetry import TelemetryStore
 
 from .. import state_io, ws
+from .. import model_catalog
 from ..plan_drafts import PlanDraftStore
 from ..plan_runs import PlanRunStore
 
@@ -250,20 +251,20 @@ def _post_mission_default_models(mission_id: str, body: dict) -> tuple[int, dict
     if not engine:
         return 404, {"error": f"Mission {mission_id!r} not found"}
 
-    worker_model = body.get("worker_model")
-    reviewer_model = body.get("reviewer_model")
-    worker_agent = body.get("worker_agent")
-    reviewer_agent = body.get("reviewer_agent")
-    worker_thinking = body.get("worker_thinking")
-    reviewer_thinking = body.get("reviewer_thinking")
     try:
+        worker_profile = _normalized_role_profile(body.get("worker_profile"), role="worker")
+        reviewer_profile = _normalized_role_profile(body.get("reviewer_profile"), role="reviewer")
+        if worker_profile is None:
+            worker_profile = _normalized_legacy_role_profile(body, role="worker")
+        if reviewer_profile is None:
+            reviewer_profile = _normalized_legacy_role_profile(body, role="reviewer")
         result = engine.change_default_models(
-            worker_model=worker_model if isinstance(worker_model, str) else None,
-            reviewer_model=reviewer_model if isinstance(reviewer_model, str) else None,
-            worker_agent=worker_agent if isinstance(worker_agent, str) else None,
-            reviewer_agent=reviewer_agent if isinstance(reviewer_agent, str) else None,
-            worker_thinking=worker_thinking if isinstance(worker_thinking, str) else None,
-            reviewer_thinking=reviewer_thinking if isinstance(reviewer_thinking, str) else None,
+            worker_model=worker_profile.model if worker_profile else None,
+            reviewer_model=reviewer_profile.model if reviewer_profile else None,
+            worker_agent=worker_profile.agent if worker_profile else None,
+            reviewer_agent=reviewer_profile.agent if reviewer_profile else None,
+            worker_thinking=worker_profile.thinking if worker_profile else None,
+            reviewer_thinking=reviewer_profile.thinking if reviewer_profile else None,
         )
     except ValueError as exc:
         return 400, {"error": str(exc)}
@@ -358,7 +359,14 @@ def _post_readjust_trajectory(mission_id: str) -> tuple[int, dict]:
         status="draft",
         draft_spec=state.spec.to_dict(),
         turns=[],
-        validation={},
+        validation={
+            "planning_profiles": {
+                "planner": _planning_profile_payload(state.execution_defaults.worker),
+                "critic_technical": _planning_profile_payload(state.execution_defaults.reviewer),
+                "critic_practical": _planning_profile_payload(state.execution_defaults.reviewer),
+                "resolver": _planning_profile_payload(state.execution_defaults.worker),
+            },
+        },
         activity_log=[{"type": "readjust_trajectory_seeded", "mission_id": mission_id}],
         approved_models=[],
         workspace_paths=[path for path in [state.working_dir or state.spec.working_dir] if path],
@@ -366,6 +374,41 @@ def _post_readjust_trajectory(mission_id: str) -> tuple[int, dict]:
         draft_notes=[],
     )
     return 200, {"id": draft.id, "revision": draft.revision}
+
+
+def _normalized_role_profile(value: object, *, role: str) -> ExecutionProfile | None:
+    if isinstance(value, dict):
+        normalized = model_catalog.normalize_profile_dict(value)
+        if not normalized.valid:
+            raise ValueError(f"{role}_profile is not selectable: {normalized.reason}")
+        return normalized.profile
+    return None
+
+
+def _normalized_legacy_role_profile(body: dict, *, role: str) -> ExecutionProfile | None:
+    legacy = ExecutionProfile(
+        agent=body.get(f"{role}_agent") if isinstance(body.get(f"{role}_agent"), str) else None,
+        model=body.get(f"{role}_model") if isinstance(body.get(f"{role}_model"), str) else None,
+        thinking=body.get(f"{role}_thinking") if isinstance(body.get(f"{role}_thinking"), str) else None,
+    )
+    if not legacy.configured():
+        return None
+    normalized = model_catalog.normalize_execution_profile(legacy)
+    if not normalized.valid:
+        raise ValueError(f"{role}_profile is not selectable: {normalized.reason}")
+    return normalized.profile
+
+
+def _planning_profile_payload(profile: ExecutionProfile | None) -> dict[str, str]:
+    normalized = model_catalog.normalize_execution_profile(profile)
+    effective = normalized.profile if normalized.valid else profile
+    if not effective or not effective.configured():
+        return {}
+    return {
+        "agent": str(effective.agent or ""),
+        "model": str(effective.model or ""),
+        "thinking": str(effective.thinking or "medium"),
+    }
 
 
 def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
