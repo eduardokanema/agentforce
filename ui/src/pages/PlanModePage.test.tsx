@@ -177,7 +177,7 @@ describe('PlanModePage', () => {
       }
       if (url === '/api/config') {
         return new Response(JSON.stringify({
-          filesystem: { allowed_base_paths: ['/workspace'] },
+          filesystem: { allowed_base_paths: ['/workspace'], default_start_path: '/workspace' },
           default_caps: {
             max_concurrent_workers: 2,
             max_retries_per_task: 2,
@@ -257,6 +257,65 @@ describe('PlanModePage', () => {
     expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeTruthy();
     expect(container.querySelector('input[aria-label="Mission name"]')).toBeNull();
     expect(container.querySelector('textarea[aria-label="Mission YAML export"]')).toBeNull();
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('prefers ~/Projects for plan workspace selection and falls back to the allowed root', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/config') {
+        return new Response(JSON.stringify({
+          filesystem: { allowed_base_paths: ['/workspace'], default_start_path: '~/Projects' },
+          default_caps: {
+            max_concurrent_workers: 2,
+            max_retries_per_task: 2,
+            max_wall_time_minutes: 60,
+            max_cost_usd: 0,
+          },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/filesystem?path=~%2FProjects') {
+        return new Response(JSON.stringify({ error: 'path outside allowed directories' }), {
+          status: 403,
+          statusText: 'Forbidden',
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/filesystem?path=%2Fworkspace') {
+        return new Response(JSON.stringify({
+          path: '/workspace',
+          entries: [{ name: 'app', path: '/workspace/app', is_dir: true }],
+          parent: null,
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock);
+    await flushPromises();
+
+    const requestedPaths = fetchMock.mock.calls
+      .map(([input]) => String(input))
+      .filter((url) => url.startsWith('/api/filesystem?path='));
+
+    expect(requestedPaths).toEqual([
+      '/api/filesystem?path=~%2FProjects',
+      '/api/filesystem?path=%2Fworkspace',
+    ]);
+    expect(container.textContent).toContain('app');
 
     act(() => {
       root.unmount();

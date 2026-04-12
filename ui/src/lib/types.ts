@@ -510,6 +510,7 @@ export interface DefaultCaps {
 export interface AppConfig {
   filesystem: {
     allowed_base_paths: string[];
+    default_start_path: string;
   };
   default_caps: DefaultCaps;
 }

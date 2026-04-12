@@ -5,6 +5,7 @@ import type { FilesystemEntry } from '../lib/types';
 interface FileBrowserProps {
   selected: string[];
   onSelect: (paths: string[]) => void;
+  initialPath?: string;
 }
 
 function BreadcrumbNav({
@@ -58,7 +59,7 @@ function BreadcrumbNav({
   );
 }
 
-export default function FileBrowser({ selected, onSelect }: FileBrowserProps) {
+export default function FileBrowser({ selected, onSelect, initialPath }: FileBrowserProps) {
   const [allowedRoots, setAllowedRoots] = useState<string[]>([]);
   const [currentPath, setCurrentPath] = useState('');
   const [entries, setEntries] = useState<FilesystemEntry[]>([]);
@@ -66,44 +67,62 @@ export default function FileBrowser({ selected, onSelect }: FileBrowserProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  async function loadListing(path: string): Promise<void> {
+    setLoading(true);
+    setError(null);
+    try {
+      const listing = await getFilesystemListing(path);
+      setCurrentPath(listing.path);
+      setEntries(listing.entries.filter((e) => e.is_dir));
+      setParent(listing.parent);
+      setLoading(false);
+    } catch (err) {
+      const nextError = err instanceof Error ? err : new Error('Failed to load directory');
+      if (nextError.message.includes('403')) {
+        setError('Path outside allowed directories');
+      } else if (nextError.message.includes('404')) {
+        setError('Directory not found');
+      } else {
+        setError(nextError.message);
+      }
+      setLoading(false);
+      throw nextError;
+    }
+  }
+
   // Load config on mount
   useEffect(() => {
     let cancelled = false;
     getConfig()
-      .then((cfg) => {
+      .then(async (cfg) => {
         if (cancelled) return;
         const roots = cfg.filesystem.allowed_base_paths;
         setAllowedRoots(roots);
-        const startPath = roots.length > 0 ? roots[0] : '';
-        navigate(startPath);
+        const fallbackPath = roots.length > 0 ? roots[0] : '';
+        const preferredPath = initialPath?.trim() || cfg.filesystem.default_start_path?.trim();
+        try {
+          await loadListing(preferredPath || fallbackPath);
+        } catch {
+          if (cancelled || !preferredPath || preferredPath === fallbackPath) {
+            return;
+          }
+          try {
+            await loadListing(fallbackPath);
+          } catch {
+            return;
+          }
+        }
       })
       .catch(() => {
-        if (!cancelled) navigate('');
+        if (!cancelled) {
+          void loadListing('').catch(() => {});
+        }
       });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialPath]);
 
   const navigate = (path: string) => {
-    setLoading(true);
-    setError(null);
-    getFilesystemListing(path)
-      .then((listing) => {
-        setCurrentPath(listing.path);
-        setEntries(listing.entries.filter((e) => e.is_dir));
-        setParent(listing.parent);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        if (err.message.includes('403')) {
-          setError('Path outside allowed directories');
-        } else if (err.message.includes('404')) {
-          setError('Directory not found');
-        } else {
-          setError(err.message);
-        }
-        setLoading(false);
-      });
+    void loadListing(path).catch(() => {});
   };
 
   const handleSelect = () => {

@@ -1,0 +1,10 @@
+.pytest_cache
+.subagents
+build
+dist
+missions/
+plans/
+scripts/
+skills/
+dist/
+node_modules/

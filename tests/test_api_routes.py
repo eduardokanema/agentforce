@@ -1401,6 +1401,7 @@ def test_get_config_returns_default_caps(tmp_path, monkeypatch):
     assert caps["max_retries_per_task"] == 2
     assert caps["max_wall_time_minutes"] == 60
     assert caps["max_cost_usd"] == 0
+    assert body["filesystem"]["default_start_path"] == "~/Projects"
 
 
 def test_get_config_creates_file_if_missing(tmp_path, monkeypatch):
@@ -1435,6 +1436,23 @@ def test_post_config_valid_updates_caps(tmp_path, monkeypatch):
 
     saved = json.loads((tmp_path / "config.json").read_text())
     assert saved["default_caps"]["max_concurrent_workers"] == 4
+
+
+def test_post_config_updates_default_workspace_browser_start_path(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+
+    payload = json.dumps({"filesystem": {"default_start_path": "~/Code"}}).encode("utf-8")
+    handler = _make_handler("/api/config")
+    handler.rfile = BytesIO(payload)
+    handler.headers["Content-Length"] = str(len(payload))
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (200,)
+    body = _response_body(handler)
+    assert body["filesystem"]["default_start_path"] == "~/Code"
+
+    saved = json.loads((tmp_path / "config.json").read_text())
+    assert saved["filesystem"]["default_start_path"] == "~/Code"
 
 
 def test_post_config_invalid_concurrent_workers_returns_400(tmp_path, monkeypatch):

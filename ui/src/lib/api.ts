@@ -664,12 +664,16 @@ export function getConfig(): Promise<AppConfig> {
   return requestJson<AppConfig>('/api/config');
 }
 
-export function updateDefaultCaps(caps: DefaultCaps): Promise<{ default_caps: DefaultCaps }> {
-  return requestJson<{ default_caps: DefaultCaps }>('/api/config', {
+export function updateConfig(config: Partial<AppConfig>): Promise<AppConfig> {
+  return requestJson<AppConfig>('/api/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ default_caps: caps }),
+    body: JSON.stringify(config),
   });
+}
+
+export function updateDefaultCaps(caps: DefaultCaps): Promise<{ default_caps: DefaultCaps }> {
+  return updateConfig({ default_caps: caps }).then((result) => ({ default_caps: result.default_caps }));
 }
 
 export function getFilesystemListing(path: string): Promise<FilesystemListing> {
