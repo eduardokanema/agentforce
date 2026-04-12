@@ -1382,6 +1382,25 @@ describe('PlanModePage', () => {
     expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeNull();
     expect(container.textContent).toContain('Current Planning Status');
     expect(container.textContent).toContain('Planning is running');
+    const planningStatusHeading = Array.from(container.querySelectorAll('section, div, span')).find(
+      (element) => element.textContent === 'Current Planning Status',
+    );
+    expect(planningStatusHeading).toBeTruthy();
+    if (!planningStatusHeading) {
+      throw new Error('Expected Current Planning Status heading');
+    }
+    expect(planningStatusHeading.closest('section')?.className).toContain('border-green/30');
+    expect(planningStatusHeading.closest('section')?.className).toContain('bg-green/10');
+    expect(planningStatusHeading.closest('section')?.className).toContain('text-green');
+    const livePlanningBadge = Array.from(container.querySelectorAll('div, span')).find(
+      (element) => element.textContent?.trim() === 'Live Planning',
+    );
+    const liveNowBadge = Array.from(container.querySelectorAll('div, span')).find(
+      (element) => element.textContent?.trim() === 'Live now',
+    );
+    expect(livePlanningBadge?.className).toContain('border-green/35');
+    expect(livePlanningBadge?.className).toContain('bg-green/12');
+    expect(liveNowBadge?.className).toContain('text-green');
     expect(container.textContent).toContain('Live Planning');
     expect(container.textContent).toContain('Live');
     expect(container.textContent).toContain('Live now');

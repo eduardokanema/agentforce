@@ -48,8 +48,8 @@ export default function PlanningSubstepTracker({
         </div>
         <div className="flex items-center gap-2">
           {live ? (
-            <div className="flex items-center gap-2 rounded-full border border-red/35 bg-red/12 px-3 py-1 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-red shadow-[0_0_12px_rgba(239,68,68,0.16)]">
-              <span className="inline-flex h-2.5 w-2.5 rounded-full bg-red animate-pulse" />
+            <div className="flex items-center gap-2 rounded-full border border-green/35 bg-green/12 px-3 py-1 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-green shadow-[0_0_12px_rgba(34,197,94,0.16)]">
+              <span className="inline-flex h-2.5 w-2.5 rounded-full bg-green animate-pulse" />
               Live
             </div>
           ) : null}

@@ -340,7 +340,7 @@ function planningStatusBanner(run: PlanRun | null): { tone: string; title: strin
   if (run.status === "running" || run.status === "queued") {
     return {
       tone: run.status === "running"
-        ? "border-red/30 bg-red/10 text-red"
+        ? "border-green/30 bg-green/10 text-green"
         : "border-amber/30 bg-amber/10 text-amber",
       title: run.status === "running" ? "Planning is running" : "Planning is queued",
       detail: run.status === "running"
@@ -1296,8 +1296,8 @@ function PhaseViewport({
             </div>
             <div className="flex flex-wrap gap-2">
               {workersActive ? (
-                <div className="flex items-center gap-2 rounded-full border border-red/35 bg-red/12 px-4 py-2 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-red shadow-[0_0_14px_rgba(239,68,68,0.16)]">
-                  <span className="inline-flex h-2.5 w-2.5 rounded-full bg-red animate-pulse" />
+                <div className="flex items-center gap-2 rounded-full border border-green/35 bg-green/12 px-4 py-2 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-green shadow-[0_0_14px_rgba(34,197,94,0.16)]">
+                  <span className="inline-flex h-2.5 w-2.5 rounded-full bg-green animate-pulse" />
                   Live Planning
                 </div>
               ) : null}
@@ -1327,7 +1327,7 @@ function PhaseViewport({
             <span className="rounded-full border border-border bg-surface px-3 py-1">
               {formatCurrency(currentRun?.cost_usd)}
             </span>
-            <span className={`rounded-full border px-3 py-1 ${workersActive ? "border-red/35 bg-red/12 text-red" : "border-border bg-surface"}`}>
+            <span className={`rounded-full border px-3 py-1 ${workersActive ? "border-green/35 bg-green/12 text-green" : "border-border bg-surface"}`}>
               {workersActive ? "Live now" : "Standing by"}
             </span>
           </div>
