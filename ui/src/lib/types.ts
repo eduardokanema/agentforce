@@ -111,6 +111,11 @@ export interface MissionDraft {
   preflight_status?: string;
   preflight_questions?: PreflightQuestion[];
   preflight_answers?: Record<string, PreflightAnswer>;
+  repair_status?: string;
+  repair_questions?: PreflightQuestion[];
+  repair_answers?: Record<string, PreflightAnswer>;
+  repair_issues?: RepairIssue[];
+  repair_context?: RepairContext | null;
 }
 
 export interface PlanStep {
@@ -252,11 +257,37 @@ export interface PreflightQuestion {
   options: string[];
   reason?: string;
   allow_custom?: boolean;
+  issue_ids?: string[];
+  preview?: {
+    before_text?: string;
+    proposed_text?: string;
+    why_required?: string;
+  } | null;
 }
 
 export interface PreflightAnswer {
   selected_option?: string;
   custom_answer?: string;
+}
+
+export interface RepairIssue {
+  issue_id: string;
+  source: string;
+  blocking: boolean;
+  kind: string;
+  task_id?: string | null;
+  original_text?: string;
+  reason?: string;
+}
+
+export interface RepairContext {
+  repair_round?: number;
+  max_rounds?: number;
+  mode?: string | null;
+  loop_no?: number | null;
+  source_run_id?: string | null;
+  source_version_id?: string | null;
+  gate_reason?: string;
 }
 
 export interface MissionPlanningSummary {

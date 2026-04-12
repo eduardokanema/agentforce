@@ -308,4 +308,94 @@ describe("BlackHoleModePage", () => {
       root.unmount();
     });
   });
+
+  it("renders repair questions and resumes the locked loop after submission", async () => {
+    const blackHoleState = makeBlackHoleState();
+    let repairSubmitted = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/models") {
+        return new Response(JSON.stringify(models), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url === "/api/plan/drafts/draft-123") {
+        return new Response(JSON.stringify(makeDraft({
+          revision: repairSubmitted ? 5 : 4,
+          validation: {
+            ...makeDraft().validation,
+            black_hole_config: blackHoleState.config,
+          },
+          repair_status: repairSubmitted ? "not_needed" : "pending",
+          repair_questions: repairSubmitted ? [] : [
+            {
+              id: "repair_desc",
+              prompt: "Allow the planner to update the description?",
+              options: ["Accept proposed change", "Decline proposed change", "Edit manually"],
+              preview: {
+                before_text: "Current description",
+                proposed_text: "Proposed description",
+                why_required: "The repair pass needs a coherent description to proceed.",
+              },
+            },
+          ],
+          repair_answers: {},
+          repair_context: {
+            loop_no: 2,
+            repair_round: 1,
+            source_version_id: "version-1",
+            gate_reason: "Answer repair questions before the loop can continue.",
+          },
+        })), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url === "/api/plan/drafts/draft-123/black-hole") {
+        return new Response(JSON.stringify(blackHoleState), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url === "/api/plan/drafts/draft-123/black-hole/repair") {
+        repairSubmitted = true;
+        const body = JSON.parse(String(init?.body || "{}"));
+        expect(body.loop_no).toBe(2);
+        expect(body.repair_round).toBe(1);
+        expect(body.source_version_id).toBe("version-1");
+        return new Response(JSON.stringify({ draft_id: "draft-123", revision: 5, status: "queued", campaign_id: "campaign-1" }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, "/black-hole/draft-123");
+    await flushPromises();
+
+    expect(container.textContent).toContain("Repair Questions");
+    expect(container.textContent).toContain("Proposed description");
+
+    const acceptOption = Array.from(container.querySelectorAll("label")).find((label) =>
+      label.textContent?.includes("Accept proposed change"),
+    );
+    expect(acceptOption).toBeTruthy();
+
+    await act(async () => {
+      acceptOption?.querySelector("input")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const resumeButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Resume Locked Loop"),
+    );
+    expect(resumeButton).toBeTruthy();
+
+    await act(async () => {
+      resumeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/plan/drafts/draft-123/black-hole/repair", expect.anything());
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });

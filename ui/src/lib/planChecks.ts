@@ -1,58 +1,5 @@
 import type { MissionDraft } from './types';
 
-const VAGUE_PHRASES = new Set([
-  'it works',
-  'works correctly',
-  'works properly',
-  'works well',
-  'done',
-  'complete',
-  'completed',
-  'finished',
-  'implemented',
-  'fully implemented',
-  'properly implemented',
-  'feature complete',
-]);
-
-const TESTABLE_PATTERNS = [
-  /\b[1-5]\d{2}\b/,
-  /[<>]=?|==|!=/,
-  /["'].+["']/,
-  /[\w./]+\/[\w./]+/,
-  /\b(pytest|npm test|make test|go test|cargo test|assert)\b/i,
-];
-
-function normalize(value: string): string {
-  return value.replace(/[^\w\s]/g, ' ').trim().toLowerCase();
-}
-
-function isVagueStatement(value: string): boolean {
-  if (value.trim() === '') {
-    return true;
-  }
-  const normalized = normalize(value);
-  if (VAGUE_PHRASES.has(normalized)) {
-    return true;
-  }
-  const hasSignal = TESTABLE_PATTERNS.some((pattern) => pattern.test(value));
-  return !hasSignal;
-}
-
-function collectVagueIssues(label: string, values: string[]): string[] {
-  if (values.length === 0) {
-    return [`${label} is missing.`];
-  }
-
-  const issues: string[] = [];
-  for (const value of values) {
-    if (isVagueStatement(value)) {
-      issues.push(`${label} item is too vague: ${value.trim() || '(empty)'}`);
-    }
-  }
-  return issues;
-}
-
 function collectDependencyWarnings(tasks: MissionDraft['draft_spec']['tasks']): string[] {
   const warnings: string[] = [];
   const taskIds = new Set(tasks.map((task) => task.id));
@@ -129,10 +76,6 @@ export function collectAdvisoryFlightChecks(draft: MissionDraft | null, activeMo
   }
 
   const warnings: string[] = [];
-  warnings.push(...collectVagueIssues('Definition of Done', draft.draft_spec.definition_of_done));
-  for (const task of draft.draft_spec.tasks) {
-    warnings.push(...collectVagueIssues(`Task ${task.id} acceptance criteria`, task.acceptance_criteria));
-  }
 
   if (draft.draft_spec.tasks.length > 7) {
     warnings.push(`Draft has ${draft.draft_spec.tasks.length} tasks; keep the launchable spec to 7 or fewer.`);

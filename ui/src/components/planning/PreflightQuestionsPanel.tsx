@@ -4,6 +4,8 @@ export default function PreflightQuestionsPanel({
   draft,
   answers,
   submitting,
+  title = "Preflight Questions",
+  description = "Clarify only what changes structure, dependencies, or acceptance criteria.",
   submitLabel = "Start Planning",
   onAnswerChange,
   onSubmit,
@@ -12,6 +14,8 @@ export default function PreflightQuestionsPanel({
   draft: MissionDraft;
   answers: Record<string, PreflightAnswer>;
   submitting: boolean;
+  title?: string;
+  description?: string;
   submitLabel?: string;
   onAnswerChange: (questionId: string, answer: PreflightAnswer) => void;
   onSubmit: () => void;
@@ -23,9 +27,9 @@ export default function PreflightQuestionsPanel({
     <section className="rounded-[1.15rem] border border-amber/30 bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.12),transparent_62%),var(--color-card)] p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="section-title">Preflight Questions</h2>
+          <h2 className="section-title">{title}</h2>
           <p className="mt-1 text-xs text-dim">
-            Clarify only what changes structure, dependencies, or acceptance criteria.
+            {description}
           </p>
         </div>
         <div className="rounded-full border border-amber/30 bg-amber/10 px-3 py-1 font-mono text-[11px] text-amber">
@@ -49,6 +53,29 @@ export default function PreflightQuestionsPanel({
               </div>
               {question.reason ? (
                 <p className="mt-1 text-xs text-dim">{question.reason}</p>
+              ) : null}
+              {question.preview ? (
+                <div className="mt-3 grid gap-2 rounded-lg border border-amber/20 bg-amber/5 p-3 text-xs text-dim">
+                  {question.preview.why_required ? (
+                    <div>{question.preview.why_required}</div>
+                  ) : null}
+                  {question.preview.before_text ? (
+                    <div>
+                      <div className="font-semibold uppercase tracking-[0.08em] text-muted">Current</div>
+                      <div className="mt-1 whitespace-pre-wrap rounded-md border border-border bg-card px-2 py-2 text-text">
+                        {question.preview.before_text}
+                      </div>
+                    </div>
+                  ) : null}
+                  {question.preview.proposed_text ? (
+                    <div>
+                      <div className="font-semibold uppercase tracking-[0.08em] text-muted">Proposed</div>
+                      <div className="mt-1 whitespace-pre-wrap rounded-md border border-cyan/20 bg-cyan/5 px-2 py-2 text-text">
+                        {question.preview.proposed_text}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               ) : null}
               <div className="mt-3 grid gap-2">
                 {question.options.map((option) => (

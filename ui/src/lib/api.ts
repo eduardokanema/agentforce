@@ -404,6 +404,54 @@ export function stopBlackHoleCampaign(
   );
 }
 
+export function submitPlanDraftRepair(
+  id: string,
+  expectedRevision: number,
+  answers: Record<string, PreflightAnswer>,
+  context?: {
+    loop_no?: number | null;
+    repair_round?: number | null;
+    source_version_id?: string | null;
+  },
+): Promise<{ draft_id: string; revision: number; status: string; plan_run_id?: string; campaign_id?: string }> {
+  return requestJson<{ draft_id: string; revision: number; status: string; plan_run_id?: string; campaign_id?: string }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/repair`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_revision: expectedRevision,
+        answers,
+        ...(context ?? {}),
+      }),
+    },
+  );
+}
+
+export function submitBlackHoleDraftRepair(
+  id: string,
+  expectedRevision: number,
+  answers: Record<string, PreflightAnswer>,
+  context?: {
+    loop_no?: number | null;
+    repair_round?: number | null;
+    source_version_id?: string | null;
+  },
+): Promise<{ draft_id: string; revision: number; status: string; plan_run_id?: string; campaign_id?: string }> {
+  return requestJson<{ draft_id: string; revision: number; status: string; plan_run_id?: string; campaign_id?: string }>(
+    `/api/plan/drafts/${encodeURIComponent(id)}/black-hole/repair`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_revision: expectedRevision,
+        answers,
+        ...(context ?? {}),
+      }),
+    },
+  );
+}
+
 export function patchPlanDraftSpec(
   id: string,
   expectedRevision: number,

@@ -13,6 +13,8 @@ from agentforce.server import state_io, ws
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunStore
 from agentforce.server.planning_runtime import (
+    _answered_repair_state,
+    _repair_state_from_validation,
     create_plan_run_for_draft,
     discover_preflight_questions,
     enqueue_black_hole_campaign,
@@ -89,6 +91,20 @@ def _draft_payload(draft: MissionDraftV1) -> dict:
     payload["preflight_status"] = str(payload.get("validation", {}).get("preflight_status") or "not_needed")
     payload["preflight_questions"] = list(payload.get("validation", {}).get("preflight_questions") or [])
     payload["preflight_answers"] = dict(payload.get("validation", {}).get("preflight_answers") or {})
+    repair = _repair_state_from_validation(payload.get("validation", {}))
+    payload["repair_status"] = str(repair.get("status") or "not_needed")
+    payload["repair_questions"] = list(repair.get("questions") or [])
+    payload["repair_answers"] = dict(repair.get("answers") or {})
+    payload["repair_issues"] = list(repair.get("issues") or [])
+    payload["repair_context"] = {
+        "repair_round": int(repair.get("repair_round") or 0),
+        "max_rounds": int(repair.get("max_rounds") or 2),
+        "mode": repair.get("mode"),
+        "loop_no": repair.get("loop_no"),
+        "source_run_id": str(repair.get("source_run_id") or ""),
+        "source_version_id": str(repair.get("source_version_id") or ""),
+        "gate_reason": str(repair.get("gate_reason") or ""),
+    }
     return payload
 
 
@@ -200,6 +216,27 @@ def _preflight_prompt(draft: MissionDraftV1) -> str:
     if not lines:
         return str(draft.draft_spec.get("goal") or "")
     return f"{draft.draft_spec.get('goal') or ''}\n\nPreflight clarifications:\n" + "\n".join(lines)
+
+
+def _repair_prompt(draft: MissionDraftV1) -> str:
+    repair = _repair_state_from_validation(draft.validation)
+    questions = list(repair.get("questions") or [])
+    answers = dict(repair.get("answers") or {})
+    lines: list[str] = []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        answer = answers.get(str(question.get("id") or ""))
+        if not isinstance(answer, dict):
+            continue
+        selected = str(answer.get("selected_option") or "").strip()
+        custom = str(answer.get("custom_answer") or "").strip()
+        rendered = custom or selected
+        if rendered:
+            lines.append(f"- {question.get('prompt')}: {rendered}")
+    if not lines:
+        return "Resume planning using the recorded repair guidance."
+    return "Repair guidance:\n" + "\n".join(lines)
 
 
 def _normalize_black_hole_config(draft: MissionDraftV1, body: dict) -> dict:
@@ -494,6 +531,98 @@ def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
         save_result.draft,
         trigger_kind="auto",
         trigger_message=_preflight_prompt(save_result.draft),
+    )
+    _enqueue_plan_run(run.id)
+    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+    state_io._broadcast_mission_list_refresh()
+    return 200, {
+        "draft_id": save_result.draft.id,
+        "revision": save_result.draft.revision,
+        "plan_run_id": run.id,
+        "status": "queued",
+    }
+
+
+def _submit_repair(draft_id: str, body: dict) -> tuple[int, dict]:
+    draft, error = _load_draft_or_404(draft_id)
+    if error is not None:
+        return error
+
+    expected_revision = body.get("expected_revision")
+    if not isinstance(expected_revision, int):
+        return 400, {"error": "expected_revision is required"}
+
+    repair = _repair_state_from_validation(draft.validation)
+    if str(repair.get("status") or "") != "pending":
+        return 409, {"error": "repair is not pending for this draft"}
+
+    raw_answers = body.get("answers") or {}
+    if not isinstance(raw_answers, dict):
+        return 400, {"error": "answers must be an object"}
+
+    if body.get("loop_no") is not None and int(body.get("loop_no")) != int(repair.get("loop_no") or 0):
+        return 409, {"error": "repair loop does not match the current pending state"}
+    if body.get("repair_round") is not None and int(body.get("repair_round")) != int(repair.get("repair_round") or 0):
+        return 409, {"error": "repair round does not match the current pending state"}
+    source_version_id = str(body.get("source_version_id") or "").strip()
+    if source_version_id and source_version_id != str(repair.get("source_version_id") or ""):
+        return 409, {"error": "repair source version does not match the current pending state"}
+
+    normalized_answers: dict[str, dict[str, str]] = {}
+    summary_lines: list[str] = []
+    for question in list(repair.get("questions") or []):
+        if not isinstance(question, dict):
+            continue
+        question_id = str(question.get("id") or "")
+        answer = raw_answers.get(question_id)
+        if not isinstance(answer, dict):
+            continue
+        selected_option = str(answer.get("selected_option") or "").strip()
+        custom_answer = str(answer.get("custom_answer") or "").strip()
+        if not selected_option and not custom_answer:
+            continue
+        normalized_answers[question_id] = {
+            "selected_option": selected_option,
+            "custom_answer": custom_answer,
+        }
+        summary_lines.append(f"- {question.get('prompt')}: {custom_answer or selected_option}")
+
+    updated = draft.copy_with(
+        validation={
+            **draft.validation,
+            "repair": _answered_repair_state(repair, normalized_answers),
+        },
+        turns=list(draft.turns) + (
+            [{"role": "user", "content": "Repair answers:\n" + "\n".join(summary_lines)}] if summary_lines else []
+        ),
+        activity_log=list(draft.activity_log) + [{"type": "repair_submitted", "repair_round": int(repair.get("repair_round") or 0)}],
+    )
+    save_result = _store().save(updated, expected_revision=expected_revision)
+    if save_result.status != "saved" or save_result.draft is None:
+        current = save_result.draft
+        return 409, {
+            "error": "draft revision conflict",
+            "revision": current.revision if current is not None else None,
+        }
+
+    if _draft_kind(save_result.draft) == _BLACK_HOLE_KIND:
+        campaign = _black_hole_store().latest_for_draft(draft_id)
+        if campaign is None:
+            return 404, {"error": "black-hole campaign not found"}
+        enqueue_black_hole_campaign(campaign.id, draft_id=draft_id)
+        ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+        state_io._broadcast_mission_list_refresh()
+        return 200, {
+            "draft_id": save_result.draft.id,
+            "revision": save_result.draft.revision,
+            "status": "queued",
+            "campaign_id": campaign.id,
+        }
+
+    run = create_plan_run_for_draft(
+        save_result.draft,
+        trigger_kind="repair_answers",
+        trigger_message=_repair_prompt(save_result.draft),
     )
     _enqueue_plan_run(run.id)
     ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
@@ -827,6 +956,12 @@ def post(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
 
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "preflight":
         return _submit_preflight(parts[3], handler._read_json_body())
+
+    if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "repair":
+        return _submit_repair(parts[3], handler._read_json_body())
+
+    if len(parts) == 6 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "black-hole" and parts[5] == "repair":
+        return _submit_repair(parts[3], handler._read_json_body())
 
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "import-yaml":
         return _import_yaml(parts[3], handler._read_json_body())

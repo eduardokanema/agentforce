@@ -23,6 +23,7 @@ import {
   retryPlanRun,
   sendPlanDraftMessage,
   startPlanDraft,
+  submitPlanDraftRepair,
   submitPlanDraftPreflight,
 } from "../lib/api";
 import { isBlackHoleDraft, SIMPLE_PLAN_DRAFT_KIND } from "../lib/draftKinds";
@@ -720,6 +721,8 @@ function PhaseViewport({
   advisoryIssues,
   preflightAnswers,
   submittingPreflight,
+  repairAnswers,
+  submittingRepair,
   currentRun,
   streaming,
   launching,
@@ -728,6 +731,7 @@ function PhaseViewport({
   onAnswerChange,
   onSubmitPreflight,
   onSkipPreflight,
+  onSubmitRepair,
   onLaunch,
   onOpenSupportPanel,
 }: {
@@ -741,6 +745,8 @@ function PhaseViewport({
   advisoryIssues: string[];
   preflightAnswers: Record<string, PreflightAnswer>;
   submittingPreflight: boolean;
+  repairAnswers: Record<string, PreflightAnswer>;
+  submittingRepair: boolean;
   currentRun: PlanRun | null;
   streaming: boolean;
   launching: boolean;
@@ -749,6 +755,7 @@ function PhaseViewport({
   onAnswerChange: (questionId: string, answer: PreflightAnswer) => void;
   onSubmitPreflight: () => void;
   onSkipPreflight: () => void;
+  onSubmitRepair: () => void;
   onLaunch: () => void;
   onOpenSupportPanel: (panel: SupportPanelId) => void;
 }) {
@@ -836,6 +843,8 @@ function PhaseViewport({
   if (selectedPhase === "preflight") {
     const preflightPending = draft.preflight_status === "pending"
       && (draft.preflight_questions?.length ?? 0) > 0;
+    const repairPending = draft.repair_status === "pending"
+      && (draft.repair_questions?.length ?? 0) > 0;
 
     if (preflightPending) {
       return (
@@ -850,11 +859,32 @@ function PhaseViewport({
       );
     }
 
+    if (repairPending) {
+      return (
+        <PreflightQuestionsPanel
+          draft={{
+            ...draft,
+            preflight_questions: draft.repair_questions,
+          }}
+          answers={repairAnswers}
+          submitting={submittingRepair}
+          title="Repair Questions"
+          description={draft.repair_context?.gate_reason || "Answer these questions so the planner can repair the mission draft and continue."}
+          submitLabel="Resume Planning"
+          onAnswerChange={onAnswerChange}
+          onSubmit={onSubmitRepair}
+          onSkip={onSubmitRepair}
+        />
+      );
+    }
+
     return (
       <section className="rounded-[1.15rem] border border-border bg-card p-5">
-        <h2 className="section-title">Preflight Complete</h2>
+        <h2 className="section-title">{draft.repair_status === "manual_edit_required" ? "Repair Review" : "Preflight Complete"}</h2>
         <p className="mt-3 max-w-[62ch] text-sm leading-7 text-dim">
-          Clarifications are resolved. The cockpit will keep the recorded answers in the transcript and logbook without competing with the live stage.
+          {draft.repair_status === "manual_edit_required"
+            ? (draft.repair_context?.gate_reason || "Repair rounds are exhausted. Open edit mode and fix the draft manually.")
+            : "Clarifications are resolved. The cockpit will keep the recorded answers in the transcript and logbook without competing with the live stage."}
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <span className="rounded-full border border-border bg-surface px-3 py-1 text-[11px] text-dim">
@@ -1160,6 +1190,8 @@ export default function PlanModePage() {
   const [launching, setLaunching] = useState(false);
   const [submittingPreflight, setSubmittingPreflight] = useState(false);
   const [preflightAnswers, setPreflightAnswers] = useState<Record<string, PreflightAnswer>>({});
+  const [repairAnswers, setRepairAnswers] = useState<Record<string, PreflightAnswer>>({});
+  const [submittingRepair, setSubmittingRepair] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
@@ -1175,6 +1207,7 @@ export default function PlanModePage() {
       setDraft(loaded);
       setStreaming(planningBusy(latestRun(loaded)));
       setPreflightAnswers(loaded.preflight_answers ?? {});
+      setRepairAnswers(loaded.repair_answers ?? {});
     } catch (caught) {
       setPageError(
         caught instanceof Error ? caught.message : "Failed to load draft.",
@@ -1460,6 +1493,33 @@ export default function PlanModePage() {
       );
     } finally {
       setSubmittingPreflight(false);
+    }
+  };
+
+  const handleSubmitRepair = async (): Promise<void> => {
+    if (!draft) {
+      return;
+    }
+    setSubmittingRepair(true);
+    setStreaming(true);
+    setAutoFollowPhase(true);
+    setPageError(null);
+    try {
+      await submitPlanDraftRepair(draft.id, draft.revision, repairAnswers, {
+        loop_no: draft.repair_context?.loop_no ?? null,
+        repair_round: draft.repair_context?.repair_round ?? null,
+        source_version_id: draft.repair_context?.source_version_id ?? null,
+      });
+      await loadDraft(draft.id);
+    } catch (caught) {
+      setStreaming(false);
+      setPageError(
+        caught instanceof Error
+          ? caught.message
+          : "Failed to submit repair answers.",
+      );
+    } finally {
+      setSubmittingRepair(false);
     }
   };
 
@@ -1842,6 +1902,8 @@ export default function PlanModePage() {
               advisoryIssues={advisoryIssues}
               preflightAnswers={preflightAnswers}
               submittingPreflight={submittingPreflight}
+              repairAnswers={repairAnswers}
+              submittingRepair={submittingRepair}
               currentRun={currentRun}
               streaming={streaming}
               launching={launching}
@@ -1850,7 +1912,8 @@ export default function PlanModePage() {
                 void handleRetryRun(runId);
               }}
               onAnswerChange={(questionId, answer) => {
-                setPreflightAnswers((current) => ({
+                const updater = draft?.repair_status === "pending" ? setRepairAnswers : setPreflightAnswers;
+                updater((current) => ({
                   ...current,
                   [questionId]: answer,
                 }));
@@ -1860,6 +1923,9 @@ export default function PlanModePage() {
               }}
               onSkipPreflight={() => {
                 void handleSubmitPreflight(true);
+              }}
+              onSubmitRepair={() => {
+                void handleSubmitRepair();
               }}
               onLaunch={() => {
                 void handleLaunch();

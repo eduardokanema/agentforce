@@ -947,4 +947,78 @@ describe('PlanModePage', () => {
       root.unmount();
     });
   });
+
+  it('renders repair questions and resumes planning after submission', async () => {
+    let repairSubmitted = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft({
+          revision: repairSubmitted ? 6 : 5,
+          repair_status: repairSubmitted ? 'not_needed' : 'pending',
+          repair_questions: repairSubmitted ? [] : [
+            {
+              id: 'repair_1',
+              prompt: 'How should this criterion be made measurable?',
+              options: [
+                'Add an explicit verification command and exit code',
+                'Require a concrete output artifact or file path',
+              ],
+              reason: 'Task setup_env acceptance criteria item is too vague',
+            },
+          ],
+          repair_answers: {},
+          repair_context: {
+            repair_round: 1,
+            max_rounds: 2,
+            source_version_id: 'version-1',
+            gate_reason: 'Answer the repair questions before planning can continue.',
+          },
+        })), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123/repair') {
+        repairSubmitted = true;
+        const body = JSON.parse(String(init?.body || '{}'));
+        expect(body.repair_round).toBe(1);
+        expect(body.source_version_id).toBe('version-1');
+        return new Response(JSON.stringify({ draft_id: 'draft-123', revision: 6, status: 'queued', plan_run_id: 'run-repair' }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    expect(container.textContent).toContain('Repair Questions');
+    const option = Array.from(container.querySelectorAll('label')).find((label) =>
+      label.textContent?.includes('Add an explicit verification command and exit code'));
+    expect(option).toBeTruthy();
+
+    await act(async () => {
+      option?.querySelector('input')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const resumeButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Resume Planning')) as HTMLButtonElement | undefined;
+    expect(resumeButton).toBeTruthy();
+
+    await act(async () => {
+      resumeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/plan/drafts/draft-123/repair', expect.anything());
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });

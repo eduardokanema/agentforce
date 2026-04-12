@@ -193,6 +193,18 @@ function buildPhaseCopy(
           railSummary: countLabel(draft.preflight_questions?.length ?? 0, 'question'),
         };
       }
+      if (draft.repair_status === 'pending') {
+        return {
+          summary: `${countLabel(draft.repair_questions?.length ?? 0, 'repair question')} must be answered before planning can continue.`,
+          railSummary: countLabel(draft.repair_questions?.length ?? 0, 'repair'),
+        };
+      }
+      if (draft.repair_status === 'manual_edit_required') {
+        return {
+          summary: draft.repair_context?.gate_reason || 'Repair rounds are exhausted. Manual edits are required before planning can continue.',
+          railSummary: 'Manual repair',
+        };
+      }
       return {
         summary: draft.preflight_status === 'skipped'
           ? 'Preflight was skipped. Planning can proceed, but the mission may be carrying unanswered assumptions.'
@@ -322,12 +334,14 @@ export function derivePlanFlow(
   const readiness = buildLaunchReadiness(draft, run, version, validationIssues, conflictMessage);
   const preflightPending = draft.preflight_status === 'pending'
     && (draft.preflight_questions?.length ?? 0) > 0;
+  const repairPending = draft.repair_status === 'pending'
+    && (draft.repair_questions?.length ?? 0) > 0;
 
   let currentPhaseId: CockpitPhaseId = 'briefing';
   let latestRunIssue: string | null = null;
   let unknownState = false;
 
-  if (preflightPending) {
+  if (preflightPending || repairPending || draft.repair_status === 'manual_edit_required') {
     currentPhaseId = 'preflight';
   } else if (run?.status === 'queued' || run?.status === 'running') {
     currentPhaseId = stepToPhase(run.current_step);

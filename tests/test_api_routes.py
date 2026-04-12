@@ -1963,6 +1963,220 @@ def test_black_hole_child_spec_normalizes_wrapped_payload():
     assert parsed.tasks[0].id == "primary"
 
 
+def test_mission_plan_validation_surfaces_structured_quality_issues():
+    from agentforce.server import planning_runtime
+
+    validation = planning_runtime._mission_plan_validation({
+        "name": "Draft",
+        "goal": "Goal",
+        "definition_of_done": [
+            "Works well",
+        ],
+        "tasks": [
+            {
+                "id": "task-1",
+                "title": "Task",
+                "description": "Do it",
+                "acceptance_criteria": [
+                    "Done",
+                ],
+            },
+        ],
+        "caps": {},
+    })
+
+    issue_kinds = {issue["kind"] for issue in validation["structured_issues"]}
+
+    assert "dod_vague" in issue_kinds
+    assert "criterion_vague" in issue_kinds
+    assert all(issue["blocking"] is True for issue in validation["structured_issues"])
+
+
+def test_plan_draft_repair_submission_enqueues_retry_run(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Plan repair flow", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.load(draft_id)
+    assert draft is not None
+    save_result = store.save(
+        draft.copy_with(
+            validation={
+                **draft.validation,
+                "repair": {
+                    "status": "pending",
+                    "repair_round": 1,
+                    "max_rounds": 2,
+                    "questions": [
+                        {
+                            "id": "repair_1",
+                            "prompt": "How should this be made measurable?",
+                            "options": ["Add an explicit verification command and exit code"],
+                            "allow_custom": True,
+                        }
+                    ],
+                    "issues": [{"issue_id": "repair_1", "kind": "criterion_vague", "blocking": True}],
+                    "answers": {},
+                },
+            },
+        ),
+        expected_revision=draft.revision,
+    )
+    assert save_result.status == "saved"
+
+    enqueued: list[str] = []
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
+
+    repair_handler = _make_handler(f"/api/plan/drafts/{draft_id}/repair")
+    _json_request(
+        repair_handler,
+        {
+            "expected_revision": save_result.draft.revision,
+            "repair_round": 1,
+            "answers": {
+                "repair_1": {"selected_option": "Add an explicit verification command and exit code"},
+            },
+        },
+    )
+    repair_handler.do_POST()
+
+    assert repair_handler.send_response.call_args.args == (200,)
+    body = _response_body(repair_handler)
+    assert body["status"] == "queued"
+    assert body["plan_run_id"]
+    assert enqueued == [body["plan_run_id"]]
+
+
+def test_black_hole_repair_submission_requeues_campaign(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server.black_hole_runs import BlackHoleCampaignStore
+
+    _patch_home(monkeypatch, tmp_path)
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.create(
+        "draft-black-hole-repair",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
+    save_result = store.save(
+        draft.copy_with(
+            validation={
+                **draft.validation,
+                "repair": {
+                    "status": "pending",
+                    "mode": "black_hole",
+                    "loop_no": 2,
+                    "repair_round": 1,
+                    "max_rounds": 2,
+                    "source_version_id": "version-1",
+                    "questions": [
+                        {
+                            "id": "repair_desc",
+                            "prompt": "Allow the planner to update the description?",
+                            "options": ["Accept proposed change", "Decline proposed change", "Edit manually"],
+                            "allow_custom": True,
+                        }
+                    ],
+                    "issues": [{"issue_id": "repair_desc", "kind": "criterion_vague", "blocking": True}],
+                    "answers": {},
+                },
+            },
+        ),
+        expected_revision=draft.revision,
+    )
+    assert save_result.status == "saved"
+
+    campaign_store = BlackHoleCampaignStore(tmp_path / "black_hole")
+    campaign = campaign_store.create_campaign(
+        "campaign-black-hole-repair",
+        draft_id=draft.id,
+        max_loops=4,
+        max_no_progress=2,
+        config_snapshot={"objective": "Repair child plans"},
+        status="waiting_human",
+    )
+
+    enqueued: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        plan_routes,
+        "enqueue_black_hole_campaign",
+        lambda campaign_id, *, draft_id=None: enqueued.append((campaign_id, draft_id)),
+    )
+
+    repair_handler = _make_handler(f"/api/plan/drafts/{draft.id}/black-hole/repair")
+    _json_request(
+        repair_handler,
+        {
+            "expected_revision": save_result.draft.revision,
+            "loop_no": 2,
+            "repair_round": 1,
+            "source_version_id": "version-1",
+            "answers": {
+                "repair_desc": {"selected_option": "Accept proposed change"},
+            },
+        },
+    )
+    repair_handler.do_POST()
+
+    assert repair_handler.send_response.call_args.args == (200,)
+    body = _response_body(repair_handler)
+    assert body["status"] == "queued"
+    assert body["campaign_id"] == campaign.id
+    assert enqueued == [(campaign.id, draft.id)]
+
+
+def test_black_hole_campaign_waits_when_repair_is_pending(tmp_path, monkeypatch):
+    from agentforce.server import planning_runtime
+    from agentforce.server.black_hole_runs import BlackHoleCampaignStore
+
+    _patch_home(monkeypatch, tmp_path)
+    draft_store = PlanDraftStore(tmp_path / "drafts")
+    draft = draft_store.create(
+        "draft-black-hole-pending-repair",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
+    save_result = draft_store.save(
+        draft.copy_with(
+            validation={
+                **draft.validation,
+                "repair": {
+                    "status": "pending",
+                    "mode": "black_hole",
+                    "loop_no": 1,
+                    "repair_round": 1,
+                    "max_rounds": 2,
+                    "gate_reason": "Answer repair questions before continuing.",
+                    "questions": [{"id": "repair_1", "prompt": "How?", "options": ["A", "B"]}],
+                    "issues": [{"issue_id": "repair_1", "kind": "criterion_vague", "blocking": True}],
+                    "answers": {},
+                },
+            },
+        ),
+        expected_revision=draft.revision,
+    )
+    assert save_result.status == "saved"
+
+    campaign_store = BlackHoleCampaignStore(tmp_path / "black_hole")
+    campaign = campaign_store.create_campaign(
+        "campaign-pending-repair",
+        draft_id=draft.id,
+        max_loops=4,
+        max_no_progress=2,
+        config_snapshot={"objective": "Repair child plans"},
+    )
+
+    planning_runtime.run_black_hole_campaign(campaign.id)
+
+    refreshed = campaign_store.load_campaign(campaign.id)
+    assert refreshed is not None
+    assert refreshed.status == "waiting_human"
+    assert "repair questions" in refreshed.stop_reason.lower()
+
+
 def test_python_fn_length_ignores_virtualenv_and_site_packages(tmp_path):
     from agentforce.server.black_hole_analyzers import analyze_python_fn_length
 

@@ -15,6 +15,7 @@ import {
   pauseBlackHoleCampaign,
   resumeBlackHoleCampaign,
   stopBlackHoleCampaign,
+  submitBlackHoleDraftRepair,
   submitPlanDraftPreflight,
 } from "../lib/api";
 import {
@@ -130,10 +131,12 @@ export default function BlackHoleModePage(): JSX.Element {
   const [campaignState, setCampaignState] = useState<BlackHoleCampaignState | null>(null);
   const [configDraft, setConfigDraft] = useState<BlackHoleConfig | null>(null);
   const [preflightAnswers, setPreflightAnswers] = useState<Record<string, PreflightAnswer>>({});
+  const [repairAnswers, setRepairAnswers] = useState<Record<string, PreflightAnswer>>({});
   const [loadingModels, setLoadingModels] = useState(true);
   const [loadingDraft, setLoadingDraft] = useState(false);
   const [creatingDraft, setCreatingDraft] = useState(false);
   const [submittingPreflight, setSubmittingPreflight] = useState(false);
+  const [submittingRepair, setSubmittingRepair] = useState(false);
   const [syncingCampaign, setSyncingCampaign] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
 
@@ -158,6 +161,7 @@ export default function BlackHoleModePage(): JSX.Element {
         normalizeBlackHoleConfig(state.config ?? loaded.validation?.black_hole_config, loaded),
       );
       setPreflightAnswers(loaded.preflight_answers ?? {});
+      setRepairAnswers(loaded.repair_answers ?? {});
     } catch (caught) {
       setPageError(caught instanceof Error ? caught.message : "Failed to load black hole draft.");
     } finally {
@@ -312,6 +316,26 @@ export default function BlackHoleModePage(): JSX.Element {
     }
   };
 
+  const handleSubmitRepair = async (): Promise<void> => {
+    if (!draft) {
+      return;
+    }
+    setSubmittingRepair(true);
+    setPageError(null);
+    try {
+      await submitBlackHoleDraftRepair(draft.id, draft.revision, repairAnswers, {
+        loop_no: draft.repair_context?.loop_no ?? null,
+        repair_round: draft.repair_context?.repair_round ?? null,
+        source_version_id: draft.repair_context?.source_version_id ?? null,
+      });
+      await loadDraft(draft.id);
+    } catch (caught) {
+      setPageError(caught instanceof Error ? caught.message : "Failed to submit repair answers.");
+    } finally {
+      setSubmittingRepair(false);
+    }
+  };
+
   const handlePauseCampaign = async (): Promise<void> => {
     if (!draft) {
       return;
@@ -365,6 +389,7 @@ export default function BlackHoleModePage(): JSX.Element {
   const latestLoop = loops[loops.length - 1];
   const metricLabel = blackHoleMetricLabel(configDraft);
   const preflightPending = draft?.preflight_status === "pending" && (draft.preflight_questions?.length ?? 0) > 0;
+  const repairPending = draft?.repair_status === "pending" && (draft.repair_questions?.length ?? 0) > 0;
 
   if (loadingDraft) {
     return (
@@ -524,12 +549,38 @@ export default function BlackHoleModePage(): JSX.Element {
             />
           ) : null}
 
+          {!preflightPending && repairPending ? (
+            <PreflightQuestionsPanel
+              draft={{
+                ...draft,
+                preflight_questions: draft.repair_questions,
+              }}
+              answers={repairAnswers}
+              submitting={submittingRepair}
+              title="Repair Questions"
+              description={draft.repair_context?.gate_reason || "Answer these questions so the campaign can repair the child plan and continue the locked loop."}
+              submitLabel="Resume Locked Loop"
+              onAnswerChange={(questionId, answer) => {
+                setRepairAnswers((current) => ({
+                  ...current,
+                  [questionId]: answer,
+                }));
+              }}
+              onSubmit={() => {
+                void handleSubmitRepair();
+              }}
+              onSkip={() => {
+                void handleSubmitRepair();
+              }}
+            />
+          ) : null}
+
           <div className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(16rem,0.95fr)]">
             {configDraft ? (
               <BlackHoleConfigPanel
                 config={configDraft}
                 campaign={campaign}
-                busy={syncingCampaign || submittingPreflight}
+                busy={syncingCampaign || submittingPreflight || submittingRepair}
                 onChange={setConfigDraft}
                 onStart={() => {
                   void handleStartCampaign();

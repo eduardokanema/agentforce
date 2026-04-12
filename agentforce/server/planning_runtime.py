@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 import uuid
 from dataclasses import dataclass
@@ -272,13 +273,175 @@ def _record_step(
     return updated
 
 
+def _sum_token_events(*events: TokenEvent | None) -> TokenEvent:
+    return TokenEvent(
+        sum(event.tokens_in for event in events if event is not None),
+        sum(event.tokens_out for event in events if event is not None),
+        round(sum(event.cost_usd for event in events if event is not None), 6),
+    )
+
+
+def _stable_issue_id(*parts: str) -> str:
+    normalized = "|".join(part.strip() for part in parts)
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _build_structured_validation_issues(spec_dict: dict[str, Any]) -> list[dict[str, Any]]:
+    mission_spec = MissionSpec.from_dict(spec_dict)
+    issues: list[dict[str, Any]] = []
+
+    for raw_issue in mission_spec.validate(stage="draft"):
+        issue_text = str(raw_issue).strip()
+        if not issue_text:
+            continue
+        issues.append(
+            {
+                "issue_id": _stable_issue_id("draft_validation", issue_text),
+                "source": "validate",
+                "blocking": True,
+                "kind": "draft_validation",
+                "task_id": None,
+                "original_text": issue_text,
+                "reason": issue_text,
+            }
+        )
+
+    quality = mission_spec.validate_quality()
+    for item in quality.dod_errors:
+        text = str(item).strip()
+        issues.append(
+            {
+                "issue_id": _stable_issue_id("dod_vague", text),
+                "source": "validate_quality",
+                "blocking": True,
+                "kind": "dod_vague",
+                "task_id": None,
+                "original_text": text,
+                "reason": "Definition of Done item is too vague",
+            }
+        )
+    for item in quality.criteria_errors:
+        criterion = str(item.criterion or "").strip()
+        task_id = str(item.task_id or "").strip() or None
+        issues.append(
+            {
+                "issue_id": _stable_issue_id("criterion_vague", task_id or "", criterion),
+                "source": "validate_quality",
+                "blocking": True,
+                "kind": "criterion_vague",
+                "task_id": task_id,
+                "original_text": criterion,
+                "reason": str(item.reason or "Criterion is too vague"),
+            }
+        )
+    return issues
+
+
+def _issue_summary(issue: dict[str, Any]) -> str:
+    kind = str(issue.get("kind") or "")
+    original = str(issue.get("original_text") or "").strip()
+    task_id = str(issue.get("task_id") or "").strip()
+    if kind == "dod_vague":
+        return f"Definition of Done item is too vague: {original}"
+    if kind == "criterion_vague" and task_id:
+        return f"Task {task_id} acceptance criteria item is too vague: {original}"
+    if kind == "criterion_vague":
+        return f"Acceptance criteria item is too vague: {original}"
+    return str(issue.get("reason") or original or "Validation issue")
+
+
+def _blank_repair_state() -> dict[str, Any]:
+    return {
+        "status": "not_needed",
+        "repair_round": 0,
+        "max_rounds": 2,
+        "issues": [],
+        "questions": [],
+        "answers": {},
+        "gate_reason": "",
+    }
+
+
+def _repair_state_from_validation(validation: dict[str, Any]) -> dict[str, Any]:
+    raw = validation.get("repair") if isinstance(validation, dict) else None
+    if not isinstance(raw, dict):
+        return _blank_repair_state()
+    state = _blank_repair_state()
+    state.update(raw)
+    state["issues"] = list(raw.get("issues") or [])
+    state["questions"] = list(raw.get("questions") or [])
+    state["answers"] = dict(raw.get("answers") or {})
+    return state
+
+
+def _with_updated_repair_state(validation: dict[str, Any], repair: dict[str, Any] | None) -> dict[str, Any]:
+    updated = dict(validation or {})
+    if repair is None:
+        updated.pop("repair", None)
+        return updated
+    updated["repair"] = repair
+    return updated
+
+
+def _pending_repair_state(
+    *,
+    run: PlanRunRecord,
+    version_id: str,
+    issues: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+    gate_reason: str,
+    repair_round: int,
+    max_rounds: int = 2,
+    mode: str = "plan",
+    loop_no: int | None = None,
+    candidate: dict[str, Any] | None = None,
+    analyzer_result: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "pending",
+        "mode": mode,
+        "source_run_id": run.id,
+        "source_version_id": version_id,
+        "repair_round": repair_round,
+        "max_rounds": max_rounds,
+        "issues": issues,
+        "questions": questions,
+        "answers": {},
+        "gate_reason": gate_reason,
+        "loop_no": loop_no,
+        "candidate": candidate or {},
+        "analyzer_result": analyzer_result or {},
+        "config_snapshot": config or {},
+    }
+
+
+def _answered_repair_state(state: dict[str, Any], answers: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(state)
+    updated["status"] = "answered"
+    updated["answers"] = dict(answers)
+    return updated
+
+
+def _cleared_repair_state(validation: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(validation or {})
+    updated.pop("repair", None)
+    return updated
+
+
 def _mission_plan_validation(spec_dict: dict[str, Any]) -> dict[str, Any]:
     mission_spec = MissionSpec.from_dict(spec_dict)
-    issues = mission_spec.validate(stage="draft")
+    structured_issues = _build_structured_validation_issues(spec_dict)
+    issues = [_issue_summary(issue) for issue in structured_issues]
     warnings: list[str] = []
     if len(mission_spec.tasks) > 7:
         warnings.append("Task count exceeds mission-plan guidance of 7 tasks.")
-    return {"issues": issues, "warnings": warnings}
+    return {
+        "issues": issues,
+        "warnings": warnings,
+        "structured_issues": structured_issues,
+        "blocking_issues": [issue for issue in structured_issues if issue.get("blocking")],
+    }
 
 
 def _critic_prompt(name: str, goal: str, spec_dict: dict[str, Any]) -> str:
@@ -382,6 +545,233 @@ def _resolve_findings(draft: MissionDraftV1, spec_dict: dict[str, Any], technica
     except Exception as exc:
         # Fallback to original spec if resolution fails
         return spec_dict, f"Resolution failed: {str(exc)}. Using original plan.", usage
+
+
+def _repair_context_lines(draft: MissionDraftV1) -> str:
+    repair = _repair_state_from_validation(draft.validation)
+    if repair.get("status") != "answered":
+        return "No prior repair answers provided."
+    lines: list[str] = []
+    question_map = {
+        str(question.get("id") or ""): question
+        for question in repair.get("questions") or []
+        if isinstance(question, dict)
+    }
+    for question_id, answer in dict(repair.get("answers") or {}).items():
+        if not isinstance(answer, dict):
+            continue
+        selected = str(answer.get("selected_option") or "").strip()
+        custom = str(answer.get("custom_answer") or "").strip()
+        prompt = str(question_map.get(question_id, {}).get("prompt") or question_id)
+        if selected or custom:
+            lines.append(f"- {prompt}: {custom or selected}")
+    return "\n".join(lines) if lines else "No prior repair answers provided."
+
+
+def _repair_prompt(
+    draft: MissionDraftV1,
+    spec_dict: dict[str, Any],
+    blocking_issues: list[dict[str, Any]],
+) -> str:
+    return (
+        "You are repairing an AgentForce mission plan after validation found blocking issues.\n"
+        "Return valid JSON only with keys 'assistant_message' and 'draft_spec'.\n"
+        "'draft_spec' must remain a complete MissionSpec-shaped object.\n"
+        "Make the smallest possible changes needed to resolve the blocking issues.\n"
+        "You may rewrite definition_of_done items and acceptance_criteria items freely.\n"
+        "You may propose task description changes only when absolutely necessary to keep the plan coherent.\n"
+        "Do not change task ids, dependencies, caps, execution defaults, working_dir, or the number of tasks.\n\n"
+        f"Blocking issues:\n{json.dumps(blocking_issues, indent=2)}\n\n"
+        f"Prior repair answers:\n{_repair_context_lines(draft)}\n\n"
+        f"Current draft_spec JSON:\n{json.dumps(spec_dict, indent=2, sort_keys=True)}\n"
+    )
+
+
+def _parse_repair_output(output: str) -> tuple[dict[str, Any], str]:
+    text = output.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(line for line in lines if not line.startswith("```")).strip()
+    try:
+        payload = json.loads(text)
+    except Exception:
+        payload = _extract_json_object_candidate(text, required_keys=("assistant_message", "draft_spec"))
+    if not isinstance(payload, dict):
+        raise ValueError("Repair output was not valid JSON")
+    spec_dict = payload.get("draft_spec")
+    if not isinstance(spec_dict, dict):
+        raise ValueError("Repair output missing draft_spec")
+    return spec_dict, str(payload.get("assistant_message") or "Updated the mission plan to address validation issues.")
+
+
+def _diff_spec_fields(before: Any, after: Any, path: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...], Any, Any]]:
+    if isinstance(before, dict) and isinstance(after, dict):
+        diffs: list[tuple[tuple[str, ...], Any, Any]] = []
+        for key in sorted(set(before) | set(after)):
+            if key not in before or key not in after:
+                diffs.append((path + (str(key),), before.get(key), after.get(key)))
+                continue
+            diffs.extend(_diff_spec_fields(before[key], after[key], path + (str(key),)))
+        return diffs
+    if isinstance(before, list) and isinstance(after, list):
+        diffs: list[tuple[tuple[str, ...], Any, Any]] = []
+        max_len = max(len(before), len(after))
+        for index in range(max_len):
+            left = before[index] if index < len(before) else None
+            right = after[index] if index < len(after) else None
+            diffs.extend(_diff_spec_fields(left, right, path + (str(index),)))
+        return diffs
+    if before != after:
+        return [(path, before, after)]
+    return []
+
+
+def _repair_diff_analysis(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    description_changes: list[dict[str, Any]] = []
+    disallowed_paths: list[str] = []
+
+    for path, old, new in _diff_spec_fields(before, after):
+        if not path:
+            continue
+        if path[0] == "definition_of_done":
+            continue
+        if len(path) >= 4 and path[0] == "tasks" and path[2] == "acceptance_criteria":
+            continue
+        if len(path) >= 3 and path[0] == "tasks" and path[2] == "description":
+            task_index = int(path[1])
+            before_task = (before.get("tasks") or [])[task_index] if task_index < len(before.get("tasks") or []) else {}
+            after_task = (after.get("tasks") or [])[task_index] if task_index < len(after.get("tasks") or []) else {}
+            description_changes.append(
+                {
+                    "question_id": f"task_description_{task_index}",
+                    "task_id": str(before_task.get("id") or after_task.get("id") or f"task-{task_index}"),
+                    "before_text": str(old or ""),
+                    "proposed_text": str(new or ""),
+                }
+            )
+            continue
+        disallowed_paths.append(".".join(path))
+
+    return {
+        "description_changes": description_changes,
+        "disallowed_paths": disallowed_paths,
+    }
+
+
+def _repair_issue_question(issue: dict[str, Any], index: int) -> dict[str, Any]:
+    original_text = str(issue.get("original_text") or "").strip()
+    kind = str(issue.get("kind") or "")
+    task_id = str(issue.get("task_id") or "").strip()
+    label = f"task {task_id}" if task_id else "this item"
+    if kind == "dod_vague":
+        prompt = "How should this Definition of Done item be made measurable?"
+    else:
+        prompt = f"How should the vague acceptance criterion on {label} be made measurable?"
+    return {
+        "id": str(issue.get("issue_id") or f"repair_{index}"),
+        "prompt": prompt,
+        "options": [
+            "Add an explicit verification command and exit code",
+            "Require a concrete output artifact or file path",
+            "State an exact value or comparison to verify",
+        ],
+        "reason": original_text,
+        "allow_custom": True,
+        "issue_ids": [str(issue.get("issue_id") or "")],
+    }
+
+
+def _description_change_question(change: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(change.get("task_id") or "task")
+    before_text = str(change.get("before_text") or "")
+    proposed_text = str(change.get("proposed_text") or "")
+    return {
+        "id": str(change.get("question_id") or f"{task_id}_description_change"),
+        "prompt": f"Allow the planner to update the description for {task_id}?",
+        "options": ["Accept proposed change", "Decline proposed change", "Edit manually"],
+        "reason": "Description changes require explicit approval before they can alter plan semantics.",
+        "allow_custom": True,
+        "issue_ids": [f"{task_id}:description_change"],
+        "preview": {
+            "before_text": before_text,
+            "proposed_text": proposed_text,
+            "why_required": "The repair pass could not make the plan coherent with criteria-only changes.",
+        },
+    }
+
+
+def _build_repair_questions(
+    blocking_issues: list[dict[str, Any]],
+    *,
+    description_changes: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    for change in description_changes or []:
+        questions.append(_description_change_question(change))
+    for index, issue in enumerate(blocking_issues, start=1):
+        questions.append(_repair_issue_question(issue, index))
+        if len(questions) >= 5:
+            break
+    return questions[:5]
+
+
+def _repair_gate_reason(blocking_issues: list[dict[str, Any]], *, description_changes: list[dict[str, Any]] | None = None) -> str:
+    if description_changes:
+        return "Planner needs explicit approval before changing task descriptions."
+    if not blocking_issues:
+        return "Repair requires operator input."
+    return _issue_summary(blocking_issues[0])
+
+
+def _attempt_quality_repair(
+    draft: MissionDraftV1,
+    spec_dict: dict[str, Any],
+    blocking_issues: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], str, TokenEvent, dict[str, Any] | None]:
+    if not blocking_issues:
+        validation = _mission_plan_validation(spec_dict)
+        return spec_dict, validation, "No blocking validation issues remained.", TokenEvent(0, 0, 0.0), None
+
+    profile = _resolve_profile(draft, "resolver")
+    attempts = 0
+    current_spec = spec_dict
+    current_validation = _mission_plan_validation(current_spec)
+    latest_message = "Blocking validation issues remained after resolver."
+    total_usage = TokenEvent(0, 0, 0.0)
+
+    while attempts < 2 and current_validation.get("blocking_issues"):
+        attempts += 1
+        output, usage = _invoke_profile(
+            profile,
+            _repair_prompt(draft, current_spec, list(current_validation.get("blocking_issues") or [])),
+            draft.draft_spec.get("working_dir"),
+        )
+        total_usage = _sum_token_events(total_usage, usage)
+        candidate_spec, latest_message = _parse_repair_output(output)
+        diff = _repair_diff_analysis(current_spec, candidate_spec)
+        if diff["disallowed_paths"]:
+            break
+        if diff["description_changes"]:
+            questions = _build_repair_questions(
+                list(current_validation.get("blocking_issues") or []),
+                description_changes=diff["description_changes"],
+            )
+            gate_reason = _repair_gate_reason(list(current_validation.get("blocking_issues") or []), description_changes=diff["description_changes"])
+            return current_spec, current_validation, latest_message, total_usage, {
+                "questions": questions,
+                "gate_reason": gate_reason,
+            }
+        current_spec = candidate_spec
+        current_validation = _mission_plan_validation(current_spec)
+        if not current_validation.get("blocking_issues"):
+            return current_spec, current_validation, latest_message, total_usage, None
+
+    questions = _build_repair_questions(list(current_validation.get("blocking_issues") or []))
+    gate_reason = _repair_gate_reason(list(current_validation.get("blocking_issues") or []))
+    return current_spec, current_validation, latest_message, total_usage, {
+        "questions": questions,
+        "gate_reason": gate_reason,
+    }
 
 
 def _extract_json_object_candidate(text: str, *, required_keys: tuple[str, ...]) -> dict[str, Any] | None:
@@ -512,13 +902,58 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
 
     run = _record_step(run, name="resolver", status="started", message="Resolving critic findings")
     changelog = _resolver_changelog(validation, technical, practical)
-    
+    repair_usage = TokenEvent(0, 0, 0.0)
+    repair_gate: dict[str, Any] | None = None
+
     # Resolve findings if any issues were reported
     if technical.get("issues") or practical.get("issues") or validation.get("issues"):
         spec_dict, assistant_message, resolver_usage = _resolve_findings(draft, spec_dict, technical, practical)
+        validation = _mission_plan_validation(spec_dict)
+        if validation.get("blocking_issues"):
+            spec_dict, validation, repair_message, repair_usage, repair_gate = _attempt_quality_repair(
+                draft,
+                spec_dict,
+                list(validation.get("blocking_issues") or []),
+            )
+            assistant_message = f"{assistant_message} {repair_message}".strip()
     else:
         assistant_message = "Initial planning pass completed without critic findings."
         resolver_usage = TokenEvent(0, 0, 0.0)
+
+    latest_draft = _draft_store().load(draft.id)
+    if latest_draft is None:
+        raise RuntimeError(f"Draft {draft.id!r} disappeared during planning")
+
+    prior_repair = _repair_state_from_validation(latest_draft.validation)
+    if repair_gate:
+        next_round = int(prior_repair.get("repair_round") or 0) + 1
+        max_rounds = int(prior_repair.get("max_rounds") or 2)
+        if next_round > max_rounds:
+            repair_state = {
+                **_blank_repair_state(),
+                "status": "manual_edit_required",
+                "repair_round": max_rounds,
+                "max_rounds": max_rounds,
+                "issues": list(validation.get("blocking_issues") or []),
+                "questions": [],
+                "answers": {},
+                "gate_reason": "Repair round cap reached. Open edit mode and fix the mission manually.",
+            }
+            assistant_message = "Repair round cap reached. Open edit mode and fix the mission manually."
+        else:
+            repair_state = _pending_repair_state(
+                run=run,
+                version_id="",
+                issues=list(validation.get("blocking_issues") or []),
+                questions=list(repair_gate.get("questions") or []),
+                gate_reason=str(repair_gate.get("gate_reason") or ""),
+                repair_round=next_round,
+                max_rounds=max_rounds,
+                mode="plan",
+            )
+            assistant_message = str(repair_gate.get("gate_reason") or assistant_message)
+    else:
+        repair_state = None
 
     version = store.create_version(
         str(uuid.uuid4()),
@@ -531,16 +966,21 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
             "mission_plan": validation,
             "technical": technical,
             "practical": practical,
+            "repair": repair_state or _blank_repair_state(),
         },
     )
+    if repair_state is not None and repair_state.get("status") == "pending":
+        repair_state = {**repair_state, "source_version_id": version.id}
+        version = version.copy_with(validation={**version.validation, "repair": repair_state})
+        store.save_version(version)
     run = _record_step(
         run,
         name="resolver",
         status="completed",
         message="Reviewed version created",
         summary=" ".join(changelog),
-        token_event=resolver_usage,
-        metadata={"version_id": version.id},
+        token_event=_sum_token_events(resolver_usage, repair_usage),
+        metadata={"version_id": version.id, "repair_status": (repair_state or {}).get("status", "not_needed")},
     )
     _emit(
         "plan_version_created",
@@ -552,9 +992,6 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
         },
     )
 
-    latest_draft = _draft_store().load(draft.id)
-    if latest_draft is None:
-        raise RuntimeError(f"Draft {draft.id!r} disappeared during planning")
     if latest_draft.revision != run.base_revision:
         stale = run.copy_with(
             status="stale",
@@ -571,7 +1008,7 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
         draft_spec=spec_dict,
         turns=list(latest_draft.turns) + [{"role": "assistant", "content": assistant_message}],
         validation={
-            **latest_draft.validation,
+            **_cleared_repair_state(latest_draft.validation),
             "latest_plan_run_id": run.id,
             "latest_plan_version_id": version.id,
             "plan_validation": version.validation,
@@ -582,6 +1019,7 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
                 "critic_practical": critic_practical_profile.__dict__,
                 "resolver": synthesis_profile.__dict__,
             },
+            **({"repair": repair_state} if repair_state is not None else {}),
         },
         activity_log=list(latest_draft.activity_log) + [{
             "type": "plan_head_promoted",
@@ -916,7 +1354,7 @@ def _synthesize_black_hole_child_plan(
     analyzer_result: dict[str, Any],
     candidate: dict[str, Any],
     loop_no: int,
-) -> tuple[PlanRunRecord, Any, dict[str, Any], list[str], str]:
+) -> tuple[PlanRunRecord, Any, dict[str, Any], list[str], str, dict[str, Any] | None]:
     store = _plan_store()
     run = store.create_run(
         str(uuid.uuid4()),
@@ -1023,12 +1461,65 @@ def _synthesize_black_hole_child_plan(
 
     changelog = _resolver_changelog(validation, technical, practical)
     run = _record_step(run, name="resolver", status="started", message="Resolving critic findings")
+    repair_usage = TokenEvent(0, 0, 0.0)
+    repair_gate: dict[str, Any] | None = None
     if technical.get("issues") or practical.get("issues") or validation.get("issues"):
         spec_dict, assistant_message, resolver_usage = _resolve_findings(draft, spec_dict, technical, practical)
         spec_dict = _normalize_black_hole_child_spec(draft, config, candidate, spec_dict)
         validation = _mission_plan_validation(spec_dict)
+        if validation.get("blocking_issues"):
+            spec_dict, validation, repair_message, repair_usage, repair_gate = _attempt_quality_repair(
+                draft,
+                spec_dict,
+                list(validation.get("blocking_issues") or []),
+            )
+            assistant_message = f"{assistant_message} {repair_message}".strip()
     else:
         resolver_usage = TokenEvent(0, 0, 0.0)
+
+    latest_draft = _draft_store().load(draft.id)
+    if latest_draft is None:
+        raise RuntimeError(f"Draft {draft.id!r} disappeared during black-hole planning")
+
+    prior_repair = _repair_state_from_validation(latest_draft.validation)
+    if repair_gate:
+        next_round = int(prior_repair.get("repair_round") or 0) + 1
+        max_rounds = int(prior_repair.get("max_rounds") or 2)
+        if next_round > max_rounds:
+            repair_state = {
+                **_blank_repair_state(),
+                "status": "manual_edit_required",
+                "repair_round": max_rounds,
+                "max_rounds": max_rounds,
+                "issues": list(validation.get("blocking_issues") or []),
+                "questions": [],
+                "answers": {},
+                "gate_reason": "Repair round cap reached. Open edit mode and fix the child plan manually.",
+                "mode": "black_hole",
+                "loop_no": loop_no,
+                "candidate": candidate,
+                "analyzer_result": analyzer_result,
+                "config_snapshot": config,
+            }
+            assistant_message = "Repair round cap reached. Open edit mode and fix the child plan manually."
+        else:
+            repair_state = _pending_repair_state(
+                run=run,
+                version_id="",
+                issues=list(validation.get("blocking_issues") or []),
+                questions=list(repair_gate.get("questions") or []),
+                gate_reason=str(repair_gate.get("gate_reason") or ""),
+                repair_round=next_round,
+                max_rounds=max_rounds,
+                mode="black_hole",
+                loop_no=loop_no,
+                candidate=candidate,
+                analyzer_result=analyzer_result,
+                config=config,
+            )
+            assistant_message = str(repair_gate.get("gate_reason") or assistant_message)
+    else:
+        repair_state = None
     version = store.create_version(
         str(uuid.uuid4()),
         draft_id=draft.id,
@@ -1042,16 +1533,21 @@ def _synthesize_black_hole_child_plan(
             "practical": practical,
             "black_hole_campaign_id": campaign.id,
             "black_hole_loop_no": loop_no,
+            "repair": repair_state or _blank_repair_state(),
         },
     )
+    if repair_state is not None and repair_state.get("status") == "pending":
+        repair_state = {**repair_state, "source_version_id": version.id}
+        version = version.copy_with(validation={**version.validation, "repair": repair_state})
+        store.save_version(version)
     run = _record_step(
         run,
         name="resolver",
         status="completed",
         message="Reviewed version created",
         summary=" ".join(changelog),
-        token_event=resolver_usage,
-        metadata={"version_id": version.id},
+        token_event=_sum_token_events(resolver_usage, repair_usage),
+        metadata={"version_id": version.id, "repair_status": (repair_state or {}).get("status", "not_needed")},
     )
     run = run.copy_with(
         status="completed",
@@ -1070,7 +1566,29 @@ def _synthesize_black_hole_child_plan(
             "changelog": changelog,
         },
     )
-    return run, version, spec_dict, changelog, assistant_message
+    if repair_state is not None:
+        promoted = latest_draft.copy_with(
+            turns=list(latest_draft.turns) + [{"role": "assistant", "content": assistant_message}],
+            validation={
+                **_cleared_repair_state(latest_draft.validation),
+                "latest_plan_run_id": run.id,
+                "latest_plan_version_id": version.id,
+                "plan_validation": version.validation,
+                "plan_changelog": changelog,
+                "repair": repair_state,
+            },
+            activity_log=list(latest_draft.activity_log) + [{
+                "type": "black_hole_repair_requested",
+                "plan_run_id": run.id,
+                "plan_version_id": version.id,
+                "loop_no": loop_no,
+            }],
+        )
+        save_result = _draft_store().save(promoted, expected_revision=latest_draft.revision)
+        if save_result.status == "saved" and save_result.draft is not None:
+            ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+            state_io._broadcast_mission_list_refresh()
+    return run, version, spec_dict, changelog, assistant_message, repair_state
 
 
 def _launch_black_hole_mission(
@@ -1121,6 +1639,31 @@ def _mission_review_summary(mission_state) -> str:
     return "Child mission completed without a terminal success signal."
 
 
+def _resume_black_hole_repair(
+    campaign: BlackHoleCampaignRecord,
+    draft: MissionDraftV1,
+    repair_state: dict[str, Any],
+) -> tuple[BlackHoleLoopRecord | None, PlanRunRecord | None, Any, dict[str, Any] | None]:
+    loop_no = int(repair_state.get("loop_no") or 0)
+    if loop_no <= 0:
+        raise RuntimeError("Repair state is missing loop number.")
+    loop = _black_hole_store().load_loop(campaign.id, loop_no)
+    if loop is None:
+        raise RuntimeError("Repair state references a missing loop.")
+    candidate = dict(repair_state.get("candidate") or {})
+    analyzer_result = dict(repair_state.get("analyzer_result") or {})
+    config = dict(repair_state.get("config_snapshot") or campaign.config_snapshot or {})
+    plan_run, version, spec_dict, _changelog, _assistant_message, next_repair = _synthesize_black_hole_child_plan(
+        campaign,
+        draft,
+        config,
+        analyzer_result,
+        candidate,
+        loop_no,
+    )
+    return loop, plan_run, version, next_repair
+
+
 def run_black_hole_campaign(campaign_id: str) -> None:
     campaign_store = _black_hole_store()
     draft_store = _draft_store()
@@ -1137,6 +1680,84 @@ def run_black_hole_campaign(campaign_id: str) -> None:
     config = dict(campaign.config_snapshot or draft.validation.get("black_hole_config") or {})
     if str(draft.validation.get("preflight_status") or "") == "pending":
         campaign = campaign.copy_with(status="preflight_pending", stop_reason="Answer preflight questions before starting the campaign.")
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+    repair_state = _repair_state_from_validation(draft.validation)
+    if repair_state.get("mode") == "black_hole" and repair_state.get("status") == "pending":
+        campaign = campaign.copy_with(status="waiting_human", stop_reason=str(repair_state.get("gate_reason") or "Answer repair questions before continuing the campaign."))
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+    if repair_state.get("mode") == "black_hole" and repair_state.get("status") == "manual_edit_required":
+        campaign = campaign.copy_with(status="waiting_human", stop_reason=str(repair_state.get("gate_reason") or "Manual child-plan edits are required before this loop can continue."))
+        campaign_store.save_campaign(campaign)
+        _broadcast_black_hole_campaign(campaign)
+        return
+    if repair_state.get("mode") == "black_hole" and repair_state.get("status") == "answered":
+        try:
+            locked_loop, plan_run, version, next_repair = _resume_black_hole_repair(campaign, draft, repair_state)
+            if next_repair is not None:
+                campaign = campaign.copy_with(
+                    status="waiting_human",
+                    stop_reason=str(next_repair.get("gate_reason") or "Repair questions still need answers."),
+                    active_plan_run_id=plan_run.id if plan_run is not None else None,
+                )
+                campaign_store.save_campaign(campaign)
+                _broadcast_black_hole_campaign(campaign)
+                return
+            mission_id = _launch_black_hole_mission(
+                draft,
+                version.draft_spec_snapshot,
+                loop_no=locked_loop.loop_no if locked_loop is not None else int(repair_state.get("loop_no") or 0),
+                plan_run_id=plan_run.id,
+                plan_version_id=version.id,
+            )
+        except Exception as exc:
+            campaign = campaign.copy_with(status="launch_failed", stop_reason=str(exc))
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
+
+        if locked_loop is None or plan_run is None:
+            raise RuntimeError("Repair resume did not return loop provenance.")
+        relaunched_loop = locked_loop.copy_with(
+            status="child_mission_running",
+            mission_id=mission_id,
+            plan_run_id=plan_run.id,
+            plan_version_id=version.id,
+            review_summary="Child mission relaunched after repair guidance.",
+            gate_reason="",
+            tokens_in=plan_run.tokens_in,
+            tokens_out=plan_run.tokens_out,
+            cost_usd=plan_run.cost_usd,
+        )
+        campaign_store.save_loop(relaunched_loop)
+        _broadcast_black_hole_loop(draft.id, relaunched_loop)
+        cleared = draft.copy_with(
+            validation=_cleared_repair_state(draft.validation),
+            activity_log=list(draft.activity_log) + [{
+                "type": "black_hole_repair_resumed",
+                "plan_run_id": plan_run.id,
+                "plan_version_id": version.id,
+                "loop_no": relaunched_loop.loop_no,
+            }],
+        )
+        save_result = draft_store.save(cleared, expected_revision=draft.revision)
+        if save_result.status == "saved" and save_result.draft is not None:
+            draft = save_result.draft
+            ws.broadcast_draft_updated(draft.id, draft.status)
+            state_io._broadcast_mission_list_refresh()
+        campaign = _recalculate_campaign_totals(
+            campaign_store,
+            campaign.copy_with(
+                status="child_mission_running",
+                current_loop=relaunched_loop.loop_no,
+                active_child_mission_id=mission_id,
+                active_plan_run_id=plan_run.id,
+                stop_reason="",
+            ),
+        )
         campaign_store.save_campaign(campaign)
         _broadcast_black_hole_campaign(campaign)
         return
@@ -1305,7 +1926,7 @@ def run_black_hole_campaign(campaign_id: str) -> None:
     _broadcast_black_hole_campaign(campaign)
 
     try:
-        plan_run, version, spec_dict, changelog, _assistant_message = _synthesize_black_hole_child_plan(
+        plan_run, version, spec_dict, changelog, _assistant_message, repair_gate = _synthesize_black_hole_child_plan(
             campaign,
             draft,
             config,
@@ -1313,6 +1934,33 @@ def run_black_hole_campaign(campaign_id: str) -> None:
             candidate,
             next_loop_no,
         )
+        if repair_gate is not None:
+            gated_loop = loop.copy_with(
+                status="waiting_human",
+                completed_at=_now_iso(),
+                plan_run_id=plan_run.id,
+                plan_version_id=version.id,
+                review_summary=str(repair_gate.get("gate_reason") or "Repair questions are waiting on operator input."),
+                gate_reason=str(repair_gate.get("gate_reason") or ""),
+                tokens_in=plan_run.tokens_in,
+                tokens_out=plan_run.tokens_out,
+                cost_usd=plan_run.cost_usd,
+            )
+            campaign_store.save_loop(gated_loop)
+            _broadcast_black_hole_loop(draft.id, gated_loop)
+            campaign = _recalculate_campaign_totals(
+                campaign_store,
+                campaign.copy_with(
+                    status="waiting_human",
+                    active_child_mission_id=None,
+                    active_plan_run_id=plan_run.id,
+                    last_metric=analyzer_payload["metric"],
+                    stop_reason=str(repair_gate.get("gate_reason") or ""),
+                ),
+            )
+            campaign_store.save_campaign(campaign)
+            _broadcast_black_hole_campaign(campaign)
+            return
         mission_id = _launch_black_hole_mission(
             draft,
             spec_dict,
