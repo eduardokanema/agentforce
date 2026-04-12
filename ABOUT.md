@@ -47,7 +47,7 @@ The public MVP is the planning-and-execution core of AgentForce. It should be pr
 #### 3. Structured Multi-Step Planning Pipeline
 
 - [x] The planning workflow includes planner synthesis, mission plan pass, technical critic, practical critic, and resolver stages.
-- [ ] The user can see planning progress by stage instead of only a generic loading state.
+- [x] The user can see planning progress by stage instead of only a generic loading state.
 - [x] The system can produce a reviewed draft version that is ready for inspection before launch.
 
 #### 4. Draft Inspection and Editing

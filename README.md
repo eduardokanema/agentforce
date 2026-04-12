@@ -1,180 +1,198 @@
 # AgentForce
 
-Multi-agent mission orchestrator with spec-driven development, AI review gates, a persistent execution daemon, and a web dashboard.
+Plan, launch, and supervise AI coding missions with review gates, retries, and live visibility.
 
-## Overview
+AgentForce is a mission-control system for engineering teams that want AI agents to do scoped software work without losing structure or operational control. It turns a product or engineering brief into a mission draft, validates launch readiness, queues execution through a persistent daemon, and keeps humans in control when work stalls, fails, or needs judgment.
 
-AgentForce breaks complex software projects into discrete tasks defined in YAML spec files, then orchestrates AI agents to execute them autonomously:
+## Why AgentForce
 
-- **Spec-driven** — Missions are YAML documents with goals, acceptance criteria, TDD requirements, dependencies, and execution caps
-- **External review** — Every task is reviewed by an independent agent before approval; scores below 8/10 are automatically rejected
-- **Retry loops** — Rejected tasks retry with reviewer feedback; security/TDD hard blocks escalate to human intervention
-- **Persistent state** — Missions survive crashes and resume from any point via file-backed state in `~/.agentforce/`
-- **Execution daemon** — A queue-based supervisor runs missions in the background, supporting concurrent workers and graceful drain on shutdown
-- **Flight Director Cockpit** — Browser UI for planning, editing, and launching missions via a conversational AI planner
-- **Telemetry** — Cross-mission metrics track cost, token usage, review scores, and retry rates
+Most AI coding workflows break down at the same points:
 
-## Installation
+- planning happens in one tool and execution in another
+- vague task boundaries make output hard to review
+- long-running work needs retries, status visibility, and recovery paths
+- teams need human intervention points without giving up autonomy
+- cost, token usage, and quality signals are hard to inspect in one place
+
+AgentForce brings those pieces together in a single product flow.
+
+## What Ships Today
+
+| Surface | What you do there | Why it matters |
+| --- | --- | --- |
+| Flight Director | Turn a brief into a launchable mission draft | Planning stays connected to execution |
+| Launch readiness | See blockers before a mission starts | Bad specs fail early, not mid-run |
+| Mission Control | Queue, stop, restart, archive, and readjust missions | Missions stay operable after launch |
+| Task review gates | Review completed tasks before they count as done | Output quality is explicit, not implied |
+| Telemetry | Inspect mission counts, cost, token usage, and retries | You get accountability across runs |
+| CLI + dashboard | Use the browser for flow, CLI for automation | Easy to start, scriptable when needed |
+
+## 2-Minute Quick Start
+
+### 1. Install
 
 ```bash
-pip install -e .
+curl -fsSL https://raw.githubusercontent.com/eduardokanema/agentforce/main/scripts/install.sh | bash
 ```
 
-For development and tests:
+The installer downloads the full source tree, builds the dashboard locally when prebuilt assets are not bundled, installs the package, and verifies that the local dashboard starts successfully.
+
+### 2. Start the dashboard
 
 ```bash
-pip install -e ".[dev]"
+mission serve --daemon
+```
+
+If port `8080` is already in use:
+
+```bash
+mission serve --daemon --port 8091
+```
+
+### 3. Open AgentForce
+
+Open `http://localhost:8080` in your browser, or the port you selected.
+
+### 4. Launch your first mission
+
+1. Open **Flight Director**
+2. Describe what you want to build
+3. Review the generated mission draft
+4. Launch when the plan is ready
+
+You can explore the dashboard and planning flow immediately after install. To actually execute mission work, configure at least one available execution path in the product. The current shipped surfaces expose Codex CLI, Claude Code, Gemini CLI, OpenCode, OpenRouter, and Ollama depending on what is installed and configured locally.
+
+## Local Development Setup
+
+If you want to work from a local checkout instead of the installer:
+
+```bash
+git clone https://github.com/eduardokanema/agentforce.git
+cd agentforce
+cd ui
+npm ci
+npm run build
+cd ..
+python3 -m pip install -e .
+mission serve --daemon
+```
+
+If you prefer Bun:
+
+```bash
+cd ui
+bun install --frozen-lockfile
+bun run build
+cd ..
+```
+
+For development dependencies:
+
+```bash
+python3 -m pip install -e ".[dev]"
 pytest -q
 ```
 
-## Quick Start
+## How It Works
 
-### 1. Start the dashboard
+1. **Start from a brief**  
+   In Flight Director, describe the goal, choose workspace paths, and pick approved models or planning profiles.
 
-```bash
-mission serve --daemon
-```
+2. **Clarify before planning**  
+   If the brief is incomplete, AgentForce can stop and ask structured preflight questions before the first plan run.
 
-Open `http://localhost:8080`. The `--daemon` flag enables the embedded execution daemon so missions launched from the UI execute immediately without a separate process.
+3. **Review the draft mission**  
+   The system produces a draft with mission goal, definition of done, task list, dependencies, artifacts, and execution defaults.
 
-### 2. Create a mission via the Flight Director Cockpit
+4. **Launch into a persistent queue**  
+   A launch-ready mission is queued through the embedded daemon instead of depending on a one-off terminal run.
 
-Navigate to **Flight Director** in the sidebar. Enter a prompt describing what you want to build, select a workspace directory and approved models, then click **Open Flight Plan**. The AI planner auto-generates a draft mission spec. Refine it through conversation, adjust tasks in the engineering controls panel, and click **Launch Mission**.
+5. **Execute with review gates**  
+   Tasks run through worker agents, completed work is reviewed, failed reviews can retry with feedback, and blocked work can be escalated.
 
-### 3. Or start a mission from a YAML spec
+6. **Intervene when needed**  
+   Operators can inspect status, change task execution settings, retry work, resolve blocked tasks, or move a mission back into planning.
 
-```bash
-mission start my-mission.yaml
-```
+7. **Inspect telemetry and history**  
+   Mission-level and task-level views expose progress, retries, cost, tokens, and review outcomes across runs.
 
-If the daemon is running (started with `--daemon`), the mission is queued immediately. Without the daemon, a one-shot `run_autonomous` subprocess is spawned per mission.
+## Screenshots
 
----
+### Mission Control
 
-## The Execution Daemon
+The dashboard shows current missions, progress, and status at a glance.
 
-The daemon is a persistent supervisor that manages a queue of missions and executes them concurrently via `run_autonomous()`.
+![AgentForce mission dashboard](docs/images/readme-missions.png)
 
-### Enabling the daemon
+### Flight Director
 
-**Embedded mode** (recommended) — starts inside the dashboard server process:
+Flight Director is the planning surface where a brief becomes an execution-ready mission.
 
-```bash
-mission serve --daemon
-```
+![AgentForce Flight Director](docs/images/readme-flight-director.png)
 
-**Programmatic** — for embedding in other processes:
+### Mission Detail
 
-```python
-from agentforce.server import serve
-serve(port=8080, daemon=True)
-```
+Mission detail keeps task status, review flow, and execution defaults in one place.
 
-### Daemon REST API
+![AgentForce mission detail](docs/images/readme-mission-detail.png)
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/daemon/status` | GET | Daemon state, queue, active missions, last heartbeat |
-| `/api/daemon/enqueue` | POST | Queue a mission by `mission_id` |
-| `/api/daemon/dequeue` | POST | Remove a pending mission from the queue |
-| `/api/daemon/stop` | POST | Graceful drain — finish in-flight missions, accept no new work |
+## Who It Is For
 
-Mutating endpoints (`enqueue`, `dequeue`, `stop`) require the `X-Agentforce-Token` header when the `AGENTFORCE_TOKEN` environment variable is set.
+- **Engineering leads** who want AI-assisted delivery without giving up review and launch control
+- **Staff engineers** who need to inspect task output, intervene quickly, and keep specs concrete
+- **AI or platform operators** who need to manage models, queue health, defaults, and reliability
 
-```bash
-# Check daemon status
-curl http://localhost:8080/api/daemon/status
+## Documentation
 
-# Manually enqueue a mission
-curl -X POST http://localhost:8080/api/daemon/enqueue \
-  -H "Content-Type: application/json" \
-  -d '{"mission_id": "abc123"}'
-```
+- [ABOUT.md](ABOUT.md) — product overview, personas, and the end-to-end workflow
+- [`missions/`](missions/) — real mission spec examples
+- [`ui/README.md`](ui/README.md) — frontend development notes
 
-### How it works
+## Technical Reference
 
-- Each mission runs `run_autonomous()` in a dedicated thread
-- The queue is persisted as JSONL at `~/.agentforce/daemon_queue.jsonl`; it survives server restarts
-- A `fcntl` file lock (`~/.agentforce/daemon.lock`) prevents duplicate daemon instances in the same process
-- `sys.exit()` calls inside `run_autonomous()` are caught so one mission cannot kill the daemon
-- Graceful drain waits up to `max_drain_seconds` for in-flight missions to complete before stopping
-- Mission caps (`max_concurrent_workers`, `max_wall_time_minutes`, `max_cost_usd`) are enforced per-mission as before
-
----
-
-## CLI Commands
-
-```
-mission start <spec.yaml>          Start a mission from a YAML spec file
-mission serve [--port N] [--daemon] Start the web dashboard (default port: 8080)
-mission status <id>                 Show mission progress and task states
-mission list                        List all missions
-mission report <id>                 Detailed mission report with event log
-mission pause <id>                  Pause a running mission
-mission resume <id>                 Resume a paused mission
-mission kill <id>                   Stop a mission (marks in-progress tasks blocked)
-mission resolve <id> <task> <msg>   Resolve a human-blocked task with guidance
-mission fail <id> <task>            Mark a human-blocked task as permanently failed
-mission review <id>                 Run a retrospective AI review of a completed mission
-mission metrics [--mission <id>]    Show aggregated telemetry across missions
-```
-
-Additional options for `mission start`:
-
-```
---id <id>                 Override the generated mission ID
---workdir <path>          Override the working directory
---worker-model <model>    Override the worker model
---reviewer-model <model>  Override the reviewer model
-```
-
----
-
-## Running Missions Autonomously (without the daemon)
+<details>
+<summary>CLI quick reference</summary>
 
 ```bash
-python3 -m agentforce.autonomous <mission-id>
+mission serve --daemon              # start the dashboard with the embedded execution daemon
+mission start spec.yaml             # create a mission from a YAML spec
+mission list                        # list known missions
+mission status <mission-id>         # inspect mission progress
+mission report <mission-id>         # print a detailed mission report
+mission pause <mission-id>          # pause a running mission
+mission resume <mission-id>         # resume a paused mission
+mission kill <mission-id>           # stop a mission
+mission resolve <mission-id> <task-id> "message"
+mission fail <mission-id> <task-id>
+mission review <mission-id>
+mission metrics [--mission <id>]
 ```
 
-Options:
+</details>
 
-```
---agent auto|claude|opencode   Agent connector (default: auto)
---model <model-id>             Model override
---variant low|medium|high      Reasoning effort (default: medium)
---extend-caps                  Ignore wall-time and retry limits for this run
---max-ticks N                  Supervisor loop tick limit (default: 2000)
-```
-
-Example — resume a mission that hit a wall-time cap:
-
-```bash
-python3 -m agentforce.autonomous --extend-caps abc123
-```
-
----
-
-## Mission Spec Format
+<details>
+<summary>Minimal mission spec example</summary>
 
 ```yaml
 mission:
   name: "Build HTTP API Server"
-  goal: "Create a FastAPI server with health checks and metrics"
+  goal: "Create a FastAPI service with health checks and metrics"
   definition_of_done:
-    - "All endpoints return HTTP 200 with correct JSON shapes"
-    - "pytest tests/ passes with >= 80% coverage"
+    - "GET /health returns HTTP 200 with JSON status"
+    - "GET /metrics returns HTTP 200 with request counts"
+    - "pytest tests/ passes"
   caps:
     max_concurrent_workers: 2
     max_retries_per_task: 3
     max_retries_global: 10
     max_wall_time_minutes: 120
     max_cost_usd: 2.00
-    review: enabled          # or "disabled" to skip the review gate
+    review: enabled
   execution_defaults:
     worker:
-      agent: claude          # connector: claude or opencode
-      model: claude-sonnet-4-6
-      thinking: medium       # low | medium | high
+      agent: codex
+      model: gpt-5.4
+      thinking: medium
     reviewer:
       agent: claude
       model: claude-sonnet-4-6
@@ -183,143 +201,35 @@ mission:
 tasks:
   - id: "01"
     title: "Project scaffolding"
-    description: "Create FastAPI app structure with /health endpoint"
+    description: "Create the service skeleton and /health endpoint"
     acceptance_criteria:
-      - "GET /health returns HTTP 200 with {\"status\": \"ok\"}"
-      - "pytest tests/test_health.py passes"
-    dependencies: []
-    max_retries: 3
+      - "GET /health returns HTTP 200 with {'status': 'ok'}"
+      - "pytest tests/test_health.py -v passes"
     output_artifacts:
       - "app/main.py"
       - "tests/test_health.py"
-    tdd:
-      test_file: "tests/test_health.py"
-      test_command: "pytest tests/test_health.py -v"
-      tests_must_pass: true
-    execution:                     # optional per-task override of execution_defaults
-      worker:
-        model: claude-sonnet-4-6
-        thinking: high
-
-  - id: "02"
-    title: "Add metrics endpoint"
-    description: "Implement /metrics returning request counts"
-    acceptance_criteria:
-      - "GET /metrics returns HTTP 200 with JSON containing request_count > 0"
-    dependencies: ["01"]
-    max_retries: 2
-    output_artifacts:
-      - "app/metrics.py"
 ```
 
-See `missions/` for real examples.
+</details>
 
----
+<details>
+<summary>Daemon endpoints</summary>
 
-## Task Lifecycle
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/daemon/status` | `GET` | Daemon state, queue, active missions, heartbeat |
+| `/api/daemon/enqueue` | `POST` | Queue a mission by `mission_id` |
+| `/api/daemon/dequeue` | `POST` | Remove a pending mission from the queue |
+| `/api/daemon/stop` | `POST` | Drain in-flight work and stop accepting new jobs |
 
-```
-PENDING ──► IN_PROGRESS ──► COMPLETED ──► REVIEWING ──► REVIEW_APPROVED
-                                │               │
-                           (worker fail)   (score < 8)
-                                │               │
-                                └──────► RETRY ◄┘
-                                            │
-                                     (retries exhausted)
-                                            │
-                                     NEEDS_HUMAN ──► RETRY (after resolution)
-                                            │
-                                          FAILED
-```
-
-- `COMPLETED` — worker finished, awaiting reviewer dispatch
-- `REVIEWING` — reviewer agent running
-- `REVIEW_APPROVED` — score ≥ 8 and all criteria met; task is done
-- `NEEDS_HUMAN` — security or TDD hard block, or retries exhausted with blocking issues
-- The **Retry** button and **Restart Mission** work on `failed`, `blocked`, `review_rejected`, and `completed` (stuck) tasks, and re-enqueue to the daemon automatically
-
----
-
-## Architecture
-
-```
-MissionSpec (YAML)
-      │
-      ▼
-MissionEngine ──tick()──► [WorkerDelegation | ReviewerDelegation | HumanIntervention]
-      │                          │                    │                    │
-      ▼                          ▼                    ▼                    ▼
-MissionState              Worker Agent          Reviewer Agent       Human (UI/CLI)
-(~/.agentforce/state/)    (implements task)     (validates output)   (resolves block)
-
-MissionDaemon
-  ├── JSONL queue (~/.agentforce/daemon_queue.jsonl)
-  ├── One thread per active mission
-  └── REST API  /api/daemon/*
-
-Dashboard (http://localhost:8080)
-  ├── Mission list & detail pages
-  ├── Task stream viewer (live agent output)
-  ├── Flight Director Cockpit (plan mode)
-  └── WebSocket live updates
-```
-
-### Core modules
-
-| Module | Purpose |
-|--------|---------|
-| `agentforce.core.engine` | State-machine tick loop, action dispatch |
-| `agentforce.core.spec` | MissionSpec / TaskSpec parsing and validation |
-| `agentforce.core.state` | MissionState persistence and status queries |
-| `agentforce.daemon` | MissionDaemon queue supervisor |
-| `agentforce.autonomous` | `run_autonomous()` — supervisor loop that drives one mission end-to-end |
-| `agentforce.server` | ThreadingHTTPServer dashboard + WebSocket |
-| `agentforce.connectors` | Agent CLI adapters (claude, opencode) |
-| `agentforce.memory` | Cross-task context and lessons storage |
-| `agentforce.review` | Post-mission retrospective reviewer |
-| `agentforce.telemetry` | Aggregated metrics store |
-
----
-
-## Flight Director Cockpit (Plan Mode)
-
-The Flight Director Cockpit is the browser UI for creating missions collaboratively with an AI planner.
-
-1. Navigate to `http://localhost:8080` → **Flight Director**
-2. Enter a mission prompt, select working directories, approved models, and a companion model
-3. Click **Open Flight Plan** — the planner auto-generates an initial draft spec
-4. Refine the plan by chatting with the planner on the left panel
-5. Edit tasks directly in the Engineering Controls rail on the right:
-   - Mission name, goal, and definition of done
-   - Task titles, descriptions, acceptance criteria
-   - Dependencies (checkbox grid — check which tasks must complete first)
-   - Per-task worker and reviewer model overrides
-   - Output artifacts
-6. Click **Launch Mission** — the draft is finalized and enqueued on the daemon
-
----
-
-## Data Storage
-
-```
-~/.agentforce/
-├── state/                  # Mission state files (one JSON per mission)
-├── streams/                # Live agent output logs (one .log per task)
-├── memory/                 # Cross-task project memory
-├── telemetry/              # Aggregated mission metrics
-├── reviews/                # Post-mission retrospective reports
-├── daemon_queue.jsonl      # Persistent execution queue
-└── daemon.lock             # Exclusive daemon instance lock
-```
-
----
+</details>
 
 ## Requirements
 
 - Python 3.11+
-- Claude Code CLI (`claude`) or OpenCode CLI (`opencode`) for agent execution
-- Optional: `keyring` for storing API keys (bundled as a dependency)
-- Optional: `anthropic` Python SDK for direct HTTP fallback in the planner
+- A modern browser for the dashboard
+- Node 18+ with npm, or Bun, when building from a source checkout without bundled `ui/dist`
+- At least one supported execution path configured locally if you want to run missions end to end
 
 ## License
 

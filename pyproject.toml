@@ -32,3 +32,19 @@ vector = [
 
 [project.scripts]
 mission = "agentforce.cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentforce"]
+artifacts = [
+    "ui/dist/**",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/agentforce",
+    "/ui/dist/**",
+    "/missions",
+    "/README.md",
+    "/ABOUT.md",
+    "/scripts/install.sh",
+]

@@ -259,6 +259,24 @@ def test_html_routes_still_render_html(tmp_path, monkeypatch):
     assert body.lower().startswith("<!doctype html") or body.lower().startswith("<html")
 
 
+def test_root_route_serves_spa_when_ui_dist_exists(tmp_path, monkeypatch):
+    ui_dist = tmp_path / "ui-dist"
+    ui_dist.mkdir()
+    (ui_dist / "index.html").write_text(
+        "<!doctype html><html><body><div id='root'>AgentForce UI</div></body></html>",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agentforce.server.handler._UI_DIST", ui_dist)
+
+    handler = _make_handler("/")
+    handler.do_GET()
+
+    assert handler.send_response.call_args.args == (200,)
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "AgentForce UI" in body
+    assert ("Content-Type", "text/html; charset=utf-8") in [call.args for call in handler.send_header.call_args_list]
+
+
 def test_route_modules_are_importable():
     from agentforce.server.routes import filesystem, missions, models, plan, providers, static, tasks
 
