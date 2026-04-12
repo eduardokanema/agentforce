@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import FileBrowser from '../components/FileBrowser';
 import { useToast } from '../hooks/useToast';
-import type { AppConfig, DefaultCaps } from '../lib/types';
-import { getConfig, updateConfig } from '../lib/api';
+import type { AppConfig, DefaultCaps, LabsConfig } from '../lib/types';
+import { DEFAULT_LABS_CONFIG } from '../lib/types';
+import { getConfig, selectLabsConfig, updateConfig } from '../lib/api';
 
 const DEFAULTS: DefaultCaps = {
   max_concurrent_workers: 2,
@@ -34,17 +35,31 @@ const FIELDS: {
   },
 ];
 
-export default function SettingsPage() {
+export default function SettingsPage({
+  labs,
+  onLabsChange,
+}: {
+  labs?: LabsConfig;
+  onLabsChange?: (labs: LabsConfig) => void;
+}) {
   const { addToast } = useToast();
   const [caps, setCaps] = useState<DefaultCaps>(DEFAULTS);
+  const [labsConfig, setLabsConfig] = useState<LabsConfig>(labs ?? DEFAULT_LABS_CONFIG);
   const [defaultStartPath, setDefaultStartPath] = useState(DEFAULT_WORKSPACE_BROWSER_START);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (labs) {
+      setLabsConfig(labs);
+    }
+  }, [labs]);
+
+  useEffect(() => {
     getConfig()
       .then((cfg) => {
         if (cfg.default_caps) setCaps(cfg.default_caps);
+        setLabsConfig(selectLabsConfig(cfg));
         if (cfg.filesystem?.default_start_path != null) {
           setDefaultStartPath(cfg.filesystem.default_start_path || DEFAULT_WORKSPACE_BROWSER_START);
         }
@@ -67,9 +82,15 @@ export default function SettingsPage() {
           allowed_base_paths: [],
           default_start_path: defaultStartPath,
         } as AppConfig['filesystem'],
+        labs: {
+          black_hole_enabled: labsConfig.black_hole_enabled,
+        },
       });
       setCaps(result.default_caps);
+      const nextLabs = selectLabsConfig(result);
+      setLabsConfig(nextLabs);
       setDefaultStartPath(result.filesystem.default_start_path || DEFAULT_WORKSPACE_BROWSER_START);
+      onLabsChange?.(nextLabs);
       addToast('Settings saved', 'success');
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Save failed', 'error');
@@ -80,6 +101,7 @@ export default function SettingsPage() {
 
   const handleReset = () => {
     setCaps(DEFAULTS);
+    setLabsConfig(DEFAULT_LABS_CONFIG);
     setDefaultStartPath(DEFAULT_WORKSPACE_BROWSER_START);
     addToast('Reset to defaults — click Save to persist', 'success');
   };
@@ -167,6 +189,44 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+      </section>
+
+      <section className="rounded-lg border border-border bg-card p-6">
+        <div className="space-y-1">
+          <h2 className="text-sm font-semibold text-text">Lab experimental features</h2>
+          <p className="text-[11px] text-muted">
+            Enable session-scoped experimental features here instead of from the main navigation.
+          </p>
+        </div>
+
+        <div className="mt-4 rounded-lg border border-border/80 bg-surface/70 p-4">
+          <label className="flex items-start justify-between gap-4" htmlFor="lab-black-hole">
+            <div className="space-y-1">
+              <div className="text-sm font-medium text-text">Black Hole</div>
+              <p className="text-[11px] text-muted">
+                Enable the experimental Black Hole planning session for this operator workspace.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[11px] font-medium text-dim">
+                {labsConfig.black_hole_enabled ? 'Enabled' : 'Disabled'}
+              </span>
+              <input
+                id="lab-black-hole"
+                name="lab-black-hole"
+                type="checkbox"
+                checked={labsConfig.black_hole_enabled}
+                onChange={(event) =>
+                  setLabsConfig((current) => ({
+                    ...current,
+                    black_hole_enabled: event.target.checked,
+                  }))
+                }
+                className="h-4 w-4 rounded border border-border bg-surface accent-cyan"
+              />
+            </div>
+          </label>
+        </div>
       </section>
     </div>
   );

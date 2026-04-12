@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client";
 import { act } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MissionSummary } from "../lib/types";
+import { DEFAULT_LABS_CONFIG, type MissionSummary } from "../lib/types";
 import { discardPlanDraft, restartMission, stopMission } from "../lib/api";
 
 const useMissionListMock = vi.hoisted(() => vi.fn());
@@ -36,7 +36,9 @@ vi.mock("../lib/api", () => ({
 
 import MissionsPage from "./MissionsPage";
 
-function renderPage(): HTMLDivElement {
+const ENABLED_LABS = { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true };
+
+function renderPage(labs = ENABLED_LABS): HTMLDivElement {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -44,7 +46,7 @@ function renderPage(): HTMLDivElement {
   act(() => {
     root.render(
       <MemoryRouter>
-        <MissionsPage />
+        <MissionsPage labs={labs} />
       </MemoryRouter>,
     );
   });
@@ -95,6 +97,21 @@ describe("MissionsPage", () => {
       "No missions yet. Launch one with Plan Mode →",
     );
     expect(container.querySelector('a[href="/plan"]')).toBeTruthy();
+  });
+
+  it("hides Black Hole actions when Labs disables it", () => {
+    useMissionListMock.mockReturnValue({
+      missions: [],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+
+    const container = renderPage(DEFAULT_LABS_CONFIG);
+
+    expect(container.textContent).not.toContain("+ New Black Hole");
+    expect(container.textContent).not.toContain("arm a Black Hole");
+    expect(container.querySelector('a[href="/black-hole"]')).toBeNull();
   });
 
   it("renders mission cards with all requested fields", () => {

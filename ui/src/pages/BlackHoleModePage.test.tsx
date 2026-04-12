@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_LABS_CONFIG, type BlackHoleCampaignState, type MissionDraft, type Model } from "../lib/types";
 import BlackHoleModePage from "./BlackHoleModePage";
 
+const ENABLED_LABS = { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true };
+
 function flushPromises(): Promise<void> {
   return act(async () => {
     await Promise.resolve();
@@ -122,6 +124,7 @@ function makeBlackHoleState(): BlackHoleCampaignState {
 function renderPage(
   fetchMock: ReturnType<typeof vi.fn>,
   initialEntry = "/black-hole",
+  labs = ENABLED_LABS,
 ): { container: HTMLDivElement; root: Root } {
   vi.stubGlobal("fetch", fetchMock);
   const container = document.createElement("div");
@@ -130,14 +133,16 @@ function renderPage(
 
   act(() => {
     root.render(
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <Routes>
-          <Route path="/black-hole" element={<BlackHoleModePage />} />
-          <Route path="/black-hole/:id" element={<BlackHoleModePage />} />
-          <Route path="/plan/:id" element={<div data-testid="plan-route">Plan route</div>} />
-        </Routes>
-      </MemoryRouter>,
-    );
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <Routes>
+            <Route path="/black-hole" element={<BlackHoleModePage labs={labs} />} />
+            <Route path="/black-hole/:id" element={<BlackHoleModePage labs={labs} />} />
+            <Route path="/plan/:id" element={<div data-testid="plan-route">Plan route</div>} />
+            <Route path="/missions" element={<div data-testid="missions-route">Missions route</div>} />
+            <Route path="/" element={<div data-testid="mission-control-route">Mission control route</div>} />
+          </Routes>
+        </MemoryRouter>,
+      );
   });
 
   return { container, root };
@@ -310,6 +315,29 @@ describe("BlackHoleModePage", () => {
     });
   });
 
+  it("redirects to /missions when Labs disables Black Hole", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/models") {
+        return new Response(JSON.stringify(models), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, "/black-hole", DEFAULT_LABS_CONFIG);
+    await flushPromises();
+
+    expect(container.textContent).toContain("Missions route");
+    expect(container.textContent).not.toContain("Mission control route");
+    expect(container.textContent).not.toContain("Black Hole Campaign");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("renders repair questions and resumes the locked loop after submission", async () => {
     const blackHoleState = makeBlackHoleState();
     let repairSubmitted = false;
@@ -382,15 +410,6 @@ describe("BlackHoleModePage", () => {
 
     await act(async () => {
       acceptOption?.querySelector("input")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    const reviewButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Review Answers"),
-    );
-    expect(reviewButton).toBeTruthy();
-
-    await act(async () => {
-      reviewButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     const resumeButton = Array.from(container.querySelectorAll("button")).find((button) =>

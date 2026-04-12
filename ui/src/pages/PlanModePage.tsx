@@ -42,6 +42,7 @@ import {
 } from "../lib/executionProfiles";
 import type {
   ExecutionProfile,
+  LabsConfig,
   MissionDraft,
   MissionSpec,
   Model,
@@ -49,6 +50,12 @@ import type {
   PlanStep,
   PlanVersion,
   PreflightAnswer,
+} from "../lib/types";
+import {
+  blackHoleDraftRoute,
+  isBlackHoleEnabled,
+  MISSIONS_ROUTE,
+  planDraftRoute,
 } from "../lib/types";
 import {
   wsClient,
@@ -1697,11 +1704,12 @@ function PhaseViewport({
   );
 }
 
-export default function PlanModePage() {
+export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
   const navigate = useNavigate();
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const draftId = id || searchParams.get("draft");
+  const blackHoleEnabled = isBlackHoleEnabled(labs);
 
   const [prompt, setPrompt] = useState("");
   const [workspaces, setWorkspaces] = useState<string[]>(
@@ -1749,7 +1757,11 @@ export default function PlanModePage() {
     try {
       const loaded = await getPlanDraft(nextDraftId);
       if (isBlackHoleDraft(loaded)) {
-        navigate(`/black-hole/${nextDraftId}`, { replace: true });
+        if (!blackHoleEnabled) {
+          navigate(MISSIONS_ROUTE, { replace: true });
+          return;
+        }
+        navigate(blackHoleDraftRoute(nextDraftId), { replace: true });
         return;
       }
       const hydrated = hydrateDraftExecutionDefaults(loaded, persistedExecutionDefaults);
@@ -1904,7 +1916,7 @@ export default function PlanModePage() {
       wsClient.off("plan_run_failed", handler);
       wsClient.off("plan_cost_update", handler);
     };
-  }, [draftId, navigate]);
+  }, [draftId, navigate, blackHoleEnabled]);
 
   const canCreateDraft =
     prompt.trim() !== "" &&
@@ -1974,7 +1986,7 @@ export default function PlanModePage() {
           planning_profiles: initialPlanningProfiles,
         },
       });
-      navigate(`/plan/${created.id}`);
+      navigate(planDraftRoute(created.id));
     } catch (caught) {
       setPageError(
         caught instanceof Error

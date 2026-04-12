@@ -116,13 +116,6 @@ export interface MissionDraft {
   repair_answers?: Record<string, PreflightAnswer>;
   repair_issues?: RepairIssue[];
   repair_context?: RepairContext | null;
-  launch_status?: LaunchStatus | null;
-}
-
-export interface LaunchStatus {
-  ready: boolean;
-  blockers: string[];
-  summary: string;
 }
 
 export interface PlanStep {
@@ -528,6 +521,22 @@ export interface LabsConfig {
 export const DEFAULT_LABS_CONFIG: LabsConfig = {
   black_hole_enabled: false,
 };
+
+export const PLAN_ROUTE = '/plan';
+export const MISSIONS_ROUTE = '/missions';
+export const BLACK_HOLE_ROUTE = '/black-hole';
+
+export function planDraftRoute(id: string): string {
+  return `${PLAN_ROUTE}/${id}`;
+}
+
+export function blackHoleDraftRoute(id: string): string {
+  return `${BLACK_HOLE_ROUTE}/${id}`;
+}
+
+export function isBlackHoleEnabled(labs: LabsConfig | null | undefined): boolean {
+  return labs?.black_hole_enabled === true;
+}
 
 export interface AppConfig {
   filesystem: {

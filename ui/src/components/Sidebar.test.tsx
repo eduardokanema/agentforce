@@ -2,8 +2,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act, type ReactElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ToastProvider } from './Toast';
 import { ThemeProvider } from '../context/ThemeContext';
+import { DEFAULT_LABS_CONFIG } from '../lib/types';
 import Sidebar from './Sidebar';
+
+const ENABLED_LABS = { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true };
 
 const wsHarness = vi.hoisted(() => {
   type ConnectionState = 'connecting' | 'open' | 'closed';
@@ -57,10 +61,19 @@ vi.mock('../lib/ws', () => ({
   },
 }));
 
+const api = vi.hoisted(() => ({
+  selectLabsConfig: vi.fn(),
+}));
+
+vi.mock('../lib/api', () => ({
+  selectLabsConfig: api.selectLabsConfig,
+}));
+
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   // Default to 'dark' so theme cycle tests start from a known state.
   localStorage.setItem('agentforce-theme', 'dark');
+  api.selectLabsConfig.mockImplementation((config) => config?.labs ?? DEFAULT_LABS_CONFIG);
 });
 
 afterEach(() => {
@@ -75,7 +88,11 @@ function renderToContainer(element: ReactElement): { root: Root; container: HTML
   const root = createRoot(container);
 
   act(() => {
-    root.render(<ThemeProvider>{element}</ThemeProvider>);
+    root.render(
+      <ToastProvider>
+        <ThemeProvider>{element}</ThemeProvider>
+      </ToastProvider>,
+    );
   });
 
   return { root, container };
@@ -92,7 +109,7 @@ describe('Sidebar', () => {
 
     const { container, root } = renderToContainer(
       <MemoryRouter>
-        <Sidebar />
+        <Sidebar labs={ENABLED_LABS} />
       </MemoryRouter>,
     );
 
@@ -110,11 +127,24 @@ describe('Sidebar', () => {
     act(() => { root.unmount(); });
   });
 
+  it('hides the Black Hole nav item when Labs disables it', () => {
+    const { container, root } = renderToContainer(
+      <MemoryRouter>
+        <Sidebar labs={DEFAULT_LABS_CONFIG} />
+      </MemoryRouter>,
+    );
+
+    expect(container.querySelectorAll('a').length).toBe(6);
+    expect(container.querySelector('a[href="/black-hole"]')).toBeNull();
+
+    act(() => { root.unmount(); });
+  });
+
   describe('theme toggle', () => {
     it('renders a theme toggle button', () => {
       const { container, root } = renderToContainer(
         <MemoryRouter>
-          <Sidebar />
+          <Sidebar labs={ENABLED_LABS} />
         </MemoryRouter>,
       );
 
@@ -126,7 +156,7 @@ describe('Sidebar', () => {
     it('cycles dark → light → system → dark on three clicks', () => {
       const { container, root } = renderToContainer(
         <MemoryRouter>
-          <Sidebar />
+          <Sidebar labs={ENABLED_LABS} />
         </MemoryRouter>,
       );
 
@@ -149,7 +179,7 @@ describe('Sidebar', () => {
     it('persists theme mode to localStorage', () => {
       const { container, root } = renderToContainer(
         <MemoryRouter>
-          <Sidebar />
+          <Sidebar labs={ENABLED_LABS} />
         </MemoryRouter>,
       );
 
@@ -169,7 +199,7 @@ describe('Sidebar', () => {
 
       const { container, root } = renderToContainer(
         <MemoryRouter>
-          <Sidebar />
+          <Sidebar labs={ENABLED_LABS} />
         </MemoryRouter>,
       );
 
@@ -182,7 +212,7 @@ describe('Sidebar', () => {
     it('shows label when expanded and only icon when collapsed', () => {
       const { container, root } = renderToContainer(
         <MemoryRouter>
-          <Sidebar />
+          <Sidebar labs={ENABLED_LABS} />
         </MemoryRouter>,
       );
 

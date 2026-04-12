@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import { NavLink, useInRouterContext } from 'react-router-dom';
 import { wsClient } from '../lib/ws';
 import { useTheme, type ThemeMode } from '../context/ThemeContext';
+import { BLACK_HOLE_ROUTE, isBlackHoleEnabled, PLAN_ROUTE, type LabsConfig } from '../lib/types';
 
 type WsConnectionState = 'connecting' | 'open' | 'closed';
 
 const NAV_ITEMS = [
   { label: 'Mission Control', icon: '⌘', to: '/' },
-  { label: 'Plan Mode', icon: '◈', to: '/plan' },
-  { label: 'Black Hole', icon: '☉', to: '/black-hole' },
+  { label: 'Plan Mode', icon: '◈', to: PLAN_ROUTE },
+  { label: 'Black Hole', icon: '☉', to: BLACK_HOLE_ROUTE },
   { label: 'Ground Control', icon: '⊛', to: '/ground-control' },
   { label: 'Models', icon: '⬡', to: '/models' },
   { label: 'Telemetry', icon: '◎', to: '/telemetry' },
@@ -84,10 +85,15 @@ function SidebarNavLink({
   );
 }
 
-export default function Sidebar() {
+export default function Sidebar({
+  labs,
+}: {
+  labs?: LabsConfig;
+}) {
   const [collapsed, setCollapsed] = useState(readCollapsedState);
   const [connectionState, setConnectionState] = useState<WsConnectionState>(() => wsClient.connectionState);
   const { mode, cycleTheme } = useTheme();
+  const navItems = isBlackHoleEnabled(labs) ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.to !== BLACK_HOLE_ROUTE);
 
   useEffect(() => {
     window.localStorage.setItem('sidebar-collapsed', collapsed ? '1' : '0');
@@ -124,8 +130,10 @@ export default function Sidebar() {
         </div>
 
         <nav className="flex-1 space-y-1 px-2 py-3">
-          {NAV_ITEMS.map((item) => (
-            <SidebarNavLink key={item.to} item={item} collapsed={collapsed} />
+          {navItems.map((item) => (
+            <div key={item.to}>
+              <SidebarNavLink item={item} collapsed={collapsed} />
+            </div>
           ))}
         </nav>
 

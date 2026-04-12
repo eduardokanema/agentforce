@@ -111,12 +111,16 @@ def _load_dashboard_config() -> dict:
             "labs": DEFAULT_LABS_SETTINGS.copy(),
         }
         _write_dashboard_config(data)
-        return _normalize_dashboard_config(data)
+        return data
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return _normalize_dashboard_config(data if isinstance(data, dict) else {})
+        raw_data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return _normalize_dashboard_config({})
+    data = raw_data if isinstance(raw_data, dict) else {}
+    normalized = _normalize_dashboard_config(data)
+    if normalized != data:
+        _write_dashboard_config(normalized)
+    return normalized
 
 
 def load_caps() -> dict:
@@ -127,6 +131,15 @@ def load_caps() -> dict:
 def load_filesystem_settings() -> dict:
     data = _load_dashboard_config()
     return {k: data["filesystem"].get(k, v) for k, v in DEFAULT_FILESYSTEM_SETTINGS.items()}
+
+
+def load_labs_settings() -> dict:
+    data = _load_dashboard_config()
+    return dict(data["labs"])
+
+
+def black_hole_enabled() -> bool:
+    return load_labs_settings().get("black_hole_enabled") is True
 
 
 def _write_dashboard_config(data: dict) -> None:

@@ -2,10 +2,12 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_LABS_CONFIG } from '../lib/types';
+import type { LabsConfig } from '../lib/types';
 
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
   updateConfig: vi.fn(),
+  selectLabsConfig: vi.fn(),
   getFilesystemListing: vi.fn(),
   createFilesystemFolder: vi.fn(),
 }));
@@ -23,13 +25,16 @@ vi.mock('../hooks/useToast', () => ({
 
 import SettingsPage from './SettingsPage';
 
-async function renderPage(): Promise<HTMLDivElement> {
+async function renderPage(props: {
+  labs?: LabsConfig;
+  onLabsChange?: (labs: LabsConfig) => void;
+} = {}): Promise<HTMLDivElement> {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
 
   await act(async () => {
-    root.render(<SettingsPage />);
+    root.render(<SettingsPage {...props} />);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
@@ -43,6 +48,8 @@ describe('SettingsPage', () => {
     api.updateConfig.mockReset();
     api.getFilesystemListing.mockReset();
     api.createFilesystemFolder.mockReset();
+    api.selectLabsConfig.mockReset();
+    api.selectLabsConfig.mockImplementation((config) => config?.labs ?? DEFAULT_LABS_CONFIG);
     toastHarness.addToast.mockReset();
   });
 
@@ -154,8 +161,164 @@ describe('SettingsPage', () => {
         allowed_base_paths: [],
         default_start_path: '/workspace/client',
       },
+      labs: {
+        black_hole_enabled: false,
+      },
     });
     expect(toastHarness.addToast).toHaveBeenCalledWith('Settings saved', 'success');
+  });
+
+  it('renders Labs experimental features inside Settings', async () => {
+    api.getConfig.mockResolvedValue({
+      filesystem: {
+        allowed_base_paths: ['/workspace'],
+        default_start_path: '~/Projects',
+      },
+      default_caps: {
+        max_concurrent_workers: 2,
+        max_retries_per_task: 2,
+        max_wall_time_minutes: 60,
+        max_cost_usd: 0,
+      },
+      labs: { ...DEFAULT_LABS_CONFIG },
+    });
+    api.getFilesystemListing.mockResolvedValue({
+      path: '/workspace',
+      entries: [],
+      parent: null,
+    });
+
+    const container = await renderPage();
+
+    expect(container.textContent).toContain('Lab experimental features');
+    expect(container.textContent).toContain('Black Hole');
+    expect(container.textContent).toContain('Disabled');
+  });
+
+  it('saves Labs experimental feature changes and notifies the app shell', async () => {
+    const onLabsChange = vi.fn();
+    api.getConfig.mockResolvedValue({
+      filesystem: {
+        allowed_base_paths: ['/workspace'],
+        default_start_path: '~/Projects',
+      },
+      default_caps: {
+        max_concurrent_workers: 2,
+        max_retries_per_task: 2,
+        max_wall_time_minutes: 60,
+        max_cost_usd: 0,
+      },
+      labs: { ...DEFAULT_LABS_CONFIG },
+    });
+    api.getFilesystemListing.mockResolvedValue({
+      path: '/workspace',
+      entries: [],
+      parent: null,
+    });
+    api.updateConfig.mockResolvedValue({
+      filesystem: {
+        allowed_base_paths: ['/workspace'],
+        default_start_path: '~/Projects',
+      },
+      default_caps: {
+        max_concurrent_workers: 2,
+        max_retries_per_task: 2,
+        max_wall_time_minutes: 60,
+        max_cost_usd: 0,
+      },
+      labs: { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true },
+    });
+
+    const container = await renderPage({ onLabsChange });
+
+    const blackHoleCheckbox = container.querySelector('input[name="lab-black-hole"]') as HTMLInputElement | null;
+    expect(blackHoleCheckbox).toBeTruthy();
+    expect(blackHoleCheckbox?.checked).toBe(false);
+
+    await act(async () => {
+      blackHoleCheckbox?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const saveButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    ) as HTMLButtonElement | undefined;
+    expect(saveButton).toBeTruthy();
+
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(api.updateConfig).toHaveBeenCalledWith({
+      default_caps: {
+        max_concurrent_workers: 2,
+        max_retries_per_task: 2,
+        max_wall_time_minutes: 60,
+        max_cost_usd: 0,
+      },
+      filesystem: {
+        allowed_base_paths: [],
+        default_start_path: '~/Projects',
+      },
+      labs: {
+        black_hole_enabled: true,
+      },
+    });
+    expect(onLabsChange).toHaveBeenCalledWith({
+      ...DEFAULT_LABS_CONFIG,
+      black_hole_enabled: true,
+    });
+    expect(toastHarness.addToast).toHaveBeenCalledWith('Settings saved', 'success');
+  });
+
+  it('shows an explicit error toast when Labs experimental feature save fails', async () => {
+    const onLabsChange = vi.fn();
+    api.getConfig.mockResolvedValue({
+      filesystem: {
+        allowed_base_paths: ['/workspace'],
+        default_start_path: '~/Projects',
+      },
+      default_caps: {
+        max_concurrent_workers: 2,
+        max_retries_per_task: 2,
+        max_wall_time_minutes: 60,
+        max_cost_usd: 0,
+      },
+      labs: { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true },
+    });
+    api.getFilesystemListing.mockResolvedValue({
+      path: '/workspace',
+      entries: [],
+      parent: null,
+    });
+    api.updateConfig.mockRejectedValue(new Error('save failed'));
+
+    const container = await renderPage({
+      labs: { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true },
+      onLabsChange,
+    });
+
+    const blackHoleCheckbox = container.querySelector('input[name="lab-black-hole"]') as HTMLInputElement | null;
+    expect(blackHoleCheckbox?.checked).toBe(true);
+
+    await act(async () => {
+      blackHoleCheckbox?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const saveButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    ) as HTMLButtonElement | undefined;
+    expect(saveButton).toBeTruthy();
+
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(onLabsChange).not.toHaveBeenCalled();
+    expect(toastHarness.addToast).toHaveBeenCalledWith('save failed', 'error');
   });
 
   it('creates a folder from the shared browser before selecting it as the start path', async () => {
@@ -257,6 +420,9 @@ describe('SettingsPage', () => {
       filesystem: {
         allowed_base_paths: [],
         default_start_path: '/workspace/new-app',
+      },
+      labs: {
+        black_hole_enabled: false,
       },
     });
   });

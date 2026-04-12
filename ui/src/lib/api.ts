@@ -94,9 +94,14 @@ function objectRecordOrEmpty(value: unknown): Record<string, unknown> {
 }
 
 export function selectLabsConfig(config: Pick<AppConfig, 'labs'> | null | undefined): LabsConfig {
+  const labs = config?.labs;
+  const normalizedLabs: Record<string, unknown> = labs && typeof labs === 'object' && !Array.isArray(labs)
+    ? { ...labs }
+    : {};
   return {
     ...DEFAULT_LABS,
-    ...(config?.labs ?? {}),
+    ...normalizedLabs,
+    black_hole_enabled: normalizedLabs.black_hole_enabled === true,
   };
 }
 
@@ -170,7 +175,6 @@ function normalizeDraftSpec(payload: MissionDraft): MissionDraft['draft_spec'] {
 function normalizePlanDraft(payload: MissionDraft): MissionDraft {
   const preflightAnswers = objectRecordOrEmpty(payload.preflight_answers) as Record<string, PreflightAnswer>;
   const repairAnswers = objectRecordOrEmpty(payload.repair_answers) as Record<string, PreflightAnswer>;
-  const launchStatus = objectRecordOrEmpty(payload.launch_status);
   return {
     ...payload,
     draft_spec: normalizeDraftSpec(payload),
@@ -190,11 +194,6 @@ function normalizePlanDraft(payload: MissionDraft): MissionDraft {
     repair_questions: Array.isArray(payload.repair_questions) ? payload.repair_questions : [],
     repair_answers: repairAnswers,
     repair_issues: Array.isArray(payload.repair_issues) ? payload.repair_issues : [],
-    launch_status: {
-      ready: launchStatus.ready === true,
-      blockers: stringArrayOrEmpty(launchStatus.blockers),
-      summary: stringOrFallback(launchStatus.summary),
-    },
   };
 }
 

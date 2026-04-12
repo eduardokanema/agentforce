@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_LABS_CONFIG, type MissionDraft, type Model } from '../lib/types';
 import PlanModePage from './PlanModePage';
 
+const ENABLED_LABS = { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true };
+
 function flushPromises(): Promise<void> {
   return act(async () => {
     await Promise.resolve();
@@ -86,11 +88,6 @@ function makeDraft(overrides: Partial<MissionDraft> = {}): MissionDraft {
 
 function makeLaunchReadyDraft(overrides: Partial<MissionDraft> = {}): MissionDraft {
   return makeDraft({
-    launch_status: {
-      ready: true,
-      blockers: [],
-      summary: 'Launch window clear. Mission can be started now.',
-    },
     plan_runs: [
       {
         id: 'run-1',
@@ -139,6 +136,7 @@ function makeLaunchReadyDraft(overrides: Partial<MissionDraft> = {}): MissionDra
 function renderPage(
   fetchMock: ReturnType<typeof vi.fn>,
   initialEntry = '/plan',
+  labs = ENABLED_LABS,
 ): { container: HTMLDivElement; root: Root } {
   vi.stubGlobal('fetch', fetchMock);
   const container = document.createElement('div');
@@ -154,8 +152,10 @@ function renderPage(
     root.render(
       <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
-          <Route path="/plan" element={<PlanModePage />} />
-          <Route path="/plan/:id" element={<PlanModePage />} />
+          <Route path="/plan" element={<PlanModePage labs={labs} />} />
+          <Route path="/plan/:id" element={<PlanModePage labs={labs} />} />
+          <Route path="/missions" element={<div data-testid="missions-route">Missions route</div>} />
+          <Route path="/" element={<div data-testid="mission-control-route">Mission control route</div>} />
           <Route path="/mission/:id" element={<MissionRouteProbe />} />
         </Routes>
       </MemoryRouter>,
@@ -1483,59 +1483,6 @@ describe('PlanModePage', () => {
     });
   });
 
-  it('uses backend launch_status to keep launch blocked', async () => {
-    const blockedDraft = makeLaunchReadyDraft({
-      launch_status: {
-        ready: false,
-        blockers: ['A newer planning run is still in progress.'],
-        summary: 'A newer planning run is still in progress.',
-      },
-      plan_runs: [
-        {
-          id: 'run-latest',
-          draft_id: 'draft-123',
-          base_revision: 3,
-          head_revision_seen: 3,
-          status: 'completed',
-          trigger_kind: 'follow_up',
-          trigger_message: 'Refine the plan',
-          created_at: '2026-04-12T00:10:00Z',
-          steps: [],
-          cost_usd: 0,
-        },
-      ],
-    });
-
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === '/api/models') {
-        return new Response(JSON.stringify(models), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      if (url === '/api/plan/drafts/draft-123') {
-        return new Response(JSON.stringify(blockedDraft), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-
-      throw new Error(`unexpected fetch ${url}`);
-    });
-
-    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
-    await flushPromises();
-
-    const launchButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Launch Mission')) as HTMLButtonElement | undefined;
-    expect(launchButton).toBeUndefined();
-    expect(container.textContent).toContain('Finalize Review');
-    expect(container.textContent).toContain('Launch Blocked');
-
-    act(() => {
-      root.unmount();
-    });
-  });
-
   it('keeps the draft-stage content ordered with inline follow-up on the page', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -2008,9 +1955,11 @@ describe('PlanModePage', () => {
       root.render(
         <MemoryRouter initialEntries={['/plan?draft=draft-123']}>
           <Routes>
-            <Route path="/plan" element={<PlanModePage />} />
-            <Route path="/plan/:id" element={<PlanModePage />} />
+            <Route path="/plan" element={<PlanModePage labs={ENABLED_LABS} />} />
+            <Route path="/plan/:id" element={<PlanModePage labs={ENABLED_LABS} />} />
             <Route path="/black-hole/:id" element={<div data-testid="black-hole-route">Black hole route</div>} />
+            <Route path="/missions" element={<div data-testid="missions-route">Missions route</div>} />
+            <Route path="/" element={<div data-testid="mission-control-route">Mission control route</div>} />
           </Routes>
         </MemoryRouter>,
       );
@@ -2018,6 +1967,39 @@ describe('PlanModePage', () => {
 
     await flushPromises();
     expect(container.textContent).toContain('Black hole route');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('redirects black-hole drafts to mission control when Labs disables them', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft({
+          draft_kind: 'black_hole',
+          validation: {
+            ...makeDraft().validation,
+            draft_kind: 'black_hole',
+          },
+        })), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123', DEFAULT_LABS_CONFIG);
+    await flushPromises();
+
+    expect(container.textContent).toContain('Missions route');
+    expect(container.textContent).not.toContain('Black hole route');
 
     act(() => {
       root.unmount();

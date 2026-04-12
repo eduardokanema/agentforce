@@ -27,7 +27,12 @@ import {
 } from "../lib/blackHole";
 import { BLACK_HOLE_DRAFT_KIND, isBlackHoleDraft } from "../lib/draftKinds";
 import { executionProfileFromOption, optionIdFromExecutionProfile } from "../lib/executionProfiles";
-import type {
+import {
+  blackHoleDraftRoute,
+  isBlackHoleEnabled,
+  MISSIONS_ROUTE,
+  planDraftRoute,
+  type LabsConfig,
   BlackHoleCampaignState,
   BlackHoleConfig,
   ExecutionProfile,
@@ -108,11 +113,12 @@ function normalizePlanningProfiles(value: unknown): Record<string, ExecutionProf
   }, {});
 }
 
-export default function BlackHoleModePage(): JSX.Element {
+export default function BlackHoleModePage({ labs }: { labs?: LabsConfig }): JSX.Element {
   const navigate = useNavigate();
   const params = useParams<{ id?: string }>();
   const [searchParams] = useSearchParams();
   const draftId = params.id ?? searchParams.get("draft") ?? "";
+  const blackHoleEnabled = isBlackHoleEnabled(labs);
 
   const [prompt, setPrompt] = useState("");
   const [workspaces, setWorkspaces] = useState<string[]>(
@@ -145,13 +151,19 @@ export default function BlackHoleModePage(): JSX.Element {
     && workspaces.length > 0
     && (planningProfiles.planner.model ?? "").trim() !== "";
 
+  useEffect(() => {
+    if (!blackHoleEnabled) {
+      navigate(MISSIONS_ROUTE, { replace: true });
+    }
+  }, [blackHoleEnabled, navigate]);
+
   const loadDraft = async (nextDraftId: string): Promise<void> => {
     setLoadingDraft(true);
     setPageError(null);
     try {
       const loaded = await getPlanDraft(nextDraftId);
       if (!isBlackHoleDraft(loaded)) {
-        navigate(`/plan/${nextDraftId}`, { replace: true });
+        navigate(planDraftRoute(nextDraftId), { replace: true });
         return;
       }
       const state = await getBlackHoleCampaign(nextDraftId);
@@ -170,6 +182,9 @@ export default function BlackHoleModePage(): JSX.Element {
   };
 
   useEffect(() => {
+    if (!blackHoleEnabled) {
+      return;
+    }
     let cancelled = false;
     const load = async (): Promise<void> => {
       setLoadingModels(true);
@@ -205,9 +220,12 @@ export default function BlackHoleModePage(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [blackHoleEnabled]);
 
   useEffect(() => {
+    if (!blackHoleEnabled) {
+      return;
+    }
     if (typeof window === "undefined") {
       return;
     }
@@ -215,6 +233,9 @@ export default function BlackHoleModePage(): JSX.Element {
   }, [workspaces]);
 
   useEffect(() => {
+    if (!blackHoleEnabled) {
+      return;
+    }
     if (typeof window === "undefined") {
       return;
     }
@@ -222,6 +243,9 @@ export default function BlackHoleModePage(): JSX.Element {
   }, [planningProfiles]);
 
   useEffect(() => {
+    if (!blackHoleEnabled) {
+      return;
+    }
     if (!draftId) {
       setDraft(null);
       setCampaignState(null);
@@ -230,9 +254,12 @@ export default function BlackHoleModePage(): JSX.Element {
       return;
     }
     void loadDraft(draftId);
-  }, [draftId, navigate]);
+  }, [draftId, navigate, blackHoleEnabled]);
 
   useEffect(() => {
+    if (!blackHoleEnabled) {
+      return undefined;
+    }
     if (!draftId) {
       return undefined;
     }
@@ -253,7 +280,11 @@ export default function BlackHoleModePage(): JSX.Element {
       wsClient.off("black_hole_campaign_updated", refreshDraft);
       wsClient.off("black_hole_loop_recorded", refreshDraft);
     };
-  }, [draftId, navigate]);
+  }, [draftId, navigate, blackHoleEnabled]);
+
+  if (!blackHoleEnabled) {
+    return <></>;
+  }
 
   const handleCreateDraft = async (): Promise<void> => {
     if (!canCreateDraft) {
@@ -276,7 +307,7 @@ export default function BlackHoleModePage(): JSX.Element {
         },
         auto_start: false,
       });
-      navigate(`/black-hole/${created.id}`);
+      navigate(blackHoleDraftRoute(created.id));
     } catch (caught) {
       setPageError(caught instanceof Error ? caught.message : "Failed to create black hole draft.");
     } finally {

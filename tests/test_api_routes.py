@@ -479,6 +479,14 @@ def _draft_payload(name: str, *, status: str = "draft", validation: dict | None 
     }
 
 
+def _assert_black_hole_disabled(handler: DashboardHandler) -> None:
+    assert handler.send_response.call_args.args == (403,)
+    assert _response_body(handler) == {
+        "error": "black_hole_disabled",
+        "message": "Black Hole is disabled in Labs settings",
+    }
+
+
 def test_api_plan_drafts_list_empty(tmp_path, monkeypatch):
     _patch_home(monkeypatch, tmp_path)
     
@@ -562,6 +570,7 @@ def test_api_plan_drafts_include_draft_kind(tmp_path, monkeypatch):
 
 def test_api_plan_black_hole_campaign_lifecycle(tmp_path, monkeypatch):
     _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": True}}))
     from agentforce.server.routes import plan as plan_routes
 
     store = PlanDraftStore(tmp_path / "drafts")
@@ -638,8 +647,235 @@ def test_api_plan_black_hole_campaign_lifecycle(tmp_path, monkeypatch):
     assert body_none[0]["status"] == "draft"
 
 
+def test_black_hole_disabled_routes_return_shared_403_contract(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": False}}))
+
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.create(
+        "draft-black-hole-disabled",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
+    save_result = store.save(
+        draft.copy_with(
+            validation={
+                **draft.validation,
+                "preflight_status": "pending",
+                "repair": {
+                    "status": "pending",
+                    "mode": "black_hole",
+                    "loop_no": 2,
+                    "repair_round": 1,
+                    "max_rounds": 2,
+                    "source_version_id": "version-1",
+                    "questions": [{"id": "repair_desc", "prompt": "Allow repair?", "options": ["Yes", "No"]}],
+                    "issues": [{"issue_id": "repair_desc", "kind": "criterion_vague", "blocking": True}],
+                    "answers": {},
+                },
+            },
+        ),
+        expected_revision=draft.revision,
+    )
+    assert save_result.status == "saved"
+    draft = save_result.draft
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Black hole prompt", "validation": {"draft_kind": "black_hole"}})
+    create_handler.do_POST()
+    _assert_black_hole_disabled(create_handler)
+
+    route_calls = [
+        ("GET", f"/api/plan/drafts/{draft.id}", None),
+        ("GET", f"/api/plan/drafts/{draft.id}/black-hole", None),
+        ("POST", f"/api/plan/drafts/{draft.id}/black-hole", {"expected_revision": draft.revision}),
+        ("POST", f"/api/plan/drafts/{draft.id}/start", {}),
+        ("POST", f"/api/plan/drafts/{draft.id}/black-hole/pause", {}),
+        ("POST", f"/api/plan/drafts/{draft.id}/black-hole/resume", {}),
+        ("POST", f"/api/plan/drafts/{draft.id}/black-hole/stop", {}),
+        ("POST", f"/api/plan/drafts/{draft.id}/preflight", {"answers": {}}),
+        ("POST", f"/api/plan/drafts/{draft.id}/repair", {"expected_revision": draft.revision, "answers": {}}),
+        ("POST", f"/api/plan/drafts/{draft.id}/black-hole/repair", {"expected_revision": draft.revision, "answers": {}}),
+        ("PATCH", f"/api/plan/drafts/{draft.id}/spec", {"expected_revision": draft.revision, "draft_spec": draft.draft_spec}),
+        ("POST", f"/api/plan/drafts/{draft.id}/import-yaml", {"expected_revision": draft.revision, "yaml": yaml.safe_dump(draft.draft_spec)}),
+    ]
+
+    for method, path, payload in route_calls:
+        handler = _make_handler(path)
+        if payload is not None:
+            _json_request(handler, payload)
+        getattr(handler, f"do_{method}")()
+        _assert_black_hole_disabled(handler)
+
+
+def test_black_hole_enabled_draft_create_and_read_routes_succeed(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": True}}))
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Black hole prompt", "validation": {"draft_kind": "black_hole"}, "auto_start": False})
+    create_handler.do_POST()
+
+    assert create_handler.send_response.call_args.args == (200,)
+    created = _response_body(create_handler)
+    draft_id = created["id"]
+    assert created["requires_preflight"] is False
+
+    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    get_handler.do_GET()
+
+    assert get_handler.send_response.call_args.args == (200,)
+    body = _response_body(get_handler)
+    assert body["id"] == draft_id
+    assert body["draft_kind"] == "black_hole"
+
+
+def test_black_hole_enabled_campaign_read_launch_pause_resume_stop_routes_succeed(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": True}}))
+
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.create(
+        "draft-black-hole-enabled-matrix",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
+    monkeypatch.setattr(plan_routes, "_store", lambda: store)
+
+    enqueued: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        plan_routes,
+        "enqueue_black_hole_campaign",
+        lambda campaign_id, *, draft_id=None: enqueued.append((campaign_id, draft_id)),
+    )
+
+    read_handler = _make_handler(f"/api/plan/drafts/{draft.id}/black-hole")
+    read_handler.do_GET()
+    assert read_handler.send_response.call_args.args == (200,)
+    assert _response_body(read_handler)["campaign"] is None
+
+    launch_handler = _make_handler(f"/api/plan/drafts/{draft.id}/black-hole")
+    _json_request(
+        launch_handler,
+        {
+            "expected_revision": draft.revision,
+            "config": {
+                "objective": "Refactor until no Python function exceeds 300 lines.",
+                "analyzer": "python_fn_length",
+                "loop_limits": {
+                    "max_loops": 4,
+                    "max_no_progress": 2,
+                    "function_line_limit": 300,
+                },
+            },
+        },
+    )
+    launch_handler.do_POST()
+    assert launch_handler.send_response.call_args.args == (200,)
+    launched = _response_body(launch_handler)
+    assert launched["draft_id"] == draft.id
+    assert enqueued and enqueued[0][1] == draft.id
+
+    pause_handler = _make_handler(f"/api/plan/drafts/{draft.id}/black-hole/pause")
+    _json_request(pause_handler, {})
+    pause_handler.do_POST()
+    assert pause_handler.send_response.call_args.args == (200,)
+    assert _response_body(pause_handler)["status"] == "paused"
+
+    resume_handler = _make_handler(f"/api/plan/drafts/{draft.id}/black-hole/resume")
+    _json_request(resume_handler, {})
+    resume_handler.do_POST()
+    assert resume_handler.send_response.call_args.args == (200,)
+    assert _response_body(resume_handler)["status"] == "evaluating_workspace"
+
+    stop_handler = _make_handler(f"/api/plan/drafts/{draft.id}/black-hole/stop")
+    _json_request(stop_handler, {})
+    stop_handler.do_POST()
+    assert stop_handler.send_response.call_args.args == (200,)
+    assert _response_body(stop_handler)["status"] == "cancelled"
+
+
+def test_black_hole_enabled_repair_submission_route_succeeds(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+    from agentforce.server.black_hole_runs import BlackHoleCampaignStore
+
+    _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": True}}))
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.create(
+        "draft-black-hole-enabled-repair",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
+    save_result = store.save(
+        draft.copy_with(
+            validation={
+                **draft.validation,
+                "repair": {
+                    "status": "pending",
+                    "mode": "black_hole",
+                    "loop_no": 2,
+                    "repair_round": 1,
+                    "max_rounds": 2,
+                    "source_version_id": "version-1",
+                    "questions": [
+                        {
+                            "id": "repair_desc",
+                            "prompt": "Allow the planner to update the description?",
+                            "options": ["Accept proposed change", "Decline proposed change", "Edit manually"],
+                            "allow_custom": True,
+                        }
+                    ],
+                    "issues": [{"issue_id": "repair_desc", "kind": "criterion_vague", "blocking": True}],
+                    "answers": {},
+                },
+            },
+        ),
+        expected_revision=draft.revision,
+    )
+    assert save_result.status == "saved"
+
+    campaign_store = BlackHoleCampaignStore(tmp_path / "black_hole")
+    campaign = campaign_store.create_campaign(
+        "campaign-black-hole-enabled-repair",
+        draft_id=draft.id,
+        max_loops=4,
+        max_no_progress=2,
+        config_snapshot={"objective": "Repair child plans"},
+        status="waiting_human",
+    )
+
+    enqueued: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        plan_routes,
+        "enqueue_black_hole_campaign",
+        lambda campaign_id, *, draft_id=None: enqueued.append((campaign_id, draft_id)),
+    )
+
+    repair_handler = _make_handler(f"/api/plan/drafts/{draft.id}/black-hole/repair")
+    _json_request(
+        repair_handler,
+        {
+            "expected_revision": save_result.draft.revision,
+            "loop_no": 2,
+            "repair_round": 1,
+            "source_version_id": "version-1",
+            "answers": {
+                "repair_desc": {"selected_option": "Accept proposed change"},
+            },
+        },
+    )
+    repair_handler.do_POST()
+
+    assert repair_handler.send_response.call_args.args == (200,)
+    body = _response_body(repair_handler)
+    assert body["status"] == "queued"
+    assert body["campaign_id"] == campaign.id
+    assert enqueued == [(campaign.id, draft.id)]
+
+
 def test_black_hole_draft_cannot_launch_simple_mission(tmp_path, monkeypatch):
     _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": True}}))
     store = PlanDraftStore(tmp_path / "drafts")
     draft = store.create(
         "draft-black-hole-launch",
@@ -855,6 +1091,7 @@ def test_black_hole_preflight_submission_does_not_enqueue_simple_plan_run(tmp_pa
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": True}}))
     monkeypatch.setattr(
         plan_routes,
         "discover_preflight_questions",
@@ -1402,6 +1639,7 @@ def test_get_config_returns_default_caps(tmp_path, monkeypatch):
     assert caps["max_wall_time_minutes"] == 60
     assert caps["max_cost_usd"] == 0
     assert body["filesystem"]["default_start_path"] == "~/Projects"
+    assert body["labs"]["black_hole_enabled"] is False
 
 
 def test_get_config_creates_file_if_missing(tmp_path, monkeypatch):
@@ -1413,6 +1651,80 @@ def test_get_config_creates_file_if_missing(tmp_path, monkeypatch):
 
     assert handler.send_response.call_args.args == (200,)
     assert (tmp_path / "config.json").exists()
+    saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert saved["labs"]["black_hole_enabled"] is False
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "legacy_config"),
+    [
+        (
+            "default_caps_only",
+            {
+                "default_caps": {
+                    "max_cost_usd": 7,
+                },
+                "other": {"keep": True},
+            },
+        ),
+        (
+            "filesystem_only",
+            {
+                "filesystem": {
+                    "mode": "workspace-write",
+                },
+                "other": {"keep": True},
+            },
+        ),
+        (
+            "partial_labs",
+            {
+                "labs": {
+                    "experiments": {"keep": True},
+                },
+                "default_caps": {
+                    "max_cost_usd": 7,
+                },
+                "filesystem": {
+                    "mode": "workspace-write",
+                },
+                "other": {"keep": True},
+            },
+        ),
+        (
+            "malformed_labs",
+            {
+                "labs": "bad",
+                "default_caps": {
+                    "max_cost_usd": 7,
+                },
+                "filesystem": {
+                    "mode": "workspace-write",
+                },
+                "other": {"keep": True},
+            },
+        ),
+    ],
+)
+def test_get_config_materializes_normalized_labs_into_legacy_config_fixtures(tmp_path, monkeypatch, fixture_name, legacy_config):
+    _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps(legacy_config), encoding="utf-8")
+
+    handler = _make_handler("/api/config")
+    handler.do_GET()
+
+    assert handler.send_response.call_args.args == (200,), fixture_name
+    body = _response_body(handler)
+    assert body["labs"]["black_hole_enabled"] is False, fixture_name
+    assert body["other"]["keep"] is True, fixture_name
+
+    saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert saved["labs"]["black_hole_enabled"] is False, fixture_name
+    assert saved["other"]["keep"] is True, fixture_name
+    if "default_caps" in legacy_config:
+        assert saved["default_caps"]["max_cost_usd"] == legacy_config["default_caps"]["max_cost_usd"], fixture_name
+    if "filesystem" in legacy_config:
+        assert saved["filesystem"]["mode"] == legacy_config["filesystem"]["mode"], fixture_name
 
 
 def test_get_and_post_config_normalize_labs_and_preserve_unknown_sections(tmp_path, monkeypatch):
@@ -1598,6 +1910,75 @@ def test_black_hole_disabled_contract_and_route_inventory_locked():
         ("POST /api/plan/drafts/{draft_id}/black-hole/stop", "_stop_black_hole_campaign"),
         ("POST /api/plan/drafts/{draft_id}/black-hole/repair", "_submit_repair"),
     }
+
+    explicit_case_ids = {
+        entry["case_id"]
+        for entry in plan_routes.BLACK_HOLE_ROUTE_INVENTORY
+    }
+    assert explicit_case_ids == {
+        "draft_entry",
+        "campaign_read",
+        "launch",
+        "pause_resume",
+        "stop",
+        "repair_submission",
+    }
+
+
+def test_black_hole_default_off_and_api_enablement_use_route_inventory_metadata(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+
+    routes_by_case_id: dict[str, set[str]] = {}
+    for entry in plan_routes.BLACK_HOLE_ROUTE_INVENTORY:
+        routes_by_case_id.setdefault(entry["case_id"], set()).add(entry["route"])
+
+    assert routes_by_case_id["draft_entry"] >= {
+        "POST /api/plan/drafts",
+    }
+    assert routes_by_case_id["campaign_read"] == {"GET /api/plan/drafts/{draft_id}/black-hole"}
+    assert routes_by_case_id["launch"] == {"POST /api/plan/drafts/{draft_id}/black-hole"}
+    assert routes_by_case_id["pause_resume"] == {
+        "POST /api/plan/drafts/{draft_id}/black-hole/pause",
+        "POST /api/plan/drafts/{draft_id}/black-hole/resume",
+    }
+    assert routes_by_case_id["stop"] == {"POST /api/plan/drafts/{draft_id}/black-hole/stop"}
+    assert routes_by_case_id["repair_submission"] == {
+        "POST /api/plan/drafts/{draft_id}/repair",
+        "POST /api/plan/drafts/{draft_id}/black-hole/repair",
+    }
+
+    default_get_handler = _make_handler("/api/config")
+    default_get_handler.do_GET()
+    assert default_get_handler.send_response.call_args.args == (200,)
+    assert _response_body(default_get_handler)["labs"]["black_hole_enabled"] is False
+
+    disabled_create_handler = _make_handler("/api/plan/drafts")
+    _json_request(
+        disabled_create_handler,
+        {"prompt": "Black hole prompt", "validation": {"draft_kind": "black_hole"}, "auto_start": False},
+    )
+    disabled_create_handler.do_POST()
+    _assert_black_hole_disabled(disabled_create_handler)
+
+    enable_payload = json.dumps({"labs": {"black_hole_enabled": True}}).encode("utf-8")
+    enable_handler = _make_handler("/api/config")
+    enable_handler.rfile = BytesIO(enable_payload)
+    enable_handler.headers["Content-Length"] = str(len(enable_payload))
+    enable_handler.do_POST()
+
+    assert enable_handler.send_response.call_args.args == (200,)
+    assert _response_body(enable_handler)["labs"]["black_hole_enabled"] is True
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(
+        create_handler,
+        {"prompt": "Black hole prompt", "validation": {"draft_kind": "black_hole"}, "auto_start": False},
+    )
+    create_handler.do_POST()
+
+    assert create_handler.send_response.call_args.args == (200,)
 
 
 # ---------------------------------------------------------------------------
@@ -1931,9 +2312,6 @@ def test_plan_draft_payload_and_start_ignore_older_failed_runs_after_reviewed_ve
     get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
     get_handler.do_GET()
     assert get_handler.send_response.call_args.args == (200,)
-    payload = _response_body(get_handler)
-    assert payload["launch_status"]["ready"] is True
-    assert payload["launch_status"]["blockers"] == []
 
     start_handler = _make_handler(f"/api/plan/drafts/{draft_id}/start")
     start_handler.do_POST()
@@ -2817,6 +3195,7 @@ def test_black_hole_repair_submission_requeues_campaign(tmp_path, monkeypatch):
     from agentforce.server.black_hole_runs import BlackHoleCampaignStore
 
     _patch_home(monkeypatch, tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": True}}))
     store = PlanDraftStore(tmp_path / "drafts")
     draft = store.create(
         "draft-black-hole-repair",

@@ -290,18 +290,6 @@ function buildLaunchReadiness(
   validationIssues: string[],
   conflictMessage: string | null,
 ): LaunchReadinessState {
-  if (draft.launch_status) {
-    const blockers = [...draft.launch_status.blockers];
-    if (conflictMessage) {
-      blockers.push(conflictMessage);
-    }
-    return {
-      ready: draft.launch_status.ready && !conflictMessage,
-      blockers,
-      summary: conflictMessage || draft.launch_status.summary,
-    };
-  }
-
   const blockers: string[] = [];
 
   if (draft.preflight_status === 'pending') {

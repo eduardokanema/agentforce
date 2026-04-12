@@ -12,6 +12,7 @@ from agentforce.server.black_hole_runs import BlackHoleCampaignStore, is_termina
 from agentforce.server import state_io, ws
 from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunStore
+from . import caps_config
 from agentforce.server.planning_runtime import (
     _answered_repair_state,
     _planning_intervention_generation,
@@ -35,66 +36,77 @@ BLACK_HOLE_DISABLED_RESPONSE = {
 
 BLACK_HOLE_ROUTE_INVENTORY: tuple[dict[str, str], ...] = (
     {
+        "case_id": "draft_entry",
         "surface": "draft_create",
         "route": "POST /api/plan/drafts",
         "handler": "_create_draft",
         "reason": "Can mint draft_kind=black_hole from incoming validation.",
     },
     {
+        "case_id": "draft_entry",
         "surface": "draft_update",
         "route": "PATCH /api/plan/drafts/{draft_id}/spec",
         "handler": "_patch_spec",
         "reason": "Preserves existing black-hole validation when draft spec changes.",
     },
     {
+        "case_id": "draft_entry",
         "surface": "draft_import",
         "route": "POST /api/plan/drafts/{draft_id}/import-yaml",
         "handler": "_import_yaml",
         "reason": "Preserves existing black-hole validation when YAML replaces the draft spec.",
     },
     {
+        "case_id": "draft_entry",
         "surface": "preflight_submit",
         "route": "POST /api/plan/drafts/{draft_id}/preflight",
         "handler": "_submit_preflight",
         "reason": "Advances black-hole drafts out of preflight without queuing a simple plan run.",
     },
     {
+        "case_id": "repair_submission",
         "surface": "repair_submit",
         "route": "POST /api/plan/drafts/{draft_id}/repair",
         "handler": "_submit_repair",
         "reason": "Can resume black-hole campaigns through shared repair submission.",
     },
     {
+        "case_id": "campaign_read",
         "surface": "black_hole_read",
         "route": "GET /api/plan/drafts/{draft_id}/black-hole",
         "handler": "_get_black_hole_campaign",
         "reason": "Reads black-hole draft config and campaign state.",
     },
     {
+        "case_id": "launch",
         "surface": "black_hole_launch",
         "route": "POST /api/plan/drafts/{draft_id}/black-hole",
         "handler": "_start_black_hole_campaign",
         "reason": "Configures and launches the black-hole campaign for a draft.",
     },
     {
+        "case_id": "pause_resume",
         "surface": "black_hole_pause",
         "route": "POST /api/plan/drafts/{draft_id}/black-hole/pause",
         "handler": "_pause_black_hole_campaign",
         "reason": "Pauses an in-flight black-hole campaign.",
     },
     {
+        "case_id": "pause_resume",
         "surface": "black_hole_resume",
         "route": "POST /api/plan/drafts/{draft_id}/black-hole/resume",
         "handler": "_resume_black_hole_campaign",
         "reason": "Resumes a paused or waiting black-hole campaign.",
     },
     {
+        "case_id": "stop",
         "surface": "black_hole_stop",
         "route": "POST /api/plan/drafts/{draft_id}/black-hole/stop",
         "handler": "_stop_black_hole_campaign",
         "reason": "Stops an active black-hole campaign.",
     },
     {
+        "case_id": "repair_submission",
         "surface": "black_hole_repair_submit",
         "route": "POST /api/plan/drafts/{draft_id}/black-hole/repair",
         "handler": "_submit_repair",
@@ -105,6 +117,16 @@ BLACK_HOLE_ROUTE_INVENTORY: tuple[dict[str, str], ...] = (
 
 def _black_hole_disabled_response() -> tuple[int, dict]:
     return 403, dict(BLACK_HOLE_DISABLED_RESPONSE)
+
+
+def _black_hole_enabled() -> bool:
+    return caps_config.black_hole_enabled()
+
+
+def _guard_black_hole_access(validation: dict | None) -> tuple[int, dict] | None:
+    if _draft_kind_from_validation(validation) == _BLACK_HOLE_KIND and not _black_hole_enabled():
+        return _black_hole_disabled_response()
+    return None
 
 
 def _store() -> PlanDraftStore:
@@ -155,44 +177,11 @@ def _enqueue_plan_run(run_id: str) -> None:
     threading.Thread(target=_runner, daemon=True, name=f"agentforce-plan-{run_id}").start()
 
 
-def _build_launch_status(
-    draft: MissionDraftV1,
-    *,
-    plan_runs: list | None = None,
-    plan_versions: list | None = None,
-) -> dict:
-    # Preserve launch semantics from the start route; this status is the
-    # frontend-visible projection of the same backend rule, not a stricter UI gate.
-    blockers: list[str] = []
-
-    if draft.status != "draft":
-        blockers.append(f"Draft status is {draft.status!r}, expected 'draft'")
-    if _draft_kind(draft) != _SIMPLE_PLAN_KIND:
-        blockers.append("black hole drafts cannot launch missions directly")
-    if str(draft.validation.get("preflight_status") or "") == "pending":
-        blockers.append("preflight questions must be answered before launch")
-
-    try:
-        spec = MissionSpec.from_dict(draft.draft_spec)
-        blockers.extend(spec.validate(stage="launch"))
-    except Exception as exc:
-        blockers.append(str(exc))
-
-    summary = blockers[0] if blockers else "Launch window clear. Mission can be started now."
-    return {
-        "ready": not blockers,
-        "blockers": blockers,
-        "summary": summary,
-    }
-
-
 def _draft_payload(draft: MissionDraftV1) -> dict:
     payload = draft.to_dict()
     payload["draft_kind"] = _draft_kind(draft)
-    plan_runs = _plan_store().list_runs_for_draft(draft.id)
-    plan_versions = _plan_store().list_versions_for_draft(draft.id)
-    payload["plan_runs"] = [run.to_dict() for run in plan_runs]
-    payload["plan_versions"] = [version.to_dict() for version in plan_versions]
+    payload["plan_runs"] = [run.to_dict() for run in _plan_store().list_runs_for_draft(draft.id)]
+    payload["plan_versions"] = [version.to_dict() for version in _plan_store().list_versions_for_draft(draft.id)]
     latest_version_id = str(payload.get("validation", {}).get("latest_plan_version_id") or "")
     if latest_version_id:
         version = _plan_store().load_version(latest_version_id)
@@ -219,7 +208,6 @@ def _draft_payload(draft: MissionDraftV1) -> dict:
         "source_version_id": str(repair.get("source_version_id") or ""),
         "gate_reason": str(repair.get("gate_reason") or ""),
     }
-    payload["launch_status"] = _build_launch_status(draft, plan_runs=plan_runs, plan_versions=plan_versions)
     return payload
 
 
@@ -416,6 +404,9 @@ def _create_draft(body: dict) -> tuple[int, dict]:
     if not isinstance(validation, dict):
         validation = {}
     draft_kind = _draft_kind_from_validation(validation)
+    black_hole_error = _guard_black_hole_access(validation)
+    if black_hole_error is not None:
+        return black_hole_error
     validation = {
         **validation,
         "draft_kind": draft_kind,
@@ -481,6 +472,9 @@ def _patch_spec(draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
 
     expected_revision = body.get("expected_revision")
     if not isinstance(expected_revision, int):
@@ -514,6 +508,9 @@ def _import_yaml(draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
 
     expected_revision = body.get("expected_revision")
     if not isinstance(expected_revision, int):
@@ -593,6 +590,9 @@ def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
 
     if str(draft.validation.get("preflight_status") or "") != "pending":
         return 409, {"error": "preflight is not pending for this draft"}
@@ -675,6 +675,9 @@ def _submit_repair(draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
 
     expected_revision = body.get("expected_revision")
     if not isinstance(expected_revision, int):
@@ -769,19 +772,25 @@ def _start_draft(draft_id: str) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
-    launch_status = _build_launch_status(draft)
-    if not launch_status["ready"]:
-        blockers = list(launch_status["blockers"] or [])
-        route_level = {
-            f"Draft status is {draft.status!r}, expected 'draft'": 409,
-            "black hole drafts cannot launch missions directly": 409,
-            "preflight questions must be answered before launch": 409,
-        }
-        if blockers and blockers[0] in route_level:
-            return route_level[blockers[0]], {"error": blockers[0], "launch_status": launch_status}
-        return 422, {"errors": blockers, "launch_status": launch_status}
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
 
-    spec = MissionSpec.from_dict(draft.draft_spec)
+    if draft.status != "draft":
+        return 409, {"error": f"Draft status is {draft.status!r}, expected 'draft'"}
+    if _draft_kind(draft) != _SIMPLE_PLAN_KIND:
+        return 409, {"error": "black hole drafts cannot launch missions directly"}
+    if str(draft.validation.get("preflight_status") or "") == "pending":
+        return 409, {"error": "preflight questions must be answered before launch"}
+
+    try:
+        spec = MissionSpec.from_dict(draft.draft_spec)
+        issues = spec.validate(stage="launch")
+    except Exception as exc:
+        return 422, {"errors": [str(exc)]}
+
+    if issues:
+        return 422, {"errors": issues}
 
     # Crash recovery: if mission_id was already assigned and state file exists, skip re-creation.
     existing_mid = draft.validation.get("mission_id")
@@ -829,6 +838,9 @@ def _start_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
     if _draft_kind(draft) != _BLACK_HOLE_KIND:
         return 409, {"error": "draft is not a black hole plan"}
     if draft.status != "draft":
@@ -886,6 +898,9 @@ def _get_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
     if _draft_kind(draft) != _BLACK_HOLE_KIND:
         return 409, {"error": "draft is not a black hole plan"}
     return 200, _black_hole_payload(draft)
@@ -895,6 +910,9 @@ def _pause_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
     if _draft_kind(draft) != _BLACK_HOLE_KIND:
         return 409, {"error": "draft is not a black hole plan"}
     campaign = _black_hole_store().latest_for_draft(draft_id)
@@ -912,6 +930,9 @@ def _resume_black_hole_campaign(draft_id: str, body: dict) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
     if _draft_kind(draft) != _BLACK_HOLE_KIND:
         return 409, {"error": "draft is not a black hole plan"}
     campaign = _black_hole_store().latest_for_draft(draft_id)
@@ -947,6 +968,9 @@ def _stop_black_hole_campaign(draft_id: str) -> tuple[int, dict]:
     draft, error = _load_draft_or_404(draft_id)
     if error is not None:
         return error
+    black_hole_error = _guard_black_hole_access(draft.validation)
+    if black_hole_error is not None:
+        return black_hole_error
     if _draft_kind(draft) != _BLACK_HOLE_KIND:
         return 409, {"error": "draft is not a black hole plan"}
     campaign = _black_hole_store().latest_for_draft(draft_id)
@@ -1083,11 +1107,17 @@ def get(handler, parts: list[str], query: dict) -> tuple[int, dict | None]:
         draft, error = _load_draft_or_404(parts[3])
         if error is not None:
             return error
+        black_hole_error = _guard_black_hole_access(draft.validation)
+        if black_hole_error is not None:
+            return black_hole_error
         return 200, _draft_payload(draft)
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "runs":
         draft, error = _load_draft_or_404(parts[3])
         if error is not None:
             return error
+        black_hole_error = _guard_black_hole_access(draft.validation)
+        if black_hole_error is not None:
+            return black_hole_error
         return 200, {"draft_id": draft.id, "plan_runs": [run.to_dict() for run in _plan_store().list_runs_for_draft(draft.id)]}
     if len(parts) == 5 and parts[1] == "plan" and parts[2] == "drafts" and parts[4] == "black-hole":
         return _get_black_hole_campaign(parts[3])

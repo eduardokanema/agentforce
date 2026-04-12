@@ -3,7 +3,7 @@ import MissionCard from '../components/MissionCard';
 import { archiveMission, deleteMission, discardPlanDraft, restartMission, stopMission, unarchiveMission } from '../lib/api';
 import { useMissionList } from '../hooks/useMissionList';
 import { useToast } from '../hooks/useToast';
-import type { MissionSummary } from '../lib/types';
+import { BLACK_HOLE_ROUTE, isBlackHoleEnabled, type LabsConfig, type MissionSummary, PLAN_ROUTE } from '../lib/types';
 
 function LoadingSkeleton() {
   return (
@@ -75,9 +75,10 @@ function MetricsStrip({ missions }: { missions: MissionSummary[] }) {
   );
 }
 
-export default function MissionsPage() {
+export default function MissionsPage({ labs }: { labs?: LabsConfig }) {
   const { missions, loading, refresh } = useMissionList();
   const { addToast } = useToast();
+  const blackHoleEnabled = isBlackHoleEnabled(labs);
 
   const handleStop = async (missionId: string): Promise<void> => {
     try {
@@ -148,16 +149,18 @@ export default function MissionsPage() {
         <div className="flex flex-wrap gap-2">
           <Link
             className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
-            to="/plan"
+            to={PLAN_ROUTE}
           >
             + New Mission
           </Link>
-          <Link
-            className="inline-flex items-center rounded-full border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-semibold text-amber transition-colors hover:bg-amber/15 hover:no-underline"
-            to="/black-hole"
-          >
-            + New Black Hole
-          </Link>
+          {blackHoleEnabled ? (
+            <Link
+              className="inline-flex items-center rounded-full border border-amber/30 bg-amber/10 px-3 py-1.5 text-[11px] font-semibold text-amber transition-colors hover:bg-amber/15 hover:no-underline"
+              to={BLACK_HOLE_ROUTE}
+            >
+              + New Black Hole
+            </Link>
+          ) : null}
         </div>
       </header>
 
@@ -168,13 +171,17 @@ export default function MissionsPage() {
       ) : missions.length === 0 ? (
         <section className="rounded-lg border border-border bg-card px-4 py-5 text-sm text-dim">
           <span>No missions yet. </span>
-          <Link className="text-cyan hover:no-underline" to="/plan">
+          <Link className="text-cyan hover:no-underline" to={PLAN_ROUTE}>
             Launch one with Plan Mode →
           </Link>
-          <span> or </span>
-          <Link className="text-amber hover:no-underline" to="/black-hole">
-            arm a Black Hole →
-          </Link>
+          {blackHoleEnabled ? (
+            <>
+              <span> or </span>
+              <Link className="text-amber hover:no-underline" to={BLACK_HOLE_ROUTE}>
+                arm a Black Hole →
+              </Link>
+            </>
+          ) : null}
         </section>
       ) : (
         <ul className="grid gap-4">

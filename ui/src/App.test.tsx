@@ -1,6 +1,12 @@
 import { createRoot, type Root } from 'react-dom/client';
-import { act, type ReactElement } from 'react';
+import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_LABS_CONFIG, MISSIONS_ROUTE, isBlackHoleEnabled, type LabsConfig } from './lib/types';
+
+const api = vi.hoisted(() => ({
+  getConfig: vi.fn(),
+  selectLabsConfig: vi.fn(),
+}));
 
 beforeEach(() => {
   Object.defineProperty(window, 'matchMedia', {
@@ -12,11 +18,18 @@ beforeEach(() => {
       removeEventListener: vi.fn(),
     })),
   });
+  api.getConfig.mockResolvedValue({ labs: { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true } });
+  api.selectLabsConfig.mockImplementation((config) => config?.labs ?? DEFAULT_LABS_CONFIG);
 });
 
+vi.mock('./lib/api', () => ({
+  getConfig: api.getConfig,
+  selectLabsConfig: api.selectLabsConfig,
+}));
+
 vi.mock('./components/Sidebar', () => ({
-  default: function Sidebar() {
-    return <div data-testid="sidebar">Sidebar</div>;
+  default: function Sidebar({ labs }: { labs: LabsConfig }) {
+    return <div data-testid="sidebar">Sidebar {String(isBlackHoleEnabled(labs))}</div>;
   },
 }));
 
@@ -27,8 +40,8 @@ vi.mock('./components/HudBar', () => ({
 }));
 
 vi.mock('./pages/MissionsPage', () => ({
-  default: function MissionsPage() {
-    return <div data-testid="page">Missions page</div>;
+  default: function MissionsPage({ labs }: { labs: LabsConfig }) {
+    return <div data-testid="page">Missions page {String(isBlackHoleEnabled(labs))}</div>;
   },
 }));
 
@@ -45,14 +58,14 @@ vi.mock('./pages/TaskDetailPage', () => ({
 }));
 
 vi.mock('./pages/PlanModePage', () => ({
-  default: function PlanModePage() {
-    return <div data-testid="page">Plan mode page</div>;
+  default: function PlanModePage({ labs }: { labs: LabsConfig }) {
+    return <div data-testid="page">Plan mode page {String(isBlackHoleEnabled(labs))}</div>;
   },
 }));
 
 vi.mock('./pages/BlackHoleModePage', () => ({
-  default: function BlackHoleModePage() {
-    return <div data-testid="page">Black hole page</div>;
+  default: function BlackHoleModePage({ labs }: { labs: LabsConfig }) {
+    return <div data-testid="page">Black hole page {String(isBlackHoleEnabled(labs))}</div>;
   },
 }));
 
@@ -83,36 +96,63 @@ function renderAt(pathname: string): { root: Root; container: HTMLDivElement } {
   return { root, container };
 }
 
+function flushPromises(): Promise<void> {
+  return act(async () => {
+    await Promise.resolve();
+  });
+}
+
 afterEach(() => {
   document.body.innerHTML = '';
   window.history.pushState({}, '', '/');
+  vi.clearAllMocks();
 });
 
 describe('App routes', () => {
-  it('renders the shell and the plan route', () => {
+  it('renders the shell and the plan route', async () => {
     const { root, container } = renderAt('/plan');
+    await flushPromises();
 
+    expect(api.getConfig).toHaveBeenCalledTimes(1);
     expect(container.querySelector('[data-testid="sidebar"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="hudbar"]')).toBeTruthy();
-    expect(container.textContent).toContain('Plan mode page');
+    expect(container.textContent).toContain('Plan mode page true');
 
     act(() => {
       root.unmount();
     });
   });
 
-  it('renders the black-hole route', () => {
+  it('renders the black-hole route when Labs enables it', async () => {
     const { root, container } = renderAt('/black-hole');
+    await flushPromises();
 
-    expect(container.textContent).toContain('Black hole page');
+    expect(container.textContent).toContain('Black hole page true');
 
     act(() => {
       root.unmount();
     });
   });
 
-  it('renders the mission route', () => {
+  it('redirects the black-hole route when Labs disables it', async () => {
+    api.getConfig.mockResolvedValue({ labs: DEFAULT_LABS_CONFIG });
+    api.selectLabsConfig.mockImplementation(() => DEFAULT_LABS_CONFIG);
+
+    const { root, container } = renderAt('/black-hole');
+    await flushPromises();
+
+    expect(window.location.pathname).toBe(MISSIONS_ROUTE);
+    expect(container.textContent).toContain('Missions page false');
+    expect(container.textContent).not.toContain('Black hole page');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('renders the mission route', async () => {
     const { root, container } = renderAt('/mission/mission-123');
+    await flushPromises();
 
     expect(container.textContent).toContain('Mission detail page');
 
@@ -121,14 +161,16 @@ describe('App routes', () => {
     });
   });
 
-  it('renders the connectors and telemetry routes', () => {
+  it('renders the connectors and telemetry routes', async () => {
     const connectors = renderAt('/models');
+    await flushPromises();
     expect(connectors.container.textContent).toContain('Connectors page');
     act(() => {
       connectors.root.unmount();
     });
 
     const telemetry = renderAt('/telemetry');
+    await flushPromises();
     expect(telemetry.container.textContent).toContain('Telemetry page');
     act(() => {
       telemetry.root.unmount();
