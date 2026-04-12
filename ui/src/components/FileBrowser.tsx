@@ -1,11 +1,16 @@
 import { useEffect, useState } from 'react';
-import { getConfig, getFilesystemListing } from '../lib/api';
+import { createFilesystemFolder, getConfig, getFilesystemListing } from '../lib/api';
 import type { FilesystemEntry } from '../lib/types';
 
 interface FileBrowserProps {
   selected: string[];
   onSelect: (paths: string[]) => void;
   initialPath?: string;
+  selectionMode?: 'single' | 'multiple';
+  selectedLabel?: string;
+  selectButtonLabel?: string;
+  allowRemoval?: boolean;
+  allowCreateFolder?: boolean;
 }
 
 function BreadcrumbNav({
@@ -59,13 +64,24 @@ function BreadcrumbNav({
   );
 }
 
-export default function FileBrowser({ selected, onSelect, initialPath }: FileBrowserProps) {
+export default function FileBrowser({
+  selected,
+  onSelect,
+  initialPath,
+  selectionMode = 'multiple',
+  selectedLabel = 'Selected workspaces',
+  selectButtonLabel = 'Select this folder',
+  allowRemoval = true,
+  allowCreateFolder = true,
+}: FileBrowserProps) {
   const [allowedRoots, setAllowedRoots] = useState<string[]>([]);
   const [currentPath, setCurrentPath] = useState('');
   const [entries, setEntries] = useState<FilesystemEntry[]>([]);
   const [parent, setParent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
 
   async function loadListing(path: string): Promise<void> {
     setLoading(true);
@@ -127,11 +143,34 @@ export default function FileBrowser({ selected, onSelect, initialPath }: FileBro
 
   const handleSelect = () => {
     if (!currentPath || selected.includes(currentPath)) return;
+    if (selectionMode === 'single') {
+      onSelect([currentPath]);
+      return;
+    }
     onSelect([...selected, currentPath]);
   };
 
   const handleRemove = (path: string) => {
     onSelect(selected.filter((p) => p !== path));
+  };
+
+  const handleCreateFolder = async () => {
+    const folderName = newFolderName.trim();
+    if (!currentPath || !folderName) {
+      return;
+    }
+    setCreatingFolder(true);
+    setError(null);
+    try {
+      const created = await createFilesystemFolder(currentPath, folderName);
+      setNewFolderName('');
+      navigate(created.path);
+    } catch (err) {
+      const nextError = err instanceof Error ? err : new Error('Failed to create directory');
+      setError(nextError.message);
+    } finally {
+      setCreatingFolder(false);
+    }
   };
 
   const isCurrentSelected = currentPath ? selected.includes(currentPath) : false;
@@ -194,6 +233,34 @@ export default function FileBrowser({ selected, onSelect, initialPath }: FileBro
         )}
       </div>
 
+      {allowCreateFolder && (
+        <div className="flex items-center gap-2 border-t border-border px-3 py-2">
+          <input
+            type="text"
+            value={newFolderName}
+            onChange={(event) => setNewFolderName(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                void handleCreateFolder();
+              }
+            }}
+            placeholder="New folder name"
+            className="w-full rounded border border-border bg-card px-3 py-1.5 text-[12px] text-text outline-none placeholder:text-dim focus:border-cyan/50"
+          />
+          <button
+            type="button"
+            disabled={!currentPath || !newFolderName.trim() || creatingFolder}
+            className="inline-flex shrink-0 items-center rounded-full border border-border px-3 py-1 text-[11px] text-dim transition-colors hover:bg-card hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={() => {
+              void handleCreateFolder();
+            }}
+          >
+            {creatingFolder ? 'Creating…' : 'Create folder'}
+          </button>
+        </div>
+      )}
+
       {/* Select button */}
       <div className="flex items-center gap-2 border-t border-border px-3 py-2">
         <button
@@ -202,7 +269,7 @@ export default function FileBrowser({ selected, onSelect, initialPath }: FileBro
           className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 text-[11px] text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-40"
           onClick={handleSelect}
         >
-          {isCurrentSelected ? 'Already selected' : 'Select this folder'}
+          {isCurrentSelected ? (selectionMode === 'single' ? 'Current start folder' : 'Already selected') : selectButtonLabel}
         </button>
         {currentPath && (
           <span className="min-w-0 truncate font-mono text-[10px] text-muted">{currentPath}</span>
@@ -212,7 +279,7 @@ export default function FileBrowser({ selected, onSelect, initialPath }: FileBro
       {/* Selected paths */}
       {selected.length > 0 && (
         <div className="border-t border-border px-3 py-2">
-          <p className="mb-1.5 text-[10px] uppercase tracking-wider text-muted">Selected workspaces</p>
+          <p className="mb-1.5 text-[10px] uppercase tracking-wider text-muted">{selectedLabel}</p>
           <div className="flex flex-wrap gap-1.5">
             {selected.map((path) => (
               <span
@@ -220,14 +287,16 @@ export default function FileBrowser({ selected, onSelect, initialPath }: FileBro
                 className="flex items-center gap-1 rounded-full border border-border bg-card px-2 py-0.5 font-mono text-[10px] text-dim"
               >
                 <span className="max-w-48 truncate">{path}</span>
-                <button
-                  type="button"
-                  aria-label={`Remove ${path}`}
-                  className="text-muted transition-colors hover:text-red"
-                  onClick={() => handleRemove(path)}
-                >
-                  ×
-                </button>
+                {allowRemoval ? (
+                  <button
+                    type="button"
+                    aria-label={`Remove ${path}`}
+                    className="text-muted transition-colors hover:text-red"
+                    onClick={() => handleRemove(path)}
+                  >
+                    ×
+                  </button>
+                ) : null}
               </span>
             ))}
           </div>

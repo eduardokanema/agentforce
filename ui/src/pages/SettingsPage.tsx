@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import FileBrowser from '../components/FileBrowser';
 import { useToast } from '../hooks/useToast';
 import type { AppConfig, DefaultCaps } from '../lib/types';
 import { getConfig, updateConfig } from '../lib/api';
@@ -105,22 +106,22 @@ export default function SettingsPage() {
         ) : (
           <div className="space-y-5">
             <div>
-              <label
-                htmlFor="filesystem-default-start-path"
-                className="mb-1 block text-[12px] font-medium text-text"
-              >
+              <div className="mb-2 block text-[12px] font-medium text-text">
                 Workspace Browser Start Path
-              </label>
-              <input
-                id="filesystem-default-start-path"
-                type="text"
-                value={defaultStartPath}
-                onChange={(e) => setDefaultStartPath(e.target.value)}
-                className="w-full max-w-xl rounded border border-border bg-surface px-3 py-2 text-sm text-text outline-none focus:border-cyan/50"
-              />
-              <p className="mt-1 text-[11px] text-muted">
-                Used as the initial folder when selecting workspaces. Example: <code>~/Projects</code>
+              </div>
+              <p className="mb-3 text-[11px] text-muted">
+                Navigate to the folder you want the shared workspace browser to open in by default. You can also create a folder here before selecting it.
               </p>
+              <FileBrowser
+                selected={defaultStartPath ? [defaultStartPath] : []}
+                onSelect={(paths) => setDefaultStartPath(paths[0] ?? DEFAULT_WORKSPACE_BROWSER_START)}
+                initialPath={defaultStartPath}
+                selectionMode="single"
+                selectedLabel="Selected start folder"
+                selectButtonLabel="Use this folder"
+                allowRemoval={false}
+                allowCreateFolder
+              />
             </div>
 
             {FIELDS.map((f) => (

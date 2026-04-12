@@ -1455,6 +1455,46 @@ def test_post_config_updates_default_workspace_browser_start_path(tmp_path, monk
     assert saved["filesystem"]["default_start_path"] == "~/Code"
 
 
+def test_post_filesystem_creates_directory(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    config = {
+        "filesystem": {
+            "allowed_base_paths": [str(tmp_path)],
+        },
+    }
+    (tmp_path / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
+
+    payload = json.dumps({"path": str(tmp_path), "name": "new-folder"}).encode("utf-8")
+    handler = _make_handler("/api/filesystem")
+    handler.rfile = BytesIO(payload)
+    handler.headers["Content-Length"] = str(len(payload))
+    handler.do_POST()
+
+    assert handler.send_response.call_args.args == (201,)
+    body = _response_body(handler)
+    assert body["path"] == str((tmp_path / "new-folder").resolve())
+    assert (tmp_path / "new-folder").is_dir()
+
+
+def test_get_filesystem_returns_parent_within_allowed_root(tmp_path, monkeypatch):
+    _patch_home(monkeypatch, tmp_path)
+    workspace = tmp_path / "workspace"
+    child = workspace / "child"
+    child.mkdir(parents=True)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"filesystem": {"allowed_base_paths": [str(workspace)]}}),
+        encoding="utf-8",
+    )
+
+    handler = _make_handler(f"/api/filesystem?path={child}")
+    handler.do_GET()
+
+    assert handler.send_response.call_args.args == (200,)
+    body = _response_body(handler)
+    assert body["path"] == str(child.resolve())
+    assert body["parent"] == str(workspace.resolve())
+
+
 def test_post_config_invalid_concurrent_workers_returns_400(tmp_path, monkeypatch):
     _patch_home(monkeypatch, tmp_path)
 

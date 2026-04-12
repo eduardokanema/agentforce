@@ -40,6 +40,7 @@ _ROUTES: list[tuple[str, re.Pattern[str], object]] = [
     ("GET", re.compile(r"^/api/config$"), filesystem.get),
     ("POST", re.compile(r"^/api/config$"), caps_config.post),
     ("GET", re.compile(r"^/api/filesystem$"), filesystem.get),
+    ("POST", re.compile(r"^/api/filesystem$"), filesystem.post),
     ("GET", re.compile(r"^/api/plan(?:/.*)?$"), plan.get),
     ("POST", re.compile(r"^/api/plan(?:/.*)?$"), plan.post),
     ("PATCH", re.compile(r"^/api/plan(?:/.*)?$"), plan.patch),

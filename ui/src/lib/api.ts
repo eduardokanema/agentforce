@@ -680,6 +680,14 @@ export function getFilesystemListing(path: string): Promise<FilesystemListing> {
   return requestJson<FilesystemListing>(`/api/filesystem?path=${encodeURIComponent(path)}`);
 }
 
+export function createFilesystemFolder(path: string, name: string): Promise<{ path: string }> {
+  return requestJson<{ path: string }>('/api/filesystem', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, name }),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Daemon control
 // ---------------------------------------------------------------------------

@@ -36,71 +36,71 @@ The public MVP is the planning-and-execution core of AgentForce. It should be pr
 - [x] The user can select one or more workspace paths before planning begins.
 - [x] The user can choose approved models and planning profiles before the first run.
 - [x] The system can generate an initial mission draft from the brief.
-- [ ] The draft can be refined through a conversational planning workflow.
+- [x] The draft can be refined through a conversational planning workflow.
 
 #### 2. Preflight Clarification Before First Plan Run
 
-- [ ] The system can pause planning to ask structured clarification questions when the brief is incomplete or ambiguous.
-- [ ] The user can answer or explicitly skip preflight questions.
-- [ ] Planning does not proceed until the preflight gate is resolved.
+- [x] The system can pause planning to ask structured clarification questions when the brief is incomplete or ambiguous.
+- [x] The user can answer or explicitly skip preflight questions.
+- [x] Planning does not proceed until the preflight gate is resolved.
 
 #### 3. Structured Multi-Step Planning Pipeline
 
-- [ ] The planning workflow includes planner synthesis, mission plan pass, technical critic, practical critic, and resolver stages.
+- [x] The planning workflow includes planner synthesis, mission plan pass, technical critic, practical critic, and resolver stages.
 - [ ] The user can see planning progress by stage instead of only a generic loading state.
-- [ ] The system can produce a reviewed draft version that is ready for inspection before launch.
+- [x] The system can produce a reviewed draft version that is ready for inspection before launch.
 
 #### 4. Draft Inspection and Editing
 
-- [ ] The user can edit the mission name, mission goal, and definition of done.
-- [ ] The user can edit task titles, descriptions, acceptance criteria, dependencies, and output artifacts.
-- [ ] The user can configure execution defaults and per-task execution overrides where supported.
-- [ ] The user can correct or refine the draft before launch instead of accepting planner output as-is.
+- [x] The user can edit the mission name, mission goal, and definition of done.
+- [x] The user can edit task titles, descriptions, acceptance criteria, dependencies, and output artifacts.
+- [x] The user can configure execution defaults and per-task execution overrides where supported.
+- [x] The user can correct or refine the draft before launch instead of accepting planner output as-is.
 
 #### 5. Launch Readiness and Mission Launch
 
-- [ ] The system validates whether the draft is ready to launch.
-- [ ] Launch blockers are surfaced clearly before a mission starts.
-- [ ] A reviewed draft can be launched directly from Plan Mode.
-- [ ] Launching a mission places it into a persistent execution queue.
+- [x] The system validates whether the draft is ready to launch.
+- [x] Launch blockers are surfaced clearly before a mission starts.
+- [x] A reviewed draft can be launched directly from Plan Mode.
+- [x] Launching a mission places it into a persistent execution queue.
 
 #### 6. Mission Execution and Control
 
-- [ ] Missions execute through a persistent daemon-backed workflow.
-- [ ] Users can see a mission list with current status, cost, and progress signals.
-- [ ] Users can open a mission detail view to inspect task status, event history, and execution defaults.
-- [ ] Users can stop, restart, archive, delete, or readjust a mission from the product.
+- [x] Missions execute through a persistent daemon-backed workflow.
+- [x] Users can see a mission list with current status, cost, and progress signals.
+- [x] Users can open a mission detail view to inspect task status, event history, and execution defaults.
+- [x] Users can stop, restart, archive, delete, or readjust a mission from the product.
 
 #### 7. Task-Level Visibility and Review Gates
 
-- [ ] Users can inspect each task individually.
-- [ ] Users can view live or recent task output.
-- [ ] Every completed task goes through a review step.
-- [ ] Review results expose score, feedback, and blocking issues when available.
-- [ ] Tasks that do not pass review can retry with reviewer feedback.
+- [x] Users can inspect each task individually.
+- [x] Users can view live or recent task output.
+- [x] Every completed task goes through a review step.
+- [x] Review results expose score, feedback, and blocking issues when available.
+- [x] Tasks that do not pass review can retry with reviewer feedback.
 
 #### 8. Human Intervention and Recovery
 
 - [ ] The system can escalate blocked or exhausted work for human intervention.
 - [ ] A user can inject guidance into an in-progress task.
-- [ ] A user can resolve blocked work, retry tasks, or mark blocked work as failed when needed.
-- [ ] A user can change task execution settings when a task needs a different model profile.
-- [ ] A user can move a mission back into planning through a readjustment flow when the current trajectory is wrong.
+- [x] A user can resolve blocked work, retry tasks, or mark blocked work as failed when needed.
+- [x] A user can change task execution settings when a task needs a different model profile.
+- [x] A user can move a mission back into planning through a readjustment flow when the current trajectory is wrong.
 
 #### 9. Telemetry and Accountability
 
-- [ ] The product surfaces mission and task counts across runs.
-- [ ] The product tracks token usage and cost.
-- [ ] The product exposes retry distribution and cumulative cost views.
-- [ ] Telemetry can be inspected from the UI and exported for analysis.
+- [x] The product surfaces mission and task counts across runs.
+- [x] The product tracks token usage and cost.
+- [x] The product exposes retry distribution and cumulative cost views.
+- [x] Telemetry can be inspected from the UI and exported for analysis.
 
 ### Supporting but Secondary Surfaces
 
 These surfaces are part of the shipped product, but they are not the hero story of the public MVP:
 
-- [ ] Model and provider configuration
-- [ ] Ground Control and daemon health visibility
-- [ ] Default settings and execution caps
+- [x] Model and provider configuration
+- [x] Ground Control and daemon health visibility
+- [x] Default settings and execution caps
 
 ## Personas
 
