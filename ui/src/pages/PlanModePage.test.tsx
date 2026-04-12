@@ -219,7 +219,7 @@ describe('PlanModePage', () => {
     expect(container.textContent).toContain('Logbook');
     expect(container.textContent).not.toContain('Engineering Controls');
     expect(container.textContent).not.toContain('Planning History');
-    expect(container.querySelector('#planner-follow-up')).toBeNull();
+    expect(container.querySelector('#planner-follow-up')).toBeTruthy();
     expect(container.querySelector('input[aria-label="Mission name"]')).toBeNull();
     expect(container.querySelector('textarea[aria-label="Mission YAML export"]')).toBeNull();
 
@@ -416,6 +416,14 @@ describe('PlanModePage', () => {
 
     await act(async () => {
       option?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const reviewButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Review Answers'));
+    expect(reviewButton).toBeTruthy();
+
+    await act(async () => {
+      reviewButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const startButton = Array.from(container.querySelectorAll('button')).find((button) =>
@@ -882,7 +890,7 @@ describe('PlanModePage', () => {
       logbookButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(container.querySelector('textarea#planner-follow-up')).toBeNull();
+    expect(container.querySelector('textarea#planner-follow-up')).toBeTruthy();
     expect(container.textContent).toContain('Planning History');
 
     const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
@@ -1005,6 +1013,14 @@ describe('PlanModePage', () => {
 
     await act(async () => {
       option?.querySelector('input')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const reviewButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Review Answers'));
+    expect(reviewButton).toBeTruthy();
+
+    await act(async () => {
+      reviewButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     const resumeButton = Array.from(container.querySelectorAll('button')).find((button) =>

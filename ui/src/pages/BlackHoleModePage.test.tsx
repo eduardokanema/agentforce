@@ -383,6 +383,15 @@ describe("BlackHoleModePage", () => {
       acceptOption?.querySelector("input")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
+    const reviewButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Review Answers"),
+    );
+    expect(reviewButton).toBeTruthy();
+
+    await act(async () => {
+      reviewButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
     const resumeButton = Array.from(container.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Resume Locked Loop"),
     );

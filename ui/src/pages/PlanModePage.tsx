@@ -480,6 +480,62 @@ function SupportDock({
   );
 }
 
+function InlineFollowUpComposer({
+  message,
+  busy,
+  helperText,
+  onMessageChange,
+  onSend,
+}: {
+  message: string;
+  busy: boolean;
+  helperText: string;
+  onMessageChange: (value: string) => void;
+  onSend: () => void;
+}) {
+  return (
+    <section className="rounded-[1.05rem] border border-border bg-surface px-4 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+            Prompt Follow-up
+          </div>
+          <p className="mt-1 max-w-[56ch] text-xs leading-6 text-dim">
+            {helperText}
+          </p>
+        </div>
+        <span className="rounded-full border border-border bg-card px-3 py-1 text-[11px] text-dim">
+          {busy ? "Planner busy" : "Ready"}
+        </span>
+      </div>
+
+      <div className="mt-3">
+        <label className="sr-only" htmlFor="planner-follow-up">
+          Planner follow-up
+        </label>
+        <textarea
+          id="planner-follow-up"
+          rows={3}
+          className="w-full rounded-lg border border-border bg-card p-3 text-sm text-text outline-none placeholder:text-dim focus:border-cyan"
+          placeholder="Tell the planner what to adjust next..."
+          value={message}
+          onInput={(event) => onMessageChange(event.currentTarget.value)}
+        />
+        <div className="mt-3 flex justify-end">
+          <button
+            type="button"
+            className="rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={busy || message.trim() === ""}
+            onClick={onSend}
+          >
+            Send to Planner
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function PlanningProfilesSummary({
   draft,
   models,
@@ -727,12 +783,15 @@ function PhaseViewport({
   streaming,
   launching,
   launchReadiness,
+  followUpMessage,
   onRetryRun,
   onAnswerChange,
   onSubmitPreflight,
   onSkipPreflight,
   onSubmitRepair,
   onLaunch,
+  onFollowUpChange,
+  onFollowUpSend,
   onOpenSupportPanel,
 }: {
   selectedPhase: CockpitPhaseId;
@@ -751,12 +810,15 @@ function PhaseViewport({
   streaming: boolean;
   launching: boolean;
   launchReadiness: ReturnType<typeof derivePlanFlow>["launchReadiness"];
+  followUpMessage: string;
   onRetryRun: (runId: string) => void;
   onAnswerChange: (questionId: string, answer: PreflightAnswer) => void;
   onSubmitPreflight: () => void;
   onSkipPreflight: () => void;
   onSubmitRepair: () => void;
   onLaunch: () => void;
+  onFollowUpChange: (value: string) => void;
+  onFollowUpSend: () => void;
   onOpenSupportPanel: (panel: SupportPanelId) => void;
 }) {
   if (!draft) {
@@ -782,57 +844,58 @@ function PhaseViewport({
   if (selectedPhase === "briefing") {
     return (
       <section className="rounded-[1.15rem] border border-border bg-card p-5">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="section-title">Mission Brief</h2>
-            <h3 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-text">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+              Briefing
+            </div>
+            <h2 className="mt-2 text-[clamp(1.45rem,2vw,1.95rem)] font-semibold tracking-[-0.03em] text-text">
               {draft.draft_spec.name || "Untitled mission draft"}
-            </h3>
+            </h2>
+            <p className="mt-2 max-w-[64ch] text-sm leading-7 text-dim">
+              Keep this step lightweight: confirm the prompt, workspace footprint, and planning stack. Use deeper editing only when the mission itself needs revision.
+            </p>
           </div>
-          <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
-            Revision {draft.revision}
-          </div>
+          <button
+            type="button"
+            className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
+            onClick={() => onOpenSupportPanel("edit")}
+          >
+            Change Details
+          </button>
         </div>
-        <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(18rem,0.9fr)]">
-          <div className="space-y-4">
-            <div className="rounded-xl border border-border bg-surface px-4 py-4">
-              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Original Prompt</div>
-              <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-text">
-                {firstTurnPrompt(draft) || "No original prompt stored."}
-              </p>
-            </div>
-            <div className="rounded-xl border border-border bg-surface px-4 py-4">
-              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Goal</div>
-              <p className="mt-2 text-sm leading-7 text-text">{draft.draft_spec.goal}</p>
+        <div className="mt-5 grid gap-4 md:grid-cols-2">
+          <div className="rounded-xl border border-border bg-surface px-4 py-4">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Prompt</div>
+            <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-text">
+              {firstTurnPrompt(draft) || "No original prompt stored."}
+            </p>
+          </div>
+          <div className="rounded-xl border border-border bg-surface px-4 py-4">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Goal</div>
+            <p className="mt-2 text-sm leading-7 text-text">{draft.draft_spec.goal}</p>
+          </div>
+          <div className="rounded-xl border border-border bg-surface px-4 py-4">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Selected Folders</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {draft.workspace_paths.map((path) => (
+                <span key={path} className="rounded-full border border-border bg-card px-3 py-1 text-[11px] font-mono text-dim">
+                  {path}
+                </span>
+              ))}
             </div>
           </div>
-          <div className="space-y-4">
-            <div className="rounded-xl border border-border bg-surface px-4 py-4">
-              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Mission Footprint</div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] text-dim">
-                  {draft.workspace_paths.length} workspace{draft.workspace_paths.length === 1 ? "" : "s"}
-                </span>
-                <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] text-dim">
-                  {PLANNING_PROFILE_KEYS.length} planning profiles
-                </span>
-                <span className="rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] text-dim">
-                  {draft.draft_spec.tasks.length} task{draft.draft_spec.tasks.length === 1 ? "" : "s"}
-                </span>
-              </div>
-            </div>
-            <div className="rounded-xl border border-border bg-surface px-4 py-4">
-              <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Planning Stack</div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
-                  const profile = getProfileValue(draft, key);
-                  return (
-                    <span key={key} className="rounded-full border border-border bg-card px-3 py-1 text-[11px] text-dim">
-                      {label}: <span className="font-mono text-text">{profile.model || "Default"}</span>
-                    </span>
-                  );
-                })}
-              </div>
+          <div className="rounded-xl border border-border bg-surface px-4 py-4">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Selected Stack</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {PLANNING_PROFILE_KEYS.map(({ key, label }) => {
+                const profile = getProfileValue(draft, key);
+                return (
+                  <span key={key} className="rounded-full border border-border bg-card px-3 py-1 text-[11px] text-dim">
+                    {label}: <span className="font-mono text-text">{profile.model || "Default"}</span>
+                  </span>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -921,13 +984,13 @@ function PhaseViewport({
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
-                Planning Orbit
+                Planning
               </div>
               <h2 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-text">
                 {activeSubstep?.label || "Planner standing by"}
               </h2>
               <p className="mt-3 max-w-[64ch] text-sm leading-7 text-dim">
-                {activeSubstep?.summary || "The planner is waiting for guidance or the first queued run."}
+                {activeSubstep?.summary || "The planner is waiting for the next instruction or the first queued run."}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -944,9 +1007,9 @@ function PhaseViewport({
               <button
                 type="button"
                 className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
-                onClick={() => onOpenSupportPanel("transcript")}
+                onClick={() => onOpenSupportPanel("logbook")}
               >
-                Open Transcript
+                Open Details
               </button>
             </div>
           </div>
@@ -962,6 +1025,13 @@ function PhaseViewport({
             </span>
           </div>
         </section>
+        <InlineFollowUpComposer
+          message={followUpMessage}
+          busy={streaming || draft.preflight_status === "pending"}
+          helperText="Keep the planner moving from here. Use the drawer only when you need transcript history or edit surfaces."
+          onMessageChange={onFollowUpChange}
+          onSend={onFollowUpSend}
+        />
         <PlanningSubstepTracker title="Live Planning Orbit" steps={substeps} />
       </div>
     );
@@ -997,13 +1067,20 @@ function PhaseViewport({
               <button
                 type="button"
                 className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
-                onClick={() => onOpenSupportPanel("logbook")}
+                onClick={() => onOpenSupportPanel("transcript")}
               >
-                Open Logbook
+                Open Transcript
               </button>
             </div>
           </div>
         </section>
+        <InlineFollowUpComposer
+          message={followUpMessage}
+          busy={streaming || draft.preflight_status === "pending"}
+          helperText="Use follow-up prompts when the critics reveal ambiguity or when the resolver needs a sharper direction."
+          onMessageChange={onFollowUpChange}
+          onSend={onFollowUpSend}
+        />
         <PlanningSubstepTracker title="Stress Test Orbit" steps={substeps} />
         <div className="space-y-3">
           <StepFindingCard title="Technical Critic" step={stepsById.get("technical_critic")} />
@@ -1025,18 +1102,30 @@ function PhaseViewport({
         <section className="rounded-[1.15rem] border border-border bg-card p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h2 className="section-title">Finalize Review</h2>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+                Review
+              </div>
+              <h2 className="mt-2 text-xl font-semibold tracking-[-0.03em] text-text">Finalize Review</h2>
               <p className="mt-3 max-w-[68ch] text-sm leading-7 text-dim">
                 This pass is read-first. Check readiness, resolve blockers, then open edit mode only if the mission itself needs revision.
               </p>
             </div>
-            <button
-              type="button"
-              className="rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15"
-              onClick={() => onOpenSupportPanel("edit")}
-            >
-              Edit Mission
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded-full border border-cyan/30 bg-cyan/10 px-4 py-2 text-sm font-semibold text-cyan transition-colors hover:bg-cyan/15"
+                onClick={() => onOpenSupportPanel("edit")}
+              >
+                Edit Mission
+              </button>
+              <button
+                type="button"
+                className="rounded-full border border-border bg-surface px-4 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
+                onClick={() => onOpenSupportPanel("logbook")}
+              >
+                Open Evidence
+              </button>
+            </div>
           </div>
           <div className="mt-4 flex flex-wrap gap-2 text-[11px] text-dim">
             <span className="rounded-full border border-border bg-surface px-3 py-1">
@@ -1047,11 +1136,31 @@ function PhaseViewport({
             </span>
           </div>
         </section>
+        <InlineFollowUpComposer
+          message={followUpMessage}
+          busy={streaming || draft.preflight_status === "pending"}
+          helperText="If the review still feels off, send a precise follow-up before launching instead of diving straight into low-level edits."
+          onMessageChange={onFollowUpChange}
+          onSend={onFollowUpSend}
+        />
         <ValidationBoard
           conflictMessage={conflictMessage}
           summaryIssues={summaryIssues}
           advisoryIssues={loadingModels ? [] : advisoryIssues}
         />
+        <section className="rounded-[1.05rem] border border-border bg-card px-4 py-4">
+          <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Final Summary</div>
+          <div className="mt-3 grid gap-4 md:grid-cols-2">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Goal</div>
+              <p className="mt-1 text-sm leading-6 text-text">{draft.draft_spec.goal}</p>
+            </div>
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Tasks</div>
+              <div className="mt-1 text-sm text-text">{draft.draft_spec.tasks.length} planned task{draft.draft_spec.tasks.length === 1 ? "" : "s"}</div>
+            </div>
+          </div>
+        </section>
       </div>
     );
   }
@@ -1140,9 +1249,26 @@ function PhaseViewport({
                   <div className="rounded-lg border border-dashed border-border px-3 py-3 text-sm text-dim">
                     Final resolver notes will land here after promotion.
                   </div>
-                ) : null}
+            ) : null}
+          </div>
+          <div className="rounded-xl border border-border bg-surface px-4 py-4">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Mission Snapshot</div>
+            <div className="mt-3 space-y-3 text-sm text-text">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Goal</div>
+                <div className="mt-1">{draft.draft_spec.goal}</div>
+              </div>
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Tasks</div>
+                <div className="mt-1">{draft.draft_spec.tasks.length} selected task{draft.draft_spec.tasks.length === 1 ? "" : "s"}</div>
+              </div>
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Workspaces</div>
+                <div className="mt-1">{draft.workspace_paths.length} attached workspace{draft.workspace_paths.length === 1 ? "" : "s"}</div>
               </div>
             </div>
+          </div>
+        </div>
           </div>
         </div>
       </section>
@@ -1562,17 +1688,7 @@ export default function PlanModePage() {
     );
   }
 
-  const completedPhaseCount = planFlow.phases.filter((phase) => phase.status === "complete").length;
-  const completedSubsteps = planFlow.substeps.filter((step) => step.status === "complete").length;
   const selectedPhaseState = planFlow.phases.find((phase) => phase.id === selectedPhase) ?? planFlow.phases[0];
-  const heroAction = selectedPhase === planFlow.currentPhaseId
-    ? planFlow.nextAction
-    : selectedPhaseState.status === "complete"
-      ? "Review what happened in this completed stage."
-      : selectedPhaseState.status === "up_next"
-        ? "This stage unlocks after the live stage completes."
-        : selectedPhaseState.blocker ?? planFlow.nextAction;
-  const latestFailed = latestFailedRun(draft);
   const handleTaskChange = (taskId: string, patch: Partial<MissionSpec["tasks"][number]>): void => {
     updateCurrentDraft((current) =>
       updateDraftSpec(current, {
@@ -1740,7 +1856,7 @@ export default function PlanModePage() {
             </div>
           ) : null}
           <p className="mt-2 max-w-[72ch] text-sm leading-7 text-dim">
-            Guided mission planning with a live orbital map of what is happening now, what already happened, and what still blocks launch.
+            One focused step at a time. Keep the main surface clean, with deeper controls and history available only when needed.
           </p>
         </div>
         <div className="flex flex-wrap gap-2 text-[11px] text-dim">
@@ -1759,43 +1875,18 @@ export default function PlanModePage() {
         </div>
       ) : null}
 
-      <FlightPlanProgressRail
-        phases={planFlow.phases}
-        selectedPhase={selectedPhase}
-        onSelectPhase={(phaseId) => {
-          setAutoFollowPhase(false);
-          setSelectedPhase(phaseId);
-        }}
-      />
-
-      <PhaseHero
-        phaseLabel={selectedPhaseState.label}
-        selectedPhaseStatus={selectedPhaseState.status}
-        currentPhaseId={planFlow.currentPhaseId}
-        nextAction={heroAction}
-        activeSummary={selectedPhaseState.summary}
-        currentRun={planFlow.currentRun}
-        currentVersion={planFlow.latestVersion}
-        completedPhases={completedPhaseCount}
-        completedSubsteps={completedSubsteps}
-        latestRunIssue={selectedPhase === planFlow.currentPhaseId ? planFlow.latestRunIssue : null}
-        launchReadinessSummary={planFlow.launchReadiness.summary}
-        latestFailed={latestFailed}
-        retryingRunId={retryingRunId}
-        onRetryLatestRun={(runId) => {
-          void handleRetryRun(runId);
-        }}
-      />
-
       {!draft ? (
         <section className="rounded-[1.15rem] border border-border bg-card p-5">
           <div className="mb-5 max-w-[62ch]">
-            <h2 className="section-title">Mission Brief</h2>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+              Briefing
+            </div>
+            <h2 className="mt-2 text-[clamp(1.55rem,2.2vw,2rem)] font-semibold tracking-[-0.03em] text-text">Mission Brief</h2>
             <p className="mt-2 text-sm leading-7 text-dim">
-              Define the mission, choose the workspaces, approve the planning models, and open the flight plan. Nothing else needs attention yet.
+              Start with the prompt, selected folders, and planning stack. Everything else can wait until the planner has something concrete to react to.
             </p>
           </div>
-          <section className="rounded-[1.15rem] border border-border bg-card p-5">
+          <section className="rounded-[1.15rem] border border-border bg-surface p-5">
             <label
               className="block text-sm font-medium text-text"
               htmlFor="plan-prompt"
@@ -1823,7 +1914,7 @@ export default function PlanModePage() {
                 Planning Stack
               </div>
               <p className="text-xs text-dim">
-                Choose the exact `Model + Thinking` profile for each planning role.
+                Keep the planning models explicit up front. These profiles shape the first run.
               </p>
             </div>
 
@@ -1869,7 +1960,7 @@ export default function PlanModePage() {
               <span className="text-[11px] text-dim">
                 {loadingModels
                   ? "Loading models..."
-                  : `${PLANNING_PROFILE_KEYS.length} execution profile(s) armed`}
+                  : `${PLANNING_PROFILE_KEYS.length} planning roles selected`}
               </span>
               <button
                 type="button"
@@ -1887,10 +1978,82 @@ export default function PlanModePage() {
       ) : (
         <div className={activeSupportPanel ? "grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]" : "space-y-5"}>
           <div className="space-y-5">
-            <SupportDock
-              activePanel={activeSupportPanel}
-              onToggle={toggleSupportPanel}
-            />
+            <section className="rounded-[1.1rem] border border-border bg-card px-4 py-4">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+                    Planning Flow
+                  </div>
+                  <p className="mt-1 text-xs text-dim">
+                    Focus on the current step. Past steps stay reviewable without crowding the main surface.
+                  </p>
+                </div>
+                <div className="rounded-full border border-border bg-surface px-3 py-1 text-[11px] text-dim">
+                  {selectedPhaseState.label}
+                </div>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {planFlow.phases.map((phase, index) => {
+                  const interactive = phase.available;
+                  const selected = phase.id === selectedPhase;
+                  return (
+                    <button
+                      key={phase.id}
+                      type="button"
+                      disabled={!interactive}
+                      onClick={() => {
+                        if (!interactive) {
+                          return;
+                        }
+                        setAutoFollowPhase(false);
+                        setSelectedPhase(phase.id);
+                      }}
+                      className={[
+                        "rounded-full border px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                        selected
+                          ? "border-cyan/35 bg-cyan/10 text-cyan"
+                          : phase.status === "complete"
+                            ? "border-green/25 bg-green/10 text-green"
+                            : phase.status === "up_next"
+                              ? "border-amber/25 bg-amber/10 text-amber"
+                              : "border-border bg-surface text-dim hover:bg-card-hover hover:text-text",
+                      ].join(" ")}
+                    >
+                      <span className="mr-2 font-mono text-[11px]">{String(index + 1).padStart(2, "0")}</span>
+                      {phase.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-4">
+                <div className="text-sm text-dim">
+                  {selectedPhaseState.summary}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="rounded-full border border-border bg-surface px-3 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
+                    onClick={() => toggleSupportPanel("edit")}
+                  >
+                    Edit Mission
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full border border-border bg-surface px-3 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
+                    onClick={() => toggleSupportPanel("transcript")}
+                  >
+                    Transcript
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-full border border-border bg-surface px-3 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover hover:text-text"
+                    onClick={() => toggleSupportPanel("logbook")}
+                  >
+                    Logbook
+                  </button>
+                </div>
+              </div>
+            </section>
             <PhaseViewport
               selectedPhase={selectedPhase}
               draft={draft}
@@ -1908,6 +2071,7 @@ export default function PlanModePage() {
               streaming={streaming}
               launching={launching}
               launchReadiness={planFlow.launchReadiness}
+              followUpMessage={followUpMessage}
               onRetryRun={(runId) => {
                 void handleRetryRun(runId);
               }}
@@ -1929,6 +2093,10 @@ export default function PlanModePage() {
               }}
               onLaunch={() => {
                 void handleLaunch();
+              }}
+              onFollowUpChange={setFollowUpMessage}
+              onFollowUpSend={() => {
+                void handleFollowUp();
               }}
               onOpenSupportPanel={(panel) => {
                 setActiveSupportPanel(panel);
