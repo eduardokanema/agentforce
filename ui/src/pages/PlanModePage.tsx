@@ -14,6 +14,7 @@ import PreflightQuestionsPanel from "../components/planning/PreflightQuestionsPa
 import PlannerTranscriptPanel from "../components/planning/PlannerTranscriptPanel";
 import PlanningSubstepTracker from "../components/planning/PlanningSubstepTracker";
 import TaskTimelinePanel from "../components/planning/TaskTimelinePanel";
+import Terminal from "../components/Terminal";
 import ValidationBoard from "../components/planning/ValidationBoard";
 import {
   createPlanDraft,
@@ -59,6 +60,14 @@ const PLANNING_PROFILE_KEYS = [
   { key: "critic_practical", label: "Practical Critic" },
   { key: "resolver", label: "Resolver" },
 ] as const;
+
+const PLANNING_STEP_LABELS: Record<PlanningSubstepId, string> = {
+  planner_synthesis: "Planner Synthesis",
+  mission_plan_pass: "Mission Plan Pass",
+  technical_critic: "Technical Critic",
+  practical_critic: "Practical Critic",
+  resolver: "Resolver",
+};
 
 const PLANMODE_PERSISTED_WORKSPACES_KEY = "agentforce-planmode-workspaces-v1";
 const PLANMODE_LEGACY_PROFILES_KEY = "agentforce-planmode-profiles-v1";
@@ -225,6 +234,38 @@ function latestFailedRun(draft: MissionDraft | null): PlanRun | null {
   return (draft?.plan_runs ?? []).find((run) => run.status === "failed" || run.status === "stale") ?? null;
 }
 
+function planningStatusBanner(run: PlanRun | null): { tone: string; title: string; detail: string } | null {
+  if (!run) {
+    return null;
+  }
+  if (run.status === "running" || run.status === "queued") {
+    return {
+      tone: run.status === "running"
+        ? "border-red/30 bg-red/10 text-red"
+        : "border-amber/30 bg-amber/10 text-amber",
+      title: run.status === "running" ? "Planning is running" : "Planning is queued",
+      detail: run.status === "running"
+        ? "Workers are actively processing the current planning run."
+        : "A planning run is queued and should start shortly.",
+    };
+  }
+  if (run.status === "failed") {
+    return {
+      tone: "border-red/30 bg-red/10 text-red",
+      title: "Planning stopped",
+      detail: run.error_message || "The latest planning run failed and needs intervention.",
+    };
+  }
+  if (run.status === "stale") {
+    return {
+      tone: "border-amber/30 bg-amber/10 text-amber",
+      title: "Planning stopped",
+      detail: run.error_message || "The latest planning run went stale and needs intervention.",
+    };
+  }
+  return null;
+}
+
 function firstTurnPrompt(draft: MissionDraft | null): string {
   if (!draft) {
     return "";
@@ -260,6 +301,95 @@ function toPlannerEventView(event: PlanningEvent): PlannerStreamEventView {
     content: event.summary ?? event.message,
     live: true,
   };
+}
+
+function planningStepLabel(stepId: PlanningSubstepId): string {
+  return PLANNING_STEP_LABELS[stepId];
+}
+
+function formatExecutionProfile(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  const agent = typeof candidate.agent === "string" && candidate.agent.trim() !== ""
+    ? candidate.agent.trim()
+    : null;
+  const model = typeof candidate.model === "string" && candidate.model.trim() !== ""
+    ? candidate.model.trim()
+    : null;
+  const thinking = typeof candidate.thinking === "string" && candidate.thinking.trim() !== ""
+    ? candidate.thinking.trim()
+    : null;
+  const parts = [agent, model, thinking].filter(Boolean);
+  return parts.length > 0 ? parts.join(" / ") : null;
+}
+
+function appendLogBlock(lines: string[], title: string, value: unknown): void {
+  if (value == null) {
+    return;
+  }
+
+  const raw = typeof value === "string"
+    ? value
+    : JSON.stringify(value, null, 2);
+  if (!raw) {
+    return;
+  }
+
+  lines.push(`${title}:`);
+  for (const line of raw.split("\n")) {
+    lines.push(line);
+  }
+}
+
+function buildOrbitStepLogLines(stepId: PlanningSubstepId, step: PlanStep | null): string[] {
+  const lines = [`$ orbit-agent ${stepId}`, `> label ${planningStepLabel(stepId)}`];
+
+  if (!step) {
+    lines.push("WARN No persisted agent payload yet.");
+    lines.push("Waiting for this orbit checkpoint to start.");
+    return lines;
+  }
+
+  lines.push(`> status ${step.status}`);
+  if (step.status === "failed") {
+    lines.push("ERROR Orbit checkpoint failed.");
+  } else if (step.status === "stale") {
+    lines.push("WARN Orbit checkpoint became stale.");
+  } else if (step.status === "complete" || step.status === "completed") {
+    lines.push("PASS Orbit checkpoint completed.");
+  } else if (step.status === "running" || step.status === "started") {
+    lines.push("WARN Orbit checkpoint is still in progress.");
+  }
+
+  if (step.started_at) {
+    lines.push(`Started: ${formatDateTime(step.started_at)}`);
+  }
+  if (step.completed_at) {
+    lines.push(`Completed: ${formatDateTime(step.completed_at)}`);
+  }
+  if (typeof step.tokens_in === "number" || typeof step.tokens_out === "number") {
+    lines.push(`Tokens: in ${step.tokens_in ?? 0} | out ${step.tokens_out ?? 0}`);
+  }
+  if (typeof step.cost_usd === "number") {
+    lines.push(`Cost: ${formatCurrency(step.cost_usd)}`);
+  }
+
+  const profile = formatExecutionProfile(step.metadata?.profile);
+  if (profile) {
+    lines.push(`Profile: ${profile}`);
+  }
+
+  appendLogBlock(lines, "Summary", step.summary);
+  if (step.message && step.message !== step.summary) {
+    appendLogBlock(lines, "Message", step.message);
+  }
+  if (step.metadata && Object.keys(step.metadata).length > 0) {
+    appendLogBlock(lines, "Metadata", step.metadata);
+  }
+
+  return lines;
 }
 
 function joinIssueTitles(step: PlanStep | null | undefined): string {
@@ -312,6 +442,60 @@ function StepFindingCard({
         {formatDateTime(step?.completed_at || step?.started_at || null)}
       </div>
     </article>
+  );
+}
+
+function OrbitStepLogModal({
+  stepId,
+  step,
+  onClose,
+}: {
+  stepId: PlanningSubstepId;
+  step: PlanStep | null;
+  onClose: () => void;
+}) {
+  const lines = useMemo(() => buildOrbitStepLogLines(stepId, step), [stepId, step]);
+  const label = planningStepLabel(stepId);
+  const profile = formatExecutionProfile(step?.metadata?.profile);
+
+  return (
+    <CockpitSupportDrawer
+      title={`${label} Log`}
+      description="Parsed checkpoint details from the persisted planning-step payload, using the same readable stream treatment as worker output."
+      label={`${label} orbit log modal`}
+      mode="modal"
+      onClose={onClose}
+    >
+      <div className="space-y-5">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-xl border border-border bg-surface px-4 py-3">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Status</div>
+            <div className="mt-2 text-sm font-semibold text-text">
+              {step?.status?.replaceAll("_", " ") ?? "idle"}
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-surface px-4 py-3">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Latest Timestamp</div>
+            <div className="mt-2 text-sm font-semibold text-text">
+              {formatDateTime(step?.completed_at || step?.started_at || null)}
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-surface px-4 py-3">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Usage</div>
+            <div className="mt-2 text-sm font-semibold text-text">
+              {step ? `${step.tokens_in ?? 0} in / ${step.tokens_out ?? 0} out` : "Waiting"}
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-surface px-4 py-3">
+            <div className="text-[11px] uppercase tracking-[0.08em] text-muted">Profile</div>
+            <div className="mt-2 text-sm font-semibold text-text">
+              {profile ?? "Not recorded"}
+            </div>
+          </div>
+        </div>
+        <Terminal lines={lines} done className="min-h-0" />
+      </div>
+    </CockpitSupportDrawer>
   );
 }
 
@@ -510,11 +694,12 @@ function InlineFollowUpComposer({
       </div>
 
       <div className="mt-3">
-        <label className="sr-only" htmlFor="planner-follow-up">
+        <label className="sr-only" htmlFor="planner-follow-up-dock">
           Planner follow-up
         </label>
         <textarea
-          id="planner-follow-up"
+          id="planner-follow-up-dock"
+          aria-label="Prompt Follow-up"
           rows={3}
           className="w-full rounded-lg border border-border bg-card p-3 text-sm text-text outline-none placeholder:text-dim focus:border-cyan"
           placeholder="Tell the planner what to adjust next..."
@@ -821,12 +1006,14 @@ function PhaseViewport({
   onFollowUpSend: () => void;
   onOpenSupportPanel: (panel: SupportPanelId) => void;
 }) {
+  const [selectedOrbitStepId, setSelectedOrbitStepId] = useState<PlanningSubstepId | null>(null);
+
   if (!draft) {
     return null;
   }
-
   const currentVersion = latestVersion(draft);
   const latestFailed = latestFailedRun(draft);
+  const workersActive = planningBusy(currentRun) || streaming;
   const activeSubstep = substeps.find((step) => step.status === "running" || step.status === "failed" || step.status === "stale")
     ?? [...substeps].reverse().find((step) => step.status === "complete")
     ?? substeps[0];
@@ -840,6 +1027,13 @@ function PhaseViewport({
         || step.name === "resolver")
       .map((step) => [step.name, step]),
   );
+  const selectedOrbitStep = selectedOrbitStepId
+    ? (stepsById.get(selectedOrbitStepId) ?? null)
+    : null;
+
+  useEffect(() => {
+    setSelectedOrbitStepId(null);
+  }, [selectedPhase, currentRun?.id]);
 
   if (selectedPhase === "briefing") {
     return (
@@ -994,6 +1188,12 @@ function PhaseViewport({
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {workersActive ? (
+                <div className="flex items-center gap-2 rounded-full border border-red/35 bg-red/12 px-4 py-2 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-red shadow-[0_0_14px_rgba(239,68,68,0.16)]">
+                  <span className="inline-flex h-2.5 w-2.5 rounded-full bg-red animate-pulse" />
+                  Live Planning
+                </div>
+              ) : null}
               {latestFailed ? (
                 <button
                   type="button"
@@ -1020,19 +1220,34 @@ function PhaseViewport({
             <span className="rounded-full border border-border bg-surface px-3 py-1">
               {formatCurrency(currentRun?.cost_usd)}
             </span>
-            <span className="rounded-full border border-border bg-surface px-3 py-1">
-              {streaming ? "Planner streaming" : "Standing by"}
+            <span className={`rounded-full border px-3 py-1 ${workersActive ? "border-red/35 bg-red/12 text-red" : "border-border bg-surface"}`}>
+              {workersActive ? "Live now" : "Standing by"}
             </span>
           </div>
         </section>
-        <InlineFollowUpComposer
-          message={followUpMessage}
-          busy={streaming || draft.preflight_status === "pending"}
-          helperText="Keep the planner moving from here. Use the drawer only when you need transcript history or edit surfaces."
-          onMessageChange={onFollowUpChange}
-          onSend={onFollowUpSend}
+        {!workersActive ? (
+          <InlineFollowUpComposer
+            message={followUpMessage}
+            busy={streaming || draft.preflight_status === "pending"}
+            helperText="Keep the planner moving from here. Use the drawer only when you need transcript history or edit surfaces."
+            onMessageChange={onFollowUpChange}
+            onSend={onFollowUpSend}
+          />
+        ) : null}
+        <PlanningSubstepTracker
+          title="Live Planning Orbit"
+          steps={substeps}
+          live={workersActive}
+          selectedStepId={selectedOrbitStepId}
+          onSelectStep={setSelectedOrbitStepId}
         />
-        <PlanningSubstepTracker title="Live Planning Orbit" steps={substeps} />
+        {selectedOrbitStepId ? (
+          <OrbitStepLogModal
+            stepId={selectedOrbitStepId}
+            step={selectedOrbitStep}
+            onClose={() => setSelectedOrbitStepId(null)}
+          />
+        ) : null}
       </div>
     );
   }
@@ -1074,14 +1289,22 @@ function PhaseViewport({
             </div>
           </div>
         </section>
-        <InlineFollowUpComposer
-          message={followUpMessage}
-          busy={streaming || draft.preflight_status === "pending"}
-          helperText="Use follow-up prompts when the critics reveal ambiguity or when the resolver needs a sharper direction."
-          onMessageChange={onFollowUpChange}
-          onSend={onFollowUpSend}
+        {!workersActive ? (
+          <InlineFollowUpComposer
+            message={followUpMessage}
+            busy={streaming || draft.preflight_status === "pending"}
+            helperText="Use follow-up prompts when the critics reveal ambiguity or when the resolver needs a sharper direction."
+            onMessageChange={onFollowUpChange}
+            onSend={onFollowUpSend}
+          />
+        ) : null}
+        <PlanningSubstepTracker
+          title="Stress Test Orbit"
+          steps={substeps}
+          live={workersActive}
+          selectedStepId={selectedOrbitStepId}
+          onSelectStep={setSelectedOrbitStepId}
         />
-        <PlanningSubstepTracker title="Stress Test Orbit" steps={substeps} />
         <div className="space-y-3">
           <StepFindingCard title="Technical Critic" step={stepsById.get("technical_critic")} />
           <StepFindingCard title="Practical Critic" step={stepsById.get("practical_critic")} />
@@ -1091,6 +1314,13 @@ function PhaseViewport({
           <div className="rounded-xl border border-red/20 bg-red/8 px-4 py-4 text-sm text-red">
             Newest run issue: {latestFailed.error_message || `Run ${latestFailed.id} requires intervention.`}
           </div>
+        ) : null}
+        {selectedOrbitStepId ? (
+          <OrbitStepLogModal
+            stepId={selectedOrbitStepId}
+            step={selectedOrbitStep}
+            onClose={() => setSelectedOrbitStepId(null)}
+          />
         ) : null}
       </div>
     );
@@ -1136,13 +1366,15 @@ function PhaseViewport({
             </span>
           </div>
         </section>
-        <InlineFollowUpComposer
-          message={followUpMessage}
-          busy={streaming || draft.preflight_status === "pending"}
-          helperText="If the review still feels off, send a precise follow-up before launching instead of diving straight into low-level edits."
-          onMessageChange={onFollowUpChange}
-          onSend={onFollowUpSend}
-        />
+        {!workersActive ? (
+          <InlineFollowUpComposer
+            message={followUpMessage}
+            busy={streaming || draft.preflight_status === "pending"}
+            helperText="If the review still feels off, send a precise follow-up before launching instead of diving straight into low-level edits."
+            onMessageChange={onFollowUpChange}
+            onSend={onFollowUpSend}
+          />
+        ) : null}
         <ValidationBoard
           conflictMessage={conflictMessage}
           summaryIssues={summaryIssues}
@@ -1661,6 +1893,7 @@ export default function PlanModePage() {
     [draft, loadingModels, models],
   );
   const currentRun = latestRun(draft);
+  const runStatusBanner = planningStatusBanner(currentRun);
   const streamEvents = useMemo(
     () => [...buildRunEvents(currentRun), ...liveEvents].slice(-20),
     [currentRun, liveEvents],
@@ -1782,19 +2015,23 @@ export default function PlanModePage() {
           title: "Edit Mission",
           description: "Mission summary, task sequencing, and execution defaults live here when you need to revise the plan.",
           label: "Edit mission panel",
+          mode: "drawer" as const,
         },
         transcript: {
           title: "Planner Transcript",
           description: "Review the conversation with the planner and send follow-up instructions without crowding the main stage.",
           label: "Planner transcript panel",
+          mode: "drawer" as const,
         },
         logbook: {
           title: "Mission Logbook",
           description: "Run history, changelog checkpoints, and planner stream stay archived here for on-demand review.",
           label: "Mission logbook panel",
+          mode: "modal" as const,
         },
       }[activeSupportPanel]
     : null;
+  const supportDrawerOpen = activeSupportPanel === "edit" || activeSupportPanel === "transcript";
 
   const supportPanelContent = !draft || !activeSupportPanel ? null : (
     activeSupportPanel === "edit" ? (
@@ -1873,6 +2110,27 @@ export default function PlanModePage() {
         <div className="rounded-lg border border-red/30 bg-red/10 px-4 py-3 text-sm text-red">
           {pageError}
         </div>
+      ) : null}
+
+      {runStatusBanner ? (
+        <section className={`rounded-[1.05rem] border px-4 py-3 ${runStatusBanner.tone}`}>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em]">
+                Current Planning Status
+              </div>
+              <div className="mt-1 text-sm font-semibold">
+                {runStatusBanner.title}
+              </div>
+              <p className="mt-1 text-sm leading-6">
+                {runStatusBanner.detail}
+              </p>
+            </div>
+            <span className="rounded-full border border-current/20 bg-black/5 px-3 py-1 font-mono text-[11px] uppercase tracking-[0.12em]">
+              {currentRun?.status ?? "idle"}
+            </span>
+          </div>
+        </section>
       ) : null}
 
       {!draft ? (
@@ -1960,7 +2218,9 @@ export default function PlanModePage() {
               <span className="text-[11px] text-dim">
                 {loadingModels
                   ? "Loading models..."
-                  : `${PLANNING_PROFILE_KEYS.length} planning roles selected`}
+                  : creatingDraft
+                    ? "Preparing flight plan..."
+                    : `${PLANNING_PROFILE_KEYS.length} planning roles selected`}
               </span>
               <button
                 type="button"
@@ -1970,13 +2230,13 @@ export default function PlanModePage() {
                   void handleCreateDraft();
                 }}
               >
-                Open Flight Plan
+                {creatingDraft ? "Opening..." : "Open Flight Plan"}
               </button>
             </div>
           </section>
         </section>
       ) : (
-        <div className={activeSupportPanel ? "grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]" : "space-y-5"}>
+        <div className={supportDrawerOpen ? "grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]" : "space-y-5"}>
           <div className="space-y-5">
             <section className="rounded-[1.1rem] border border-border bg-card px-4 py-4">
               <div className="flex flex-wrap items-start justify-between gap-4">
@@ -2108,6 +2368,7 @@ export default function PlanModePage() {
               title={supportPanelMeta.title}
               description={supportPanelMeta.description}
               label={supportPanelMeta.label}
+              mode={supportPanelMeta.mode}
               onClose={() => setActiveSupportPanel(null)}
             >
               {supportPanelContent}

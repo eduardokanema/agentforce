@@ -467,6 +467,7 @@ export interface ProviderModel {
   latency_label: string;
   provider_id?: string;
   supported_thinking?: string[];
+  enabled_thinking?: string[];
   active?: boolean;
   enabled?: boolean;
   selectable?: boolean;

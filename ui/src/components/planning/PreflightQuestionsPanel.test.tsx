@@ -137,16 +137,17 @@ describe("PreflightQuestionsPanel", () => {
     });
 
     const reviewButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Review Answers"));
+      button.textContent?.trim() === "Next");
     expect(reviewButton).toBeTruthy();
 
     act(() => {
       reviewButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(container.textContent).toContain("Review Answers");
+    expect(container.textContent).toContain("Review");
     expect(container.textContent).toContain("Use a specific command");
     expect(container.textContent).toContain("A file path");
+    expect(container.textContent).not.toContain("Edit");
 
     const submitButton = Array.from(container.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Start Planning"));
@@ -232,14 +233,14 @@ describe("PreflightQuestionsPanel", () => {
     });
 
     const reviewButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Review Answers"));
+      button.textContent?.trim() === "Next");
     expect(reviewButton).toBeTruthy();
 
     act(() => {
       reviewButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(container.textContent).toContain("Review Answers");
+    expect(container.textContent).toContain("Review");
 
     act(() => {
       root.render(<Harness draft={nextDraft} onSubmit={onSubmit} onSkip={onSkip} />);

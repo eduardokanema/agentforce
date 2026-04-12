@@ -23,46 +23,103 @@ const PROVIDER_META: Record<string, { emoji: string }> = {
   codex: { emoji: '○' },
 };
 
+function uniqueLevels(levels: string[] | undefined): string[] {
+  if (!Array.isArray(levels)) {
+    return [];
+  }
+  return Array.from(new Set(levels.map((level) => level.trim()).filter(Boolean)));
+}
+
+function initialEnabledThinking(provider: Provider): Record<string, string[]> {
+  return Object.fromEntries(
+    provider.all_models.map((model) => [
+      model.id,
+      uniqueLevels(model.enabled_thinking ?? model.supported_thinking),
+    ]),
+  );
+}
+
+function compactEnabledThinkingByModel(value: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([modelId, levels]) => [modelId, uniqueLevels(levels)] as const)
+      .filter(([, levels]) => levels.length > 0),
+  );
+}
+
 // ── Model row ─────────────────────────────────────────────────────────────────
 
 function ModelRow({
   model,
   enabled,
+  enabledThinking,
   isCli,
   onToggle,
+  onToggleThinking,
 }: {
   model: ProviderModel;
   enabled: boolean;
+  enabledThinking: string[];
   isCli: boolean;
   onToggle: (id: string, checked: boolean) => void;
+  onToggleThinking: (id: string, thinking: string, checked: boolean) => void;
 }) {
+  const supportedThinking = uniqueLevels(model.supported_thinking);
   return (
-    <div className="flex items-center gap-3 rounded px-1 py-1 hover:bg-surface">
-      <input
-        type="checkbox"
-        id={`model-${model.id}`}
-        checked={enabled}
-        onChange={(e) => onToggle(model.id, e.target.checked)}
-        className="h-3.5 w-3.5 cursor-pointer rounded border border-border accent-cyan"
-      />
-      <label htmlFor={`model-${model.id}`} className="flex-1 cursor-pointer text-[12px]">
-        <span className="text-text">{model.name}</span>
-        {model.cost_per_1k_input > 0 ? (
-          <span className="ml-2 font-mono text-[10px] text-muted">
-            ${model.cost_per_1k_input.toFixed(4)}/{model.cost_per_1k_output.toFixed(4)} per 1k
-          </span>
-        ) : (
-          <span className="ml-2 font-mono text-[10px] text-green">
-            {isCli ? 'Plan' : 'free'}
-          </span>
-        )}
-        <span className="ml-2 text-[10px] text-dim">{model.latency_label}</span>
-        {Array.isArray(model.supported_thinking) && model.supported_thinking.length > 0 ? (
-          <span className="ml-2 text-[10px] text-dim">
-            Thinking {model.supported_thinking.join('/')}
-          </span>
-        ) : null}
-      </label>
+    <div className="rounded px-1 py-1 hover:bg-surface">
+      <div className="flex items-center gap-3">
+        <input
+          type="checkbox"
+          id={`model-${model.id}`}
+          checked={enabled}
+          onChange={(e) => onToggle(model.id, e.target.checked)}
+          className="h-3.5 w-3.5 cursor-pointer rounded border border-border accent-cyan"
+        />
+        <label htmlFor={`model-${model.id}`} className="flex-1 cursor-pointer text-[12px]">
+          <span className="text-text">{model.name}</span>
+          {model.cost_per_1k_input > 0 ? (
+            <span className="ml-2 font-mono text-[10px] text-muted">
+              ${model.cost_per_1k_input.toFixed(4)}/{model.cost_per_1k_output.toFixed(4)} per 1k
+            </span>
+          ) : (
+            <span className="ml-2 font-mono text-[10px] text-green">
+              {isCli ? 'Plan' : 'free'}
+            </span>
+          )}
+          <span className="ml-2 text-[10px] text-dim">{model.latency_label}</span>
+          {supportedThinking.length > 0 ? (
+            <span className="ml-2 text-[10px] text-dim">
+              Thinking {supportedThinking.join('/')}
+            </span>
+          ) : null}
+        </label>
+      </div>
+      {supportedThinking.length > 1 ? (
+        <div className="ml-6 mt-1 flex flex-wrap items-center gap-1.5">
+          {supportedThinking.map((thinking) => {
+            const selected = enabledThinking.includes(thinking);
+            return (
+              <label
+                key={`${model.id}-${thinking}`}
+                className={[
+                  'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] transition-colors',
+                  selected
+                    ? 'border-cyan/30 bg-cyan/10 text-cyan'
+                    : 'border-border text-dim hover:bg-card',
+                ].join(' ')}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  onChange={(e) => onToggleThinking(model.id, thinking, e.target.checked)}
+                  className="h-3 w-3 rounded border border-border accent-cyan"
+                />
+                <span>{thinking}</span>
+              </label>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -103,15 +160,23 @@ function ProviderCard({
   const [enabledIds, setEnabledIds] = useState<string[]>(
     provider.enabled_models ?? allModelIds,
   );
+  const [enabledThinkingByModel, setEnabledThinkingByModel] = useState<Record<string, string[]>>(
+    initialEnabledThinking(provider),
+  );
   const [modelFilter, setModelFilter] = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => {
+    setEnabledIds(provider.enabled_models ?? allModelIds);
+    setEnabledThinkingByModel(initialEnabledThinking(provider));
+  }, [provider]);
+
   const saveModels = useCallback(
-    (ids: string[]) => {
+    (ids: string[], thinkingByModel: Record<string, string[]>) => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(async () => {
         try {
-          await updateProviderModels(provider.id, ids);
+          await updateProviderModels(provider.id, ids, compactEnabledThinkingByModel(thinkingByModel));
         } catch (err) {
           addToast(err instanceof Error ? err.message : 'Failed to update models', 'error');
         }
@@ -121,9 +186,37 @@ function ProviderCard({
   );
 
   const handleToggle = (modelId: string, checked: boolean) => {
-    const next = checked ? [...enabledIds, modelId] : enabledIds.filter((id) => id !== modelId);
+    const model = provider.all_models.find((entry) => entry.id === modelId);
+    const supported = uniqueLevels(model?.supported_thinking);
+    const nextThinkingByModel = { ...enabledThinkingByModel };
+    if (checked) {
+      nextThinkingByModel[modelId] = supported.length > 0 ? supported : uniqueLevels(nextThinkingByModel[modelId]);
+    } else {
+      delete nextThinkingByModel[modelId];
+    }
+    const next = checked ? [...new Set([...enabledIds, modelId])] : enabledIds.filter((id) => id !== modelId);
     setEnabledIds(next);
-    saveModels(next);
+    setEnabledThinkingByModel(nextThinkingByModel);
+    saveModels(next, nextThinkingByModel);
+  };
+
+  const handleToggleThinking = (modelId: string, thinking: string, checked: boolean) => {
+    const current = uniqueLevels(enabledThinkingByModel[modelId]);
+    const nextLevels = checked
+      ? [...new Set([...current, thinking])]
+      : current.filter((level) => level !== thinking);
+    const nextThinkingByModel = { ...enabledThinkingByModel };
+    if (nextLevels.length > 0) {
+      nextThinkingByModel[modelId] = nextLevels;
+    } else {
+      delete nextThinkingByModel[modelId];
+    }
+    const nextIds = nextLevels.length > 0
+      ? [...new Set([...enabledIds, modelId])]
+      : enabledIds.filter((id) => id !== modelId);
+    setEnabledThinkingByModel(nextThinkingByModel);
+    setEnabledIds(nextIds);
+    saveModels(nextIds, nextThinkingByModel);
   };
 
   const handleSaveKey = async () => {
@@ -233,27 +326,40 @@ function ProviderCard({
 
   const selectAll = () => {
     const ids = provider.all_models.map((m) => m.id);
+    const nextThinkingByModel = initialEnabledThinking(provider);
     setEnabledIds(ids);
-    saveModels(ids);
+    setEnabledThinkingByModel(nextThinkingByModel);
+    saveModels(ids, nextThinkingByModel);
   };
 
   const selectNone = () => {
     setEnabledIds([]);
-    saveModels([]);
+    setEnabledThinkingByModel({});
+    saveModels([], {});
   };
 
   const selectFiltered = () => {
     const fids = filteredModels.map((m) => m.id);
     const merged = [...new Set([...enabledIds, ...fids])];
+    const nextThinkingByModel = { ...enabledThinkingByModel };
+    for (const model of filteredModels) {
+      nextThinkingByModel[model.id] = uniqueLevels(model.supported_thinking);
+    }
     setEnabledIds(merged);
-    saveModels(merged);
+    setEnabledThinkingByModel(nextThinkingByModel);
+    saveModels(merged, nextThinkingByModel);
   };
 
   const deselectFiltered = () => {
     const fset = new Set(filteredModels.map((m) => m.id));
     const remaining = enabledIds.filter((id) => !fset.has(id));
+    const nextThinkingByModel = { ...enabledThinkingByModel };
+    for (const model of filteredModels) {
+      delete nextThinkingByModel[model.id];
+    }
     setEnabledIds(remaining);
-    saveModels(remaining);
+    setEnabledThinkingByModel(nextThinkingByModel);
+    saveModels(remaining, nextThinkingByModel);
   };
 
   return (
@@ -487,8 +593,10 @@ function ProviderCard({
                 key={model.id}
                 model={model}
                 enabled={enabledIds.includes(model.id)}
+                enabledThinking={enabledThinkingByModel[model.id] ?? []}
                 isCli={isCli}
                 onToggle={handleToggle}
+                onToggleThinking={handleToggleThinking}
               />
             ))}
             {filteredModels.length === 0 && modelFilter && (

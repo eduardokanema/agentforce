@@ -1,8 +1,11 @@
-import type { PlanningSubstepState } from '../../lib/planFlow';
+import type { PlanningSubstepId, PlanningSubstepState } from '../../lib/planFlow';
 
 interface PlanningSubstepTrackerProps {
   steps: PlanningSubstepState[];
   title?: string;
+  live?: boolean;
+  selectedStepId?: PlanningSubstepId | null;
+  onSelectStep?: (stepId: PlanningSubstepId) => void;
 }
 
 function chipClassName(status: PlanningSubstepState['status']): string {
@@ -23,7 +26,12 @@ function chipClassName(status: PlanningSubstepState['status']): string {
 export default function PlanningSubstepTracker({
   steps,
   title = 'Planning Substeps',
+  live = false,
+  selectedStepId = null,
+  onSelectStep,
 }: PlanningSubstepTrackerProps) {
+  const selectable = typeof onSelectStep === 'function';
+
   return (
     <section className="rounded-[1.15rem] border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-3">
@@ -32,20 +40,37 @@ export default function PlanningSubstepTracker({
           <p className="mt-1 text-xs text-dim">
             Canonical backend steps, compressed to what matters right now.
           </p>
+          {selectable ? (
+            <p className="mt-2 text-[11px] uppercase tracking-[0.12em] text-cyan">
+              Click an agent to inspect the full checkpoint log.
+            </p>
+          ) : null}
         </div>
-        <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
-          {steps.filter((step) => step.status === 'complete').length}/{steps.length}
+        <div className="flex items-center gap-2">
+          {live ? (
+            <div className="flex items-center gap-2 rounded-full border border-red/35 bg-red/12 px-3 py-1 font-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-red shadow-[0_0_12px_rgba(239,68,68,0.16)]">
+              <span className="inline-flex h-2.5 w-2.5 rounded-full bg-red animate-pulse" />
+              Live
+            </div>
+          ) : null}
+          <div className="rounded-full border border-border bg-surface px-3 py-1 font-mono text-[11px] text-dim">
+            {steps.filter((step) => step.status === 'complete').length}/{steps.length}
+          </div>
         </div>
       </div>
 
       <div className="mt-4 space-y-2">
         {steps.map((step, index) => (
-          <article
+          <button
             key={step.id}
+            type="button"
             className={[
-              'relative overflow-hidden rounded-xl border px-3 py-3 transition-colors',
+              'relative w-full overflow-hidden rounded-xl border px-3 py-3 text-left transition-colors',
               chipClassName(step.status),
+              selectable ? 'cursor-pointer hover:bg-card-hover/40' : 'cursor-default',
+              selectedStepId === step.id ? 'ring-1 ring-cyan/50 ring-inset' : '',
             ].join(' ')}
+            onClick={() => onSelectStep?.(step.id)}
           >
             {step.status === 'running' ? (
               <div className="pointer-events-none absolute inset-x-0 top-0 h-8 bg-gradient-to-r from-transparent via-white/5 to-transparent animate-[scan-line_2.2s_linear_infinite]" />
@@ -83,9 +108,14 @@ export default function PlanningSubstepTracker({
                     Waiting for the orbit to reach this checkpoint.
                   </p>
                 ) : null}
+                {selectable ? (
+                  <div className="mt-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
+                    Open agent log
+                  </div>
+                ) : null}
               </div>
             </div>
-          </article>
+          </button>
         ))}
       </div>
     </section>

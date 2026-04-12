@@ -99,6 +99,48 @@ def test_catalog_models_uses_model_specific_supported_thinking(monkeypatch):
     assert models["codex"][0]["supported_thinking"] == ["low", "medium", "high", "xhigh"]
 
 
+def test_list_execution_profiles_respects_enabled_thinking_by_model(monkeypatch):
+    monkeypatch.setattr(
+        model_catalog,
+        "_provider_sources",
+        lambda: (
+            {
+                "codex": {
+                    "display_name": "Codex CLI",
+                    "type": "cli",
+                    "binary": "codex",
+                }
+            },
+            {
+                "codex": {
+                    "enabled_thinking_by_model": {
+                        "gpt-5.4": ["medium", "xhigh"],
+                    }
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(model_catalog, "_provider_active", lambda provider_id, provider_meta, catalogue: True)
+    monkeypatch.setattr(
+        model_catalog,
+        "_provider_models",
+        lambda provider_id, provider_meta, catalogue: [
+            {
+                "id": "gpt-5.4",
+                "name": "GPT-5.4",
+                "supported_thinking": ["low", "medium", "high", "xhigh"],
+            }
+        ],
+    )
+
+    profiles = model_catalog.list_execution_profiles()
+
+    assert [profile["id"] for profile in profiles] == [
+        "codex:gpt-5.4:medium",
+        "codex:gpt-5.4:xhigh",
+    ]
+
+
 def test_normalize_execution_profile_repairs_same_provider_only(monkeypatch):
     monkeypatch.setattr(
         model_catalog,

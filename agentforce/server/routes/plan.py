@@ -315,7 +315,11 @@ def _create_draft(body: dict) -> tuple[int, dict]:
     questions = discover_preflight_questions(draft)
     if questions:
         preflight_validation = _build_preflight_validation(questions)
-        preflight_validation["draft_kind"] = draft_kind
+        preflight_validation = {
+            **validation,
+            **preflight_validation,
+            "draft_kind": draft_kind,
+        }
         save_result = _store().save(
             draft.copy_with(
                 validation=preflight_validation,

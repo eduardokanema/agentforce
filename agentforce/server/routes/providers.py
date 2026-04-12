@@ -322,6 +322,47 @@ def _models_list() -> list[dict]:
     return model_catalog.list_execution_profiles()
 
 
+def _normalize_enabled_thinking_map(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, list[str]] = {}
+    for model_id, levels in value.items():
+        key = str(model_id or "").strip()
+        if not key or not isinstance(levels, list):
+            continue
+        selected = [str(level).strip().lower() for level in levels if str(level).strip()]
+        deduped: list[str] = []
+        for level in selected:
+            if level not in deduped:
+                deduped.append(level)
+        if deduped:
+            normalized[key] = deduped
+    return normalized
+
+
+def _with_enabled_thinking(all_models: list[dict[str, Any]], meta: dict[str, Any]) -> list[dict[str, Any]]:
+    enabled_thinking_by_model = _normalize_enabled_thinking_map(meta.get("enabled_thinking_by_model"))
+    enriched: list[dict[str, Any]] = []
+    for model in all_models:
+        model_id = str(model.get("id") or model.get("model_id") or "").strip()
+        supported = [
+            str(level).strip().lower()
+            for level in list(model.get("supported_thinking") or [])
+            if str(level).strip()
+        ]
+        selected = enabled_thinking_by_model.get(model_id)
+        if selected:
+            enabled_thinking = [level for level in supported if level in selected]
+        else:
+            enabled_thinking = list(supported)
+        enriched.append({
+            **model,
+            "supported_thinking": supported,
+            "enabled_thinking": enabled_thinking,
+        })
+    return enriched
+
+
 def _providers_list() -> list[dict]:
     try:
         import keyring as _keyring
@@ -342,7 +383,7 @@ def _providers_list() -> list[dict]:
         if provider_type == "cli":
             binary = catalogue.get("binary", provider_id)
             active = _check_agent_binary(binary)
-            all_models = list(provider_models.get(provider_id, []))
+            all_models = _with_enabled_thinking(list(provider_models.get(provider_id, [])), meta)
             result.append({
                 "id": provider_id,
                 "display_name": catalogue["display_name"],
@@ -369,7 +410,7 @@ def _providers_list() -> list[dict]:
                     except Exception:
                         pass
                 active = token is not None
-                all_models = list(provider_models.get(provider_id, []))
+                all_models = _with_enabled_thinking(list(provider_models.get(provider_id, [])), meta)
             result.append({
                 "id": provider_id,
                 "display_name": catalogue["display_name"],
@@ -541,11 +582,19 @@ def _update_provider_models(provider_id: str, body: dict) -> tuple[int, dict]:
         return 404, {"error": f"Unknown provider: {provider_id!r}"}
     enabled_models = body.get("enabled_models")
     default_model = body.get("default_model")
+    enabled_thinking_by_model = body.get("enabled_thinking_by_model")
     if not isinstance(enabled_models, list) and enabled_models is not None:
         return 400, {"error": "enabled_models must be a list or null"}
+    if not isinstance(enabled_thinking_by_model, dict) and enabled_thinking_by_model is not None:
+        return 400, {"error": "enabled_thinking_by_model must be an object or null"}
     metadata = _provider_metadata()
     meta = metadata.get(provider_id, {})
     meta["enabled_models"] = enabled_models
+    normalized_enabled_thinking = _normalize_enabled_thinking_map(enabled_thinking_by_model)
+    if normalized_enabled_thinking:
+        meta["enabled_thinking_by_model"] = normalized_enabled_thinking
+    else:
+        meta.pop("enabled_thinking_by_model", None)
     if default_model is not None:
         meta["default_model"] = default_model
     metadata[provider_id] = meta

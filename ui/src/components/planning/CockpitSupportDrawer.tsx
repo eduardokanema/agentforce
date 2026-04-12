@@ -4,6 +4,7 @@ interface CockpitSupportDrawerProps {
   title: string;
   description: string;
   label: string;
+  mode?: "drawer" | "modal";
   onClose: () => void;
   children: ReactNode;
 }
@@ -12,19 +13,30 @@ export default function CockpitSupportDrawer({
   title,
   description,
   label,
+  mode = "drawer",
   onClose,
   children,
 }: CockpitSupportDrawerProps) {
+  const wrapperClassName = mode === "modal"
+    ? "fixed inset-0 z-50 flex items-center justify-center bg-[rgba(4,8,14,0.78)] p-4 backdrop-blur-sm"
+    : "fixed inset-0 z-40 flex items-end bg-[rgba(4,8,14,0.72)] p-4 backdrop-blur-sm xl:static xl:z-auto xl:block xl:bg-transparent xl:p-0 xl:backdrop-blur-none";
+  const panelClassName = mode === "modal"
+    ? "max-h-[calc(100vh-2rem)] w-full max-w-[72rem] overflow-hidden rounded-[1.35rem] border border-border bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.12),transparent_52%),linear-gradient(180deg,rgba(13,21,37,0.98),rgba(9,16,30,0.98))] shadow-[0_32px_90px_rgba(0,0,0,0.46)]"
+    : "max-h-[calc(100vh-2rem)] w-full overflow-hidden rounded-[1.3rem] border border-border bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.12),transparent_52%),linear-gradient(180deg,rgba(13,21,37,0.98),rgba(9,16,30,0.98))] shadow-[0_24px_80px_rgba(0,0,0,0.42)] xl:max-h-none xl:rounded-[1.2rem] xl:shadow-[0_18px_48px_rgba(0,0,0,0.28)]";
+  const bodyClassName = mode === "modal"
+    ? "max-h-[calc(100vh-9rem)] overflow-y-auto p-4 md:p-5"
+    : "max-h-[calc(100vh-9rem)] overflow-y-auto p-4 xl:max-h-[calc(100vh-9.5rem)] xl:p-5";
+
   return (
     <div
-      className="fixed inset-0 z-40 flex items-end bg-[rgba(4,8,14,0.72)] p-4 backdrop-blur-sm xl:static xl:z-auto xl:block xl:bg-transparent xl:p-0 xl:backdrop-blur-none"
+      className={wrapperClassName}
       role="dialog"
       aria-modal="true"
       aria-label={label}
       onClick={onClose}
     >
       <div
-        className="max-h-[calc(100vh-2rem)] w-full overflow-hidden rounded-[1.3rem] border border-border bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.12),transparent_52%),linear-gradient(180deg,rgba(13,21,37,0.98),rgba(9,16,30,0.98))] shadow-[0_24px_80px_rgba(0,0,0,0.42)] xl:max-h-none xl:rounded-[1.2rem] xl:shadow-[0_18px_48px_rgba(0,0,0,0.28)]"
+        className={panelClassName}
         onClick={(event) => event.stopPropagation()}
       >
         <header className="flex items-start justify-between gap-4 border-b border-border/80 px-5 py-4">
@@ -47,7 +59,7 @@ export default function CockpitSupportDrawer({
             Close
           </button>
         </header>
-        <div className="max-h-[calc(100vh-9rem)] overflow-y-auto p-4 xl:max-h-[calc(100vh-9.5rem)] xl:p-5">
+        <div className={bodyClassName}>
           {children}
         </div>
       </div>

@@ -95,10 +95,6 @@ export default function PreflightQuestionsPanel({
     setActiveStepIndex((current) => Math.min(current + 1, reviewStepIndex));
   };
 
-  const goToQuestion = (index: number): void => {
-    setActiveStepIndex(Math.max(0, Math.min(index, reviewStepIndex)));
-  };
-
   return (
     <section className="rounded-[1.15rem] border border-amber/30 bg-[radial-gradient(circle_at_top,rgba(251,191,36,0.12),transparent_62%),var(--color-card)] p-4">
       <div className="flex items-start justify-between gap-3">
@@ -168,7 +164,7 @@ export default function PreflightQuestionsPanel({
         <div className="mt-4 space-y-3">
           <div className="rounded-xl border border-border bg-surface p-4">
             <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
-              Review Answers
+              Review
             </div>
             <p className="mt-2 text-sm text-dim">
               Confirm the recorded answers before you submit the flow.
@@ -179,7 +175,7 @@ export default function PreflightQuestionsPanel({
               const answer = answers[question.id];
               return (
                 <article key={question.id} className="rounded-xl border border-border bg-surface p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
                     <div>
                       <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
                         Question {index + 1} of {questionCount}
@@ -188,13 +184,6 @@ export default function PreflightQuestionsPanel({
                         {question.prompt}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      className="rounded-full border border-border px-3 py-1 text-xs font-semibold text-dim transition-colors hover:bg-card-hover"
-                      onClick={() => goToQuestion(index)}
-                    >
-                      Edit
-                    </button>
                   </div>
                   {question.reason ? (
                     <p className="mt-1 text-xs text-dim">{question.reason}</p>
@@ -222,13 +211,13 @@ export default function PreflightQuestionsPanel({
           {!isReviewStep && questionCount > 0 ? (
             <button
               type="button"
-              className="rounded-full border border-border px-4 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={submitting || activeStepIndex >= reviewStepIndex}
-              onClick={goNext}
-            >
-              {currentQuestionIndex === questionCount - 1 ? "Review Answers" : "Next"}
-            </button>
-          ) : null}
+            className="rounded-full border border-border px-4 py-2 text-sm font-semibold text-dim transition-colors hover:bg-card-hover disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={submitting || activeStepIndex >= reviewStepIndex}
+            onClick={goNext}
+          >
+              Next
+          </button>
+        ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
           <button

@@ -39,7 +39,15 @@ const openrouterProvider: Provider = {
   enabled_models: ['anthropic/claude-sonnet-4-6'],
   default_model: null,
   all_models: [
-    { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6', cost_per_1k_input: 0.003, cost_per_1k_output: 0.015, latency_label: 'Cloud' },
+    {
+      id: 'anthropic/claude-sonnet-4-6',
+      name: 'Claude Sonnet 4.6',
+      cost_per_1k_input: 0.003,
+      cost_per_1k_output: 0.015,
+      latency_label: 'Cloud',
+      supported_thinking: ['medium', 'high', 'xhigh'],
+      enabled_thinking: ['medium', 'xhigh'],
+    },
     { id: 'openai/gpt-4o', name: 'GPT-4o', cost_per_1k_input: 0.005, cost_per_1k_output: 0.015, latency_label: 'Cloud' },
   ],
 };
@@ -178,5 +186,30 @@ describe('ConnectorsPage', () => {
 
     expect(vi.mocked(deleteProvider)).toHaveBeenCalledWith('openrouter');
     expect(toastHarness.addToast).toHaveBeenCalledWith('OpenRouter removed', 'success');
+  });
+
+  it('saves per-model thinking selections', async () => {
+    vi.mocked(getProviders).mockResolvedValue([openrouterProvider]);
+
+    const container = await renderPage();
+    const highToggle = Array.from(container.querySelectorAll('label')).find(
+      (label) => label.textContent?.trim() === 'high',
+    )?.querySelector('input') as HTMLInputElement | null;
+
+    expect(highToggle).toBeTruthy();
+
+    await act(async () => {
+      highToggle?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+
+    expect(api.updateProviderModels).toHaveBeenCalledWith(
+      'openrouter',
+      ['anthropic/claude-sonnet-4-6'],
+      {
+        'anthropic/claude-sonnet-4-6': ['medium', 'xhigh', 'high'],
+      },
+      undefined,
+    );
   });
 });

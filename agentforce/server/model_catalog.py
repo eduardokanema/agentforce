@@ -34,6 +34,34 @@ def supported_thinking_for_model(provider_id: str, model: dict[str, Any]) -> lis
     return supported_thinking_for_provider(provider_id)
 
 
+def enabled_thinking_for_model(model: dict[str, Any]) -> list[str]:
+    configured = model.get("enabled_thinking")
+    if isinstance(configured, list):
+        normalized = [str(item).strip().lower() for item in configured if str(item).strip()]
+        if normalized:
+            return normalized
+    return supported_thinking_for_model(str(model.get("provider_id") or ""), model)
+
+
+def _provider_enabled_thinking_map(provider_meta: dict[str, Any]) -> dict[str, list[str]]:
+    raw = provider_meta.get("enabled_thinking_by_model")
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, list[str]] = {}
+    for model_id, levels in raw.items():
+        key = str(model_id or "").strip()
+        if not key or not isinstance(levels, list):
+            continue
+        selected: list[str] = []
+        for level in levels:
+            value = str(level).strip().lower()
+            if value and value not in selected:
+                selected.append(value)
+        if selected:
+            normalized[key] = selected
+    return normalized
+
+
 def _provider_sources() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     from agentforce.server.routes import providers
 
@@ -91,6 +119,7 @@ def _catalog_models(*, include_disabled: bool = False) -> list[dict[str, Any]]:
         provider_meta = metadata.get(provider_id, {})
         active = _provider_active(provider_id, provider_meta, catalogue)
         enabled_models = provider_meta.get("enabled_models")
+        enabled_thinking_map = _provider_enabled_thinking_map(provider_meta)
         models = _provider_models(provider_id, provider_meta, catalogue)
         provider_name = str(catalogue.get("display_name") or provider_id)
 
@@ -104,6 +133,10 @@ def _catalog_models(*, include_disabled: bool = False) -> list[dict[str, Any]]:
                 continue
             seen_keys.add(dedupe_key)
             enabled = enabled_models is None or model_id in enabled_models
+            enabled_thinking = [
+                level for level in supported_thinking
+                if level in enabled_thinking_map.get(model_id, supported_thinking)
+            ]
             selectable = active and enabled
             if not include_disabled and not selectable:
                 continue
@@ -118,9 +151,10 @@ def _catalog_models(*, include_disabled: bool = False) -> list[dict[str, Any]]:
                 "cost_per_1k_output": float(model.get("cost_per_1k_output", 0.0) or 0.0),
                 "latency_label": str(model.get("latency_label") or ""),
                 "supported_thinking": list(supported_thinking),
+                "enabled_thinking": list(enabled_thinking),
                 "active": active,
                 "enabled": enabled,
-                "selectable": selectable,
+                "selectable": selectable and bool(enabled_thinking),
             })
     return catalog_models
 
@@ -128,7 +162,8 @@ def _catalog_models(*, include_disabled: bool = False) -> list[dict[str, Any]]:
 def list_execution_profiles() -> list[dict[str, Any]]:
     profiles: list[dict[str, Any]] = []
     for model in _catalog_models():
-        for thinking in model["supported_thinking"]:
+        enabled_thinking = list(model.get("enabled_thinking") or model.get("supported_thinking") or [])
+        for thinking in enabled_thinking:
             profiles.append({
                 "id": profile_id(model["provider_id"], model["model_id"], thinking),
                 "label": f"{model['provider']} · {model['name']} · {thinking}",
@@ -140,6 +175,7 @@ def list_execution_profiles() -> list[dict[str, Any]]:
                 "name": model["name"],
                 "thinking": thinking,
                 "supported_thinking": list(model["supported_thinking"]),
+                "enabled_thinking": enabled_thinking,
                 "cost_per_1k_input": model["cost_per_1k_input"],
                 "cost_per_1k_output": model["cost_per_1k_output"],
                 "latency_label": model["latency_label"],

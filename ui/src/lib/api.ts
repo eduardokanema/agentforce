@@ -599,11 +599,16 @@ export function testProvider(id: string): Promise<{ ok: boolean; error?: string 
 export function updateProviderModels(
   id: string,
   enabledModels: string[],
+  enabledThinkingByModel?: Record<string, string[]>,
   defaultModel?: string,
 ): Promise<void> {
   return requestVoid(`/api/providers/${encodeURIComponent(id)}/models`, {
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled_models: enabledModels, default_model: defaultModel }),
+    body: JSON.stringify({
+      enabled_models: enabledModels,
+      enabled_thinking_by_model: enabledThinkingByModel,
+      default_model: defaultModel,
+    }),
   });
 }
 

@@ -757,6 +757,58 @@ def test_plan_draft_create_with_preflight_questions_blocks_initial_run(tmp_path,
     assert len(loaded["preflight_questions"]) == 1
 
 
+def test_plan_draft_create_with_preflight_preserves_planning_profiles(tmp_path, monkeypatch):
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        plan_routes,
+        "discover_preflight_questions",
+        lambda _draft: [
+            {
+                "id": "scope_mode",
+                "prompt": "Should the first release focus on project selection or project data model changes?",
+                "options": ["Selection only", "Both together"],
+                "reason": "This changes the task graph and dependencies.",
+                "allow_custom": True,
+            }
+        ],
+    )
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {
+        "prompt": "Plan project support",
+        "validation": {
+            "draft_kind": "simple_plan",
+            "planning_profiles": {
+                "planner": {"agent": "codex", "model": "gpt-5.4", "thinking": "medium"},
+                "critic_technical": {"agent": "codex", "model": "gpt-5.4", "thinking": "medium"},
+                "critic_practical": {"agent": "codex", "model": "gpt-5.4", "thinking": "medium"},
+                "resolver": {"agent": "codex", "model": "gpt-5.4", "thinking": "medium"},
+            },
+        },
+    })
+    create_handler.do_POST()
+
+    draft_id = _response_body(create_handler)["id"]
+
+    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+
+    assert loaded["preflight_status"] == "pending"
+    assert loaded["validation"]["planning_profiles"]["planner"] == {
+        "agent": "codex",
+        "model": "gpt-5.4",
+        "thinking": "medium",
+    }
+    assert loaded["validation"]["planning_profiles"]["resolver"] == {
+        "agent": "codex",
+        "model": "gpt-5.4",
+        "thinking": "medium",
+    }
+
+
 def test_plan_draft_preflight_submission_enqueues_initial_run(tmp_path, monkeypatch):
     from agentforce.server.routes import plan as plan_routes
 

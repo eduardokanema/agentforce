@@ -123,7 +123,11 @@ function buildSubsteps(run: PlanRun | null): PlanningSubstepState[] {
     }
 
     let status: PlanningSubstepState['status'] = 'idle';
-    if (step.status === 'started' || step.status === 'running') {
+    if ((step.status === 'started' || step.status === 'running') && run?.status === 'failed') {
+      status = 'failed';
+    } else if ((step.status === 'started' || step.status === 'running') && run?.status === 'stale') {
+      status = 'stale';
+    } else if (step.status === 'started' || step.status === 'running') {
       status = 'running';
     } else if (step.status === 'failed') {
       status = 'failed';

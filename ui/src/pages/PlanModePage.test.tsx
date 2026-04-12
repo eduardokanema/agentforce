@@ -11,6 +11,16 @@ function flushPromises(): Promise<void> {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function makeDraft(overrides: Partial<MissionDraft> = {}): MissionDraft {
   return {
     id: 'draft-123',
@@ -219,9 +229,95 @@ describe('PlanModePage', () => {
     expect(container.textContent).toContain('Logbook');
     expect(container.textContent).not.toContain('Engineering Controls');
     expect(container.textContent).not.toContain('Planning History');
-    expect(container.querySelector('#planner-follow-up')).toBeTruthy();
+    expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeTruthy();
     expect(container.querySelector('input[aria-label="Mission name"]')).toBeNull();
     expect(container.querySelector('textarea[aria-label="Mission YAML export"]')).toBeNull();
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('shows progress feedback immediately after clicking Open Flight Plan', async () => {
+    const pendingCreate = deferred<Response>();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/config') {
+        return new Response(JSON.stringify({
+          filesystem: { allowed_base_paths: ['/workspace'] },
+          default_caps: {
+            max_concurrent_workers: 2,
+            max_retries_per_task: 2,
+            max_wall_time_minutes: 60,
+            max_cost_usd: 0,
+          },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.startsWith('/api/filesystem')) {
+        return new Response(JSON.stringify({
+          path: '/workspace',
+          entries: [{ name: 'app', path: '/workspace/app', is_dir: true }],
+          parent: null,
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts') {
+        return pendingCreate.promise;
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft()), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock);
+    await flushPromises();
+
+    const prompt = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      prompt.value = 'Build a calculator mission';
+      prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushPromises();
+
+    const selectFolderButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Select this folder'));
+    expect(selectFolderButton).toBeTruthy();
+
+    await act(async () => {
+      selectFolderButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const openDraftButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Open Flight Plan')) as HTMLButtonElement | undefined;
+    expect(openDraftButton).toBeTruthy();
+
+    await act(async () => {
+      openDraftButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Preparing flight plan...');
+    const openingButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Opening...')) as HTMLButtonElement | undefined;
+    expect(openingButton).toBeTruthy();
+    expect(openingButton?.disabled).toBe(true);
+
+    pendingCreate.resolve(new Response(JSON.stringify({ id: 'draft-123', revision: 1, plan_run_id: 'run-1' }), {
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    await flushPromises();
 
     act(() => {
       root.unmount();
@@ -316,7 +412,7 @@ describe('PlanModePage', () => {
       transcriptButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    const followUp = container.querySelector('textarea#planner-follow-up') as HTMLTextAreaElement;
+    const followUp = container.querySelector('textarea[aria-label="Prompt Follow-up"]') as HTMLTextAreaElement;
     await act(async () => {
       followUp.value = 'Tighten the summary';
       followUp.dispatchEvent(new Event('input', { bubbles: true }));
@@ -419,7 +515,7 @@ describe('PlanModePage', () => {
     });
 
     const reviewButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Review Answers'));
+      button.textContent?.trim() === 'Next');
     expect(reviewButton).toBeTruthy();
 
     await act(async () => {
@@ -766,7 +862,7 @@ describe('PlanModePage', () => {
       transcriptButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    const followUp = container.querySelector('textarea#planner-follow-up') as HTMLTextAreaElement | null;
+    const followUp = container.querySelector('textarea[aria-label="Prompt Follow-up"]') as HTMLTextAreaElement | null;
     expect(followUp).toBeTruthy();
 
     await act(async () => {
@@ -879,7 +975,7 @@ describe('PlanModePage', () => {
       transcriptButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(container.querySelector('textarea#planner-follow-up')).toBeTruthy();
+    expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeTruthy();
     expect(container.textContent).not.toContain('Planning History');
 
     const logbookButton = Array.from(container.querySelectorAll('button')).find((button) =>
@@ -890,7 +986,7 @@ describe('PlanModePage', () => {
       logbookButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(container.querySelector('textarea#planner-follow-up')).toBeTruthy();
+    expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeTruthy();
     expect(container.textContent).toContain('Planning History');
 
     const editButton = Array.from(container.querySelectorAll('button')).find((button) =>
@@ -903,6 +999,276 @@ describe('PlanModePage', () => {
 
     expect(container.textContent).not.toContain('Planning History');
     expect(container.querySelector('input[aria-label="Mission name"]')).toBeTruthy();
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('opens Mission Logbook in a modal dialog', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft()), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const logbookButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Logbook'));
+    expect(logbookButton).toBeTruthy();
+
+    await act(async () => {
+      logbookButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const dialog = container.querySelector('[role="dialog"][aria-label="Mission logbook panel"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog?.textContent).toContain('Mission Logbook');
+    expect(dialog?.textContent).toContain('Planning History');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('keeps the draft-stage content ordered with inline follow-up on the page', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(makeDraft()), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const text = container.textContent ?? '';
+    expect(text.indexOf('Planning Flow')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('Planner standing by')).toBeGreaterThan(text.indexOf('Planning Flow'));
+    expect(text.indexOf('Live Planning Orbit')).toBeGreaterThan(text.indexOf('Planner standing by'));
+    expect(text.indexOf('Prompt Follow-up')).toBeGreaterThan(text.indexOf('Live Planning Orbit'));
+    expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeTruthy();
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('hides the inline follow-up composer while planning workers are active', async () => {
+    const activeDraft = makeDraft({
+      plan_runs: [
+        {
+          id: 'run-active',
+          draft_id: 'draft-123',
+          base_revision: 3,
+          head_revision_seen: 3,
+          status: 'running',
+          trigger_kind: 'auto',
+          trigger_message: 'Initial run',
+          created_at: '2026-04-12T00:00:00Z',
+          steps: [
+            {
+              name: 'planner_synthesis',
+              status: 'running',
+              started_at: '2026-04-12T00:00:01Z',
+              summary: 'Planner is working through the next pass.',
+            },
+          ],
+          cost_usd: 0,
+        },
+      ],
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(activeDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeNull();
+    expect(container.textContent).toContain('Current Planning Status');
+    expect(container.textContent).toContain('Planning is running');
+    expect(container.textContent).toContain('Live Planning');
+    expect(container.textContent).toContain('Live');
+    expect(container.textContent).toContain('Live now');
+    expect(container.textContent).toContain('Live Planning Orbit');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('surfaces failed run errors at the top and marks the run as stopped', async () => {
+    const failedDraft = makeDraft({
+      plan_runs: [
+        {
+          id: 'run-failed',
+          draft_id: 'draft-123',
+          base_revision: 3,
+          head_revision_seen: 3,
+          status: 'failed',
+          trigger_kind: 'auto',
+          trigger_message: 'Initial run',
+          created_at: '2026-04-12T00:00:00Z',
+          current_step: 'technical_critic',
+          steps: [
+            {
+              name: 'technical_critic',
+              status: 'running',
+              started_at: '2026-04-12T00:00:01Z',
+              summary: 'Running technical adversary review',
+            },
+          ],
+          error_message: 'codex planning step failed',
+          cost_usd: 0,
+        },
+      ],
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(failedDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    expect(container.textContent).toContain('Current Planning Status');
+    expect(container.textContent).toContain('Planning stopped');
+    expect(container.textContent).toContain('codex planning step failed');
+    expect(container.textContent).toContain('Stress Test Orbit');
+    expect(container.textContent).not.toContain('Live now');
+    expect(container.textContent).not.toContain('Technical Criticrunning');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('opens a stress-orbit agent log modal with parsed checkpoint details', async () => {
+    const stressDraft = makeDraft({
+      plan_runs: [
+        {
+          id: 'run-stress',
+          draft_id: 'draft-123',
+          base_revision: 3,
+          head_revision_seen: 3,
+          status: 'running',
+          trigger_kind: 'auto',
+          trigger_message: 'Initial run',
+          created_at: '2026-04-12T00:00:00Z',
+          current_step: 'technical_critic',
+          steps: [
+            {
+              name: 'technical_critic',
+              status: 'running',
+              started_at: '2026-04-12T00:02:22Z',
+              summary: 'Running technical adversary review',
+              message: 'Inspecting unresolved risks before resolver handoff.',
+              tokens_in: 321,
+              tokens_out: 654,
+              cost_usd: 0.0123,
+              metadata: {
+                profile: {
+                  agent: 'codex',
+                  model: 'gpt-5.4',
+                  thinking: 'medium',
+                },
+                issues: [
+                  {
+                    severity: 'high',
+                    title: 'Missing rollback strategy',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/models') {
+        return new Response(JSON.stringify(models), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/plan/drafts/draft-123') {
+        return new Response(JSON.stringify(stressDraft), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const { container, root } = renderPage(fetchMock, '/plan?draft=draft-123');
+    await flushPromises();
+
+    const orbitButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Technical Critic')
+      && button.textContent?.includes('Open agent log'));
+    expect(orbitButton).toBeTruthy();
+
+    await act(async () => {
+      orbitButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const dialog = container.querySelector('[role="dialog"][aria-label="Technical Critic orbit log modal"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog?.textContent).toContain('Technical Critic Log');
+    expect(dialog?.textContent).toContain('Status');
+    expect(dialog?.textContent).toContain('running');
+    expect(dialog?.textContent).toContain('321 in / 654 out');
+    expect(dialog?.textContent).toContain('codex / gpt-5.4 / medium');
+    expect(dialog?.textContent).toContain('Running technical adversary review');
+    expect(dialog?.textContent).toContain('Missing rollback strategy');
 
     act(() => {
       root.unmount();
@@ -1016,7 +1382,7 @@ describe('PlanModePage', () => {
     });
 
     const reviewButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Review Answers'));
+      button.textContent?.trim() === 'Next');
     expect(reviewButton).toBeTruthy();
 
     await act(async () => {
