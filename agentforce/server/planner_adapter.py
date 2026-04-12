@@ -416,18 +416,31 @@ def _parse_planner_response(response_text: str) -> tuple[str, dict[str, Any]]:
     if not isinstance(payload, dict):
         raise RuntimeError("planner response must be a JSON object")
 
-    assistant_message = str(payload.get("assistant_message") or "").strip()
     draft_spec = payload.get("draft_spec")
-    if not assistant_message:
-        raise RuntimeError("planner response missing assistant_message")
+    if not isinstance(draft_spec, dict) and _looks_like_mission_spec(payload):
+        draft_spec = payload
     if not isinstance(draft_spec, dict):
         raise RuntimeError("planner response missing draft_spec object")
+
+    assistant_message = _planner_assistant_message(payload)
 
     mission_spec = MissionSpec.from_dict(draft_spec)
     issues = mission_spec.validate(stage="draft")
     if issues:
         raise RuntimeError(f"planner response draft_spec invalid: {issues[0]}")
     return assistant_message, mission_spec.to_dict()
+
+
+def _planner_assistant_message(payload: dict[str, Any]) -> str:
+    for key in ("assistant_message", "message", "summary", "assistant", "response"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "Planner draft updated."
+
+
+def _looks_like_mission_spec(payload: dict[str, Any]) -> bool:
+    return all(key in payload for key in ("name", "goal", "definition_of_done", "tasks", "caps"))
 
 
 def _extract_planner_payload_candidate(text: str) -> dict[str, Any] | None:
@@ -446,6 +459,10 @@ def _extract_planner_payload_candidate(text: str) -> dict[str, Any] | None:
 
     for candidate in reversed(candidates):
         if isinstance(candidate.get("assistant_message"), str) and isinstance(candidate.get("draft_spec"), dict):
+            return candidate
+
+    for candidate in reversed(candidates):
+        if _looks_like_mission_spec(candidate):
             return candidate
 
     for candidate in reversed(candidates):
