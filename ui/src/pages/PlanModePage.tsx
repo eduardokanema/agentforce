@@ -11,6 +11,7 @@ import FlightPlanProgressRail from "../components/planning/FlightPlanProgressRai
 import PlannerStreamPanel, {
   type PlannerStreamEventView,
 } from "../components/planning/PlannerStreamPanel";
+import PlanningFollowUpPanel from "../components/planning/PlanningFollowUpPanel";
 import PreflightQuestionsPanel from "../components/planning/PreflightQuestionsPanel";
 import PlannerTranscriptPanel from "../components/planning/PlannerTranscriptPanel";
 import PlanningSubstepTracker from "../components/planning/PlanningSubstepTracker";
@@ -49,6 +50,7 @@ import type {
   PlanRun,
   PlanStep,
   PlanVersion,
+  PlanningFollowUp,
   PreflightAnswer,
 } from "../lib/types";
 import {
@@ -792,7 +794,7 @@ function InlineFollowUpComposer({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
-            Prompt Follow-up
+            Solver Follow-up
           </div>
           <p className="mt-1 max-w-[56ch] text-xs leading-6 text-dim">
             {helperText}
@@ -805,14 +807,14 @@ function InlineFollowUpComposer({
 
       <div className="mt-3">
         <label className="sr-only" htmlFor="planner-follow-up-dock">
-          Planner follow-up
+          Solver follow-up
         </label>
         <textarea
           id="planner-follow-up-dock"
           aria-label="Prompt Follow-up"
           rows={3}
           className="w-full rounded-lg border border-border bg-card p-3 text-sm text-text outline-none placeholder:text-dim focus:border-cyan"
-          placeholder="Tell the planner what to adjust next..."
+          placeholder="Describe the follow-up the solver should resolve during execution..."
           value={message}
           onInput={(event) => onMessageChange(event.currentTarget.value)}
         />
@@ -823,7 +825,7 @@ function InlineFollowUpComposer({
             disabled={busy || message.trim() === ""}
             onClick={onSend}
           >
-            Send to Planner
+            Delegate to Solver
           </button>
         </div>
       </div>
@@ -1131,6 +1133,7 @@ function PhaseViewport({
   }
   const currentVersion = latestVersion(draft);
   const latestFailed = latestFailedRun(draft);
+  const delegatedFollowUps: PlanningFollowUp[] = draft.planning_follow_ups ?? [];
   const workersActive = planningBusy(currentRun) || streaming;
   const failedStepCount = failedPlanningStepCount(currentRun);
   const activeSubstep = substeps.find((step) => step.status === "running" || step.status === "failed" || step.status === "stale")
@@ -1256,6 +1259,17 @@ function PhaseViewport({
           onAnswerChange={onAnswerChange}
           onSubmit={onSubmitRepair}
           onSkip={onSubmitRepair}
+        />
+      );
+    }
+
+    if (delegatedFollowUps.length > 0) {
+      return (
+        <PlanningFollowUpPanel
+          followUps={delegatedFollowUps}
+          description={draft.repair_status === "delegated"
+            ? "Repair and clarification questions were converted into execution-owned work instead of reopening the full planning loop."
+            : "Planning questions were converted into execution-owned work so the solver can resolve them without a fresh planning pass."}
         />
       );
     }
@@ -2003,15 +2017,14 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
       return;
     }
 
-    setStreaming(true);
     setConflictMessage(null);
     setPageError(null);
     try {
       await sendPlanDraftMessage(draft.id, followUpMessage);
       setFollowUpMessage("");
-      setAutoFollowPhase(true);
+      setAutoFollowPhase(false);
       await loadDraft(draft.id);
-      setSelectedPhase("draft");
+      setSelectedPhase("preflight");
     } catch (caught) {
       setStreaming(false);
       setPageError(
@@ -2092,12 +2105,12 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
       return;
     }
     setSubmittingPreflight(true);
-    setStreaming(true);
-    setAutoFollowPhase(true);
+    setAutoFollowPhase(false);
     setPageError(null);
     try {
       await submitPlanDraftPreflight(draft.id, preflightAnswers, skip);
       await loadDraft(draft.id);
+      setSelectedPhase("preflight");
     } catch (caught) {
       setStreaming(false);
       setPageError(
@@ -2115,8 +2128,7 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
       return;
     }
     setSubmittingRepair(true);
-    setStreaming(true);
-    setAutoFollowPhase(true);
+    setAutoFollowPhase(false);
     setPageError(null);
     try {
       await submitPlanDraftRepair(draft.id, draft.revision, repairAnswers, {
@@ -2125,6 +2137,7 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
         source_version_id: draft.repair_context?.source_version_id ?? null,
       });
       await loadDraft(draft.id);
+      setSelectedPhase("preflight");
     } catch (caught) {
       setStreaming(false);
       setPageError(

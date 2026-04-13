@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -547,6 +548,22 @@ def _blank_repair_state() -> dict[str, Any]:
     }
 
 
+def _delegated_repair_state(
+    state: dict[str, Any],
+    follow_ups: list[dict[str, Any]],
+    *,
+    answers: dict[str, Any] | None = None,
+    gate_reason: str | None = None,
+) -> dict[str, Any]:
+    updated = dict(state or {})
+    updated["status"] = "delegated"
+    updated["questions"] = []
+    updated["answers"] = dict(answers or state.get("answers") or {})
+    updated["gate_reason"] = str(gate_reason if gate_reason is not None else state.get("gate_reason") or "")
+    updated["generated_follow_up_ids"] = [str(item.get("id") or "") for item in follow_ups if str(item.get("id") or "").strip()]
+    return updated
+
+
 def _repair_state_from_validation(validation: dict[str, Any]) -> dict[str, Any]:
     raw = validation.get("repair") if isinstance(validation, dict) else None
     if not isinstance(raw, dict):
@@ -566,6 +583,314 @@ def _with_updated_repair_state(validation: dict[str, Any], repair: dict[str, Any
         return updated
     updated["repair"] = repair
     return updated
+
+
+def _planning_follow_ups_from_validation(validation: dict[str, Any] | None) -> list[dict[str, Any]]:
+    raw = validation.get("planning_follow_ups") if isinstance(validation, dict) else None
+    if not isinstance(raw, list):
+        return []
+    follow_ups: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        follow_ups.append(
+            {
+                "id": str(item.get("id") or _stable_issue_id("planning_follow_up", str(item.get("prompt") or ""))),
+                "source": str(item.get("source") or "follow_up_prompt"),
+                "mode": str(item.get("mode") or "execution"),
+                "status": str(item.get("status") or "delegated"),
+                "prompt": str(item.get("prompt") or "").strip(),
+                "reason": str(item.get("reason") or "").strip(),
+                "question_id": str(item.get("question_id") or "").strip(),
+                "origin_run_id": str(item.get("origin_run_id") or "").strip(),
+                "origin_version_id": str(item.get("origin_version_id") or "").strip(),
+                "selected_option": str(item.get("selected_option") or "").strip(),
+                "custom_answer": str(item.get("custom_answer") or "").strip(),
+                "generated_task_ids": [
+                    str(task_id).strip()
+                    for task_id in list(item.get("generated_task_ids") or [])
+                    if str(task_id).strip()
+                ],
+                "target_task_ids": [
+                    str(task_id).strip()
+                    for task_id in list(item.get("target_task_ids") or [])
+                    if str(task_id).strip()
+                ],
+            }
+        )
+    return follow_ups
+
+
+def _with_planning_follow_ups(validation: dict[str, Any] | None, follow_ups: list[dict[str, Any]]) -> dict[str, Any]:
+    updated = dict(validation or {})
+    updated["planning_follow_ups"] = follow_ups
+    return updated
+
+
+def _merge_planning_follow_ups(
+    validation: dict[str, Any] | None,
+    new_follow_ups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {
+        str(item.get("id") or ""): dict(item)
+        for item in _planning_follow_ups_from_validation(validation)
+        if str(item.get("id") or "").strip()
+    }
+    for item in new_follow_ups:
+        follow_up_id = str(item.get("id") or "").strip()
+        if not follow_up_id:
+            continue
+        existing = dict(merged.get(follow_up_id) or {})
+        merged[follow_up_id] = {
+            **existing,
+            **dict(item),
+            "generated_task_ids": list(item.get("generated_task_ids") or existing.get("generated_task_ids") or []),
+            "target_task_ids": list(item.get("target_task_ids") or existing.get("target_task_ids") or []),
+        }
+    return list(merged.values())
+
+
+def _planning_follow_up_id(source: str, prompt: str, question_id: str = "", origin_run_id: str = "") -> str:
+    return f"followup_{_stable_issue_id(source, question_id or prompt, origin_run_id)}"
+
+
+def _question_target_task_ids(question: dict[str, Any], issues: list[dict[str, Any]], spec_dict: dict[str, Any]) -> list[str]:
+    issue_ids = {
+        str(issue_id).strip()
+        for issue_id in list(question.get("issue_ids") or [])
+        if str(issue_id).strip()
+    }
+    targets: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        if issue_ids and str(issue.get("issue_id") or "").strip() not in issue_ids:
+            continue
+        task_id = str(issue.get("task_id") or "").strip()
+        if task_id and task_id not in targets:
+            targets.append(task_id)
+    if targets:
+        return targets
+    prompt = str(question.get("prompt") or "")
+    match = re.search(r"\bfor\s+([A-Za-z0-9_.:-]+)\??", prompt)
+    if match:
+        return [match.group(1)]
+    existing_ids = [
+        str(task.get("id") or "").strip()
+        for task in list(spec_dict.get("tasks") or [])
+        if isinstance(task, dict) and str(task.get("id") or "").strip()
+    ]
+    return existing_ids
+
+
+def build_planning_follow_up_records(
+    *,
+    source: str,
+    spec_dict: dict[str, Any],
+    questions: list[dict[str, Any]] | None = None,
+    message: str | None = None,
+    reason: str | None = None,
+    answers: dict[str, dict[str, str]] | None = None,
+    issues: list[dict[str, Any]] | None = None,
+    origin_run_id: str | None = None,
+    origin_version_id: str | None = None,
+) -> list[dict[str, Any]]:
+    follow_ups: list[dict[str, Any]] = []
+    if message is not None:
+        prompt = str(message).strip()
+        if not prompt:
+            return []
+        follow_ups.append(
+            {
+                "id": _planning_follow_up_id(source, prompt, origin_run_id=str(origin_run_id or "")),
+                "source": source,
+                "mode": "execution",
+                "status": "delegated",
+                "prompt": prompt,
+                "reason": str(reason or "Operator guidance submitted during planning.").strip(),
+                "question_id": "",
+                "origin_run_id": str(origin_run_id or ""),
+                "origin_version_id": str(origin_version_id or ""),
+                "selected_option": "",
+                "custom_answer": "",
+                "generated_task_ids": [],
+                "target_task_ids": [
+                    str(task.get("id") or "").strip()
+                    for task in list(spec_dict.get("tasks") or [])
+                    if isinstance(task, dict) and str(task.get("id") or "").strip()
+                ],
+            }
+        )
+        return follow_ups
+
+    for question in questions or []:
+        if not isinstance(question, dict):
+            continue
+        prompt = str(question.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        question_id = str(question.get("id") or "").strip()
+        answer = dict((answers or {}).get(question_id) or {})
+        follow_ups.append(
+            {
+                "id": _planning_follow_up_id(source, prompt, question_id=question_id, origin_run_id=str(origin_run_id or "")),
+                "source": source,
+                "mode": "execution",
+                "status": "delegated",
+                "prompt": prompt,
+                "reason": str(question.get("reason") or reason or "").strip(),
+                "question_id": question_id,
+                "origin_run_id": str(origin_run_id or ""),
+                "origin_version_id": str(origin_version_id or ""),
+                "selected_option": str(answer.get("selected_option") or "").strip(),
+                "custom_answer": str(answer.get("custom_answer") or "").strip(),
+                "generated_task_ids": [],
+                "target_task_ids": _question_target_task_ids(question, list(issues or []), spec_dict),
+            }
+        )
+    return follow_ups
+
+
+def _follow_up_task_id(follow_up: dict[str, Any], existing_ids: set[str]) -> str:
+    generated = [
+        str(task_id).strip()
+        for task_id in list(follow_up.get("generated_task_ids") or [])
+        if str(task_id).strip()
+    ]
+    for task_id in generated:
+        return task_id
+    base = f"follow_up_{_stable_issue_id(str(follow_up.get('id') or ''), str(follow_up.get('prompt') or ''))}"
+    candidate = base
+    suffix = 2
+    while candidate in existing_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _follow_up_resolution_text(follow_up: dict[str, Any]) -> str:
+    custom = str(follow_up.get("custom_answer") or "").strip()
+    if custom:
+        return custom
+    selected = str(follow_up.get("selected_option") or "").strip()
+    return selected
+
+
+def _build_follow_up_task(
+    follow_up: dict[str, Any],
+    *,
+    task_id: str,
+    default_working_dir: str | None,
+) -> dict[str, Any]:
+    resolution_text = _follow_up_resolution_text(follow_up)
+    description_lines = [
+        "Resolve the planning follow-up before dependent implementation work proceeds.",
+        f"Question: {str(follow_up.get('prompt') or '').strip()}",
+    ]
+    reason = str(follow_up.get("reason") or "").strip()
+    if reason:
+        description_lines.append(f"Why it exists: {reason}")
+    if resolution_text:
+        description_lines.append(f"Operator preference recorded: {resolution_text}")
+    description_lines.append(
+        "Choose the safest concrete interpretation, implement any required code/test/doc updates, and report the decision in the worker output."
+    )
+    task = {
+        "id": task_id,
+        "title": f"Resolve planning follow-up: {str(follow_up.get('prompt') or '').strip()[:72]}",
+        "description": "\n".join(description_lines),
+        "acceptance_criteria": [
+            f'Worker output includes a "Follow-up Resolution" section that answers "{str(follow_up.get("prompt") or "").strip()}".',
+            "Any required code, tests, docs, or configuration updates for that resolution are completed, or the worker explicitly justifies why no code change was needed.",
+            "Worker output lists the verification command that was run, or states why no additional verification command applied.",
+        ],
+        "dependencies": [],
+        "output_artifacts": [],
+        "max_retries": 3,
+    }
+    if default_working_dir:
+        task["working_dir"] = default_working_dir
+    return task
+
+
+def inject_planning_follow_ups_into_spec(
+    spec_dict: dict[str, Any],
+    follow_ups: list[dict[str, Any]],
+    *,
+    default_working_dir: str | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    updated = dict(spec_dict or {})
+    raw_tasks = [dict(task) for task in list(updated.get("tasks") or []) if isinstance(task, dict)]
+    tasks_by_id: dict[str, dict[str, Any]] = {}
+    original_order: list[str] = []
+    for task in raw_tasks:
+        task_id = str(task.get("id") or "").strip()
+        if not task_id:
+            continue
+        tasks_by_id[task_id] = dict(task)
+        original_order.append(task_id)
+
+    existing_ids = set(tasks_by_id)
+    generated_order: list[str] = []
+
+    for index, follow_up in enumerate(follow_ups):
+        task_id = _follow_up_task_id(follow_up, existing_ids)
+        existing_ids.add(task_id)
+        follow_ups[index] = {
+            **dict(follow_up),
+            "generated_task_ids": [task_id],
+        }
+        tasks_by_id[task_id] = _build_follow_up_task(
+            follow_ups[index],
+            task_id=task_id,
+            default_working_dir=default_working_dir or str(updated.get("working_dir") or "").strip() or None,
+        )
+        if task_id not in generated_order:
+            generated_order.append(task_id)
+
+    all_generated_ids = {
+        str(task_id).strip()
+        for item in follow_ups
+        for task_id in list(item.get("generated_task_ids") or [])
+        if str(task_id).strip()
+    }
+    for follow_up in follow_ups:
+        generated_ids = [
+            str(task_id).strip()
+            for task_id in list(follow_up.get("generated_task_ids") or [])
+            if str(task_id).strip()
+        ]
+        if not generated_ids:
+            continue
+        generated_id = generated_ids[0]
+        requested_targets = [
+            str(task_id).strip()
+            for task_id in list(follow_up.get("target_task_ids") or [])
+            if str(task_id).strip()
+        ]
+        target_ids = requested_targets or [
+            task_id
+            for task_id in original_order
+            if task_id not in all_generated_ids and task_id != generated_id
+        ]
+        for target_id in target_ids:
+            task = tasks_by_id.get(target_id)
+            if not task or target_id == generated_id:
+                continue
+            dependencies = [
+                str(dep).strip()
+                for dep in list(task.get("dependencies") or [])
+                if str(dep).strip() and str(dep).strip() != generated_id
+            ]
+            task["dependencies"] = [generated_id, *dependencies]
+            tasks_by_id[target_id] = task
+
+    ordered_ids = generated_order + [task_id for task_id in original_order if task_id not in generated_order]
+    for task_id in tasks_by_id:
+        if task_id not in ordered_ids:
+            ordered_ids.append(task_id)
+    updated["tasks"] = [tasks_by_id[task_id] for task_id in ordered_ids]
+    return updated, follow_ups
 
 
 def _pending_repair_state(
@@ -626,6 +951,42 @@ def _mission_plan_validation(spec_dict: dict[str, Any]) -> dict[str, Any]:
         "warnings": warnings,
         "structured_issues": structured_issues,
         "blocking_issues": [issue for issue in structured_issues if issue.get("blocking")],
+    }
+
+
+def relieve_validation_with_follow_ups(
+    validation: dict[str, Any],
+    follow_ups: list[dict[str, Any]],
+) -> dict[str, Any]:
+    covered_task_ids = {
+        str(task_id).strip()
+        for follow_up in follow_ups
+        if str(follow_up.get("source") or "") == "repair"
+        for task_id in list(follow_up.get("target_task_ids") or [])
+        if str(task_id).strip()
+    }
+    if not covered_task_ids:
+        return validation
+
+    structured_issues = [
+        issue
+        for issue in list(validation.get("structured_issues") or [])
+        if not (
+            isinstance(issue, dict)
+            and issue.get("blocking")
+            and str(issue.get("task_id") or "").strip() in covered_task_ids
+        )
+    ]
+    warnings = list(validation.get("warnings") or [])
+    warnings.append(
+        f"{len(covered_task_ids)} blocking planning issue(s) were delegated to execution follow-up tasks."
+    )
+    return {
+        **validation,
+        "issues": [_issue_summary(issue) for issue in structured_issues],
+        "warnings": warnings,
+        "structured_issues": structured_issues,
+        "blocking_issues": [issue for issue in structured_issues if isinstance(issue, dict) and issue.get("blocking")],
     }
 
 
@@ -1035,6 +1396,7 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
     validation = dict(resume_state.get("validation") or {})
     technical = dict(resume_state.get("technical") or {})
     practical = dict(resume_state.get("practical") or {})
+    follow_ups = _planning_follow_ups_from_validation(draft.validation)
 
     if not start_step or _step_index(start_step) <= _step_index("planner_synthesis"):
         run = _record_step(run, name="planner_synthesis", status="started", message="Generating initial plan")
@@ -1056,9 +1418,17 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
             state_value=spec_dict,
         )
 
+    if follow_ups:
+        spec_dict, follow_ups = inject_planning_follow_ups_into_spec(
+            spec_dict,
+            follow_ups,
+            default_working_dir=str(draft.draft_spec.get("working_dir") or "").strip() or None,
+        )
+
     if not start_step or _step_index(start_step) <= _step_index("mission_plan_pass"):
         run = _record_step(run, name="mission_plan_pass", status="started", message="Applying mission-plan checks")
         validation = _mission_plan_validation(spec_dict)
+        validation = relieve_validation_with_follow_ups(validation, follow_ups)
         run = _record_step(
             run,
             name="mission_plan_pass",
@@ -1147,33 +1517,31 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
         raise RuntimeError(f"Draft {draft.id!r} disappeared during planning")
 
     prior_repair = _repair_state_from_validation(latest_draft.validation)
+    merged_follow_ups = _planning_follow_ups_from_validation(latest_draft.validation)
     if repair_gate:
-        next_round = int(prior_repair.get("repair_round") or 0) + 1
-        max_rounds = int(prior_repair.get("max_rounds") or 2)
-        if next_round > max_rounds:
-            repair_state = {
-                **_blank_repair_state(),
-                "status": "manual_edit_required",
-                "repair_round": max_rounds,
-                "max_rounds": max_rounds,
-                "issues": list(validation.get("blocking_issues") or []),
-                "questions": [],
-                "answers": {},
-                "gate_reason": "Repair round cap reached. Open edit mode and fix the mission manually.",
-            }
-            assistant_message = "Repair round cap reached. Open edit mode and fix the mission manually."
-        else:
-            repair_state = _pending_repair_state(
-                run=run,
-                version_id="",
-                issues=list(validation.get("blocking_issues") or []),
-                questions=list(repair_gate.get("questions") or []),
-                gate_reason=str(repair_gate.get("gate_reason") or ""),
-                repair_round=next_round,
-                max_rounds=max_rounds,
-                mode="plan",
-            )
-            assistant_message = str(repair_gate.get("gate_reason") or assistant_message)
+        repair_follow_ups = build_planning_follow_up_records(
+            source="repair",
+            spec_dict=spec_dict,
+            questions=list(repair_gate.get("questions") or []),
+            issues=list(validation.get("blocking_issues") or []),
+            origin_run_id=run.id,
+        )
+        merged_follow_ups = _merge_planning_follow_ups(latest_draft.validation, repair_follow_ups)
+        spec_dict, merged_follow_ups = inject_planning_follow_ups_into_spec(
+            spec_dict,
+            merged_follow_ups,
+            default_working_dir=str(draft.draft_spec.get("working_dir") or "").strip() or None,
+        )
+        validation = relieve_validation_with_follow_ups(_mission_plan_validation(spec_dict), repair_follow_ups)
+        repair_state = _delegated_repair_state(
+            prior_repair,
+            repair_follow_ups,
+            gate_reason=str(repair_gate.get("gate_reason") or ""),
+        )
+        assistant_message = (
+            f"{str(repair_gate.get('gate_reason') or assistant_message).strip()} "
+            "Delegated the follow-up to the solver instead of reopening the full planning loop."
+        ).strip()
     else:
         repair_state = None
 
@@ -1189,12 +1557,9 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
             "technical": technical,
             "practical": practical,
             "repair": repair_state or _blank_repair_state(),
+            "planning_follow_ups": merged_follow_ups,
         },
     )
-    if repair_state is not None and repair_state.get("status") == "pending":
-        repair_state = {**repair_state, "source_version_id": version.id}
-        version = version.copy_with(validation={**version.validation, "repair": repair_state})
-        store.save_version(version)
     run = _record_step(
         run,
         name="resolver",
@@ -1253,6 +1618,7 @@ def _run_plan_run_internal(run: PlanRunRecord) -> None:
                 "critic_practical": critic_practical_profile.__dict__,
                 "resolver": synthesis_profile.__dict__,
             },
+            "planning_follow_ups": merged_follow_ups,
             **({"repair": repair_state} if repair_state is not None else {}),
         },
         activity_log=list(latest_draft.activity_log) + [{
@@ -1613,6 +1979,7 @@ def _synthesize_black_hole_child_plan(
     planner_profile = _resolve_profile(draft, "planner")
     technical_profile = _resolve_profile(draft, "critic_technical")
     practical_profile = _resolve_profile(draft, "critic_practical")
+    follow_ups = _planning_follow_ups_from_validation(draft.validation)
 
     run = _record_step(run, name="planner_synthesis", status="started", message="Generating black-hole child mission")
     planner_text, planner_usage, planner_error = _safe_profile_invoke(
@@ -1630,6 +1997,12 @@ def _synthesize_black_hole_child_plan(
             else "Planner output was invalid; using a deterministic single-task fallback mission scoped to the selected candidate."
         )
     spec_dict = _normalize_black_hole_child_spec(draft, config, candidate, spec_dict)
+    if follow_ups:
+        spec_dict, follow_ups = inject_planning_follow_ups_into_spec(
+            spec_dict,
+            follow_ups,
+            default_working_dir=str(draft.draft_spec.get("working_dir") or "").strip() or None,
+        )
     run = _record_step(
         run,
         name="planner_synthesis",
@@ -1642,6 +2015,7 @@ def _synthesize_black_hole_child_plan(
 
     run = _record_step(run, name="mission_plan_pass", status="started", message="Applying mission-plan checks")
     validation = _mission_plan_validation(spec_dict)
+    validation = relieve_validation_with_follow_ups(validation, follow_ups)
     run = _record_step(
         run,
         name="mission_plan_pass",
@@ -1716,42 +2090,38 @@ def _synthesize_black_hole_child_plan(
         raise RuntimeError(f"Draft {draft.id!r} disappeared during black-hole planning")
 
     prior_repair = _repair_state_from_validation(latest_draft.validation)
+    merged_follow_ups = _planning_follow_ups_from_validation(latest_draft.validation)
     if repair_gate:
-        next_round = int(prior_repair.get("repair_round") or 0) + 1
-        max_rounds = int(prior_repair.get("max_rounds") or 2)
-        if next_round > max_rounds:
-            repair_state = {
-                **_blank_repair_state(),
-                "status": "manual_edit_required",
-                "repair_round": max_rounds,
-                "max_rounds": max_rounds,
-                "issues": list(validation.get("blocking_issues") or []),
-                "questions": [],
-                "answers": {},
-                "gate_reason": "Repair round cap reached. Open edit mode and fix the child plan manually.",
+        repair_follow_ups = build_planning_follow_up_records(
+            source="repair",
+            spec_dict=spec_dict,
+            questions=list(repair_gate.get("questions") or []),
+            issues=list(validation.get("blocking_issues") or []),
+            origin_run_id=run.id,
+        )
+        merged_follow_ups = _merge_planning_follow_ups(latest_draft.validation, repair_follow_ups)
+        spec_dict, merged_follow_ups = inject_planning_follow_ups_into_spec(
+            spec_dict,
+            merged_follow_ups,
+            default_working_dir=str(draft.draft_spec.get("working_dir") or "").strip() or None,
+        )
+        validation = relieve_validation_with_follow_ups(_mission_plan_validation(spec_dict), repair_follow_ups)
+        repair_state = _delegated_repair_state(
+            {
+                **prior_repair,
                 "mode": "black_hole",
                 "loop_no": loop_no,
                 "candidate": candidate,
                 "analyzer_result": analyzer_result,
                 "config_snapshot": config,
-            }
-            assistant_message = "Repair round cap reached. Open edit mode and fix the child plan manually."
-        else:
-            repair_state = _pending_repair_state(
-                run=run,
-                version_id="",
-                issues=list(validation.get("blocking_issues") or []),
-                questions=list(repair_gate.get("questions") or []),
-                gate_reason=str(repair_gate.get("gate_reason") or ""),
-                repair_round=next_round,
-                max_rounds=max_rounds,
-                mode="black_hole",
-                loop_no=loop_no,
-                candidate=candidate,
-                analyzer_result=analyzer_result,
-                config=config,
-            )
-            assistant_message = str(repair_gate.get("gate_reason") or assistant_message)
+            },
+            repair_follow_ups,
+            gate_reason=str(repair_gate.get("gate_reason") or ""),
+        )
+        assistant_message = (
+            f"{str(repair_gate.get('gate_reason') or assistant_message).strip()} "
+            "Delegated the child-plan follow-up to the solver instead of reopening the full planning loop."
+        ).strip()
     else:
         repair_state = None
     version = store.create_version(
@@ -1768,12 +2138,9 @@ def _synthesize_black_hole_child_plan(
             "black_hole_campaign_id": campaign.id,
             "black_hole_loop_no": loop_no,
             "repair": repair_state or _blank_repair_state(),
+            "planning_follow_ups": merged_follow_ups,
         },
     )
-    if repair_state is not None and repair_state.get("status") == "pending":
-        repair_state = {**repair_state, "source_version_id": version.id}
-        version = version.copy_with(validation={**version.validation, "repair": repair_state})
-        store.save_version(version)
     run = _record_step(
         run,
         name="resolver",
@@ -1809,10 +2176,11 @@ def _synthesize_black_hole_child_plan(
                 "latest_plan_version_id": version.id,
                 "plan_validation": version.validation,
                 "plan_changelog": changelog,
+                "planning_follow_ups": merged_follow_ups,
                 "repair": repair_state,
             },
             activity_log=list(latest_draft.activity_log) + [{
-                "type": "black_hole_repair_requested",
+                "type": "black_hole_repair_delegated",
                 "plan_run_id": run.id,
                 "plan_version_id": version.id,
                 "loop_no": loop_no,
@@ -1822,7 +2190,8 @@ def _synthesize_black_hole_child_plan(
         if save_result.status == "saved" and save_result.draft is not None:
             ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
             state_io._broadcast_mission_list_refresh()
-    return run, version, spec_dict, changelog, assistant_message, repair_state
+    returned_repair_state = None if repair_state is not None and repair_state.get("status") == "delegated" else repair_state
+    return run, version, spec_dict, changelog, assistant_message, returned_repair_state
 
 
 def _launch_black_hole_mission(

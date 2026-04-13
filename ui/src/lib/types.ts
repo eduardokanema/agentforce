@@ -111,6 +111,7 @@ export interface MissionDraft {
   preflight_status?: string;
   preflight_questions?: PreflightQuestion[];
   preflight_answers?: Record<string, PreflightAnswer>;
+  planning_follow_ups?: PlanningFollowUp[];
   repair_status?: string;
   repair_questions?: PreflightQuestion[];
   repair_answers?: Record<string, PreflightAnswer>;
@@ -274,6 +275,22 @@ export interface PreflightQuestion {
 export interface PreflightAnswer {
   selected_option?: string;
   custom_answer?: string;
+}
+
+export interface PlanningFollowUp {
+  id: string;
+  source: string;
+  mode: string;
+  status: string;
+  prompt: string;
+  reason?: string;
+  question_id?: string;
+  origin_run_id?: string;
+  origin_version_id?: string;
+  selected_option?: string;
+  custom_answer?: string;
+  generated_task_ids: string[];
+  target_task_ids: string[];
 }
 
 export interface RepairIssue {

@@ -976,7 +976,7 @@ def test_plan_draft_delete_rejects_terminal_drafts(tmp_path, monkeypatch):
     assert store.load(created.id) is not None
 
 
-def test_plan_draft_create_with_preflight_questions_blocks_initial_run(tmp_path, monkeypatch):
+def test_plan_draft_create_with_preflight_questions_delegates_execution_follow_up_and_starts_initial_run(tmp_path, monkeypatch):
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
@@ -1001,15 +1001,22 @@ def test_plan_draft_create_with_preflight_questions_blocks_initial_run(tmp_path,
     create_handler.do_POST()
 
     body = _response_body(create_handler)
-    assert body["requires_preflight"] is True
-    assert "plan_run_id" not in body
-    assert enqueued == []
+    assert body["requires_preflight"] is False
+    assert body["plan_run_id"]
+    assert enqueued == [body["plan_run_id"]]
 
     get_handler = _make_handler(f"/api/plan/drafts/{body['id']}")
     get_handler.do_GET()
     loaded = _response_body(get_handler)
-    assert loaded["preflight_status"] == "pending"
-    assert len(loaded["preflight_questions"]) == 1
+    assert loaded["preflight_status"] == "delegated"
+    assert loaded["preflight_questions"] == []
+    assert len(loaded["planning_follow_ups"]) == 1
+    follow_up = loaded["planning_follow_ups"][0]
+    assert follow_up["source"] == "preflight"
+    assert follow_up["status"] == "delegated"
+    assert follow_up["mode"] == "execution"
+    assert follow_up["generated_task_ids"]
+    assert loaded["draft_spec"]["tasks"][0]["id"] == follow_up["generated_task_ids"][0]
 
 
 def test_plan_draft_create_with_preflight_preserves_planning_profiles(tmp_path, monkeypatch):
@@ -1051,7 +1058,8 @@ def test_plan_draft_create_with_preflight_preserves_planning_profiles(tmp_path, 
     get_handler.do_GET()
     loaded = _response_body(get_handler)
 
-    assert loaded["preflight_status"] == "pending"
+    assert loaded["preflight_status"] == "delegated"
+    assert len(loaded["planning_follow_ups"]) == 1
     assert loaded["validation"]["planning_profiles"]["planner"] == {
         "agent": "codex",
         "model": "gpt-5.4",
@@ -1064,45 +1072,48 @@ def test_plan_draft_create_with_preflight_preserves_planning_profiles(tmp_path, 
     }
 
 
-def test_plan_draft_preflight_submission_enqueues_initial_run(tmp_path, monkeypatch):
+def test_legacy_preflight_submission_delegates_solver_follow_up_without_plan_run(tmp_path, monkeypatch):
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        plan_routes,
-        "discover_preflight_questions",
-        lambda _draft: [
-            {
-                "id": "scope_mode",
-                "prompt": "Should the first release focus on project selection or project data model changes?",
-                "options": ["Selection only", "Both together"],
-                "reason": "This changes the task graph and dependencies.",
-                "allow_custom": True,
-            }
-        ],
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.create(
+        "draft-legacy-preflight",
+        **_draft_payload(
+            "Plan project support",
+            validation={
+                "preflight_status": "pending",
+                "preflight_questions": [
+                    {
+                        "id": "scope_mode",
+                        "prompt": "Should the first release focus on project selection or project data model changes?",
+                        "options": ["Selection only", "Both together"],
+                        "reason": "This changes the task graph and dependencies.",
+                        "allow_custom": True,
+                    }
+                ],
+                "preflight_answers": {},
+            },
+        ),
     )
     enqueued: list[str] = []
     monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
 
-    create_handler = _make_handler("/api/plan/drafts")
-    _json_request(create_handler, {"prompt": "Plan project support", "auto_start": True})
-    create_handler.do_POST()
-    draft_id = _response_body(create_handler)["id"]
-
-    submit_handler = _make_handler(f"/api/plan/drafts/{draft_id}/preflight")
+    submit_handler = _make_handler(f"/api/plan/drafts/{draft.id}/preflight")
     _json_request(submit_handler, {"answers": {"scope_mode": {"selected_option": "Selection only"}}})
     submit_handler.do_POST()
 
     body = _response_body(submit_handler)
-    assert body["status"] == "queued"
-    assert body["plan_run_id"]
-    assert enqueued == [body["plan_run_id"]]
+    assert body["status"] == "delegated"
+    assert "plan_run_id" not in body
+    assert enqueued == []
 
-    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
-    get_handler.do_GET()
-    loaded = _response_body(get_handler)
-    assert loaded["preflight_status"] == "answered"
-    assert loaded["preflight_answers"]["scope_mode"]["selected_option"] == "Selection only"
+    loaded = store.load(draft.id)
+    assert loaded is not None
+    assert loaded.validation["preflight_status"] == "delegated"
+    assert len(loaded.validation["planning_follow_ups"]) == 1
+    assert loaded.draft_spec["tasks"]
+    assert loaded.draft_spec["tasks"][0]["title"].startswith("Resolve planning follow-up")
 
 
 def test_black_hole_preflight_submission_does_not_enqueue_simple_plan_run(tmp_path, monkeypatch):
@@ -1110,112 +1121,48 @@ def test_black_hole_preflight_submission_does_not_enqueue_simple_plan_run(tmp_pa
 
     _patch_home(monkeypatch, tmp_path)
     (tmp_path / "config.json").write_text(json.dumps({"labs": {"black_hole_enabled": True}}))
-    monkeypatch.setattr(
-        plan_routes,
-        "discover_preflight_questions",
-        lambda _draft: [
-            {
-                "id": "scope_mode",
-                "prompt": "Should the campaign inspect one workspace or all workspaces?",
-                "options": ["Selection only", "All workspaces"],
-                "allow_custom": False,
-            }
-        ],
+    store = PlanDraftStore(tmp_path / "drafts")
+    draft = store.create(
+        "draft-black-hole-preflight",
+        **_draft_payload(
+            "Black hole prompt",
+            validation={
+                "draft_kind": "black_hole",
+                "preflight_status": "pending",
+                "preflight_questions": [
+                    {
+                        "id": "scope_mode",
+                        "prompt": "Should the campaign inspect one workspace or all workspaces?",
+                        "options": ["Selection only", "All workspaces"],
+                        "allow_custom": False,
+                    }
+                ],
+                "preflight_answers": {},
+            },
+        ),
     )
     enqueued: list[str] = []
     monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
 
-    create_handler = _make_handler("/api/plan/drafts")
-    _json_request(create_handler, {"prompt": "Black hole prompt", "validation": {"draft_kind": "black_hole"}, "auto_start": False})
-    create_handler.do_POST()
-    draft_id = _response_body(create_handler)["id"]
-
-    submit_handler = _make_handler(f"/api/plan/drafts/{draft_id}/preflight")
+    submit_handler = _make_handler(f"/api/plan/drafts/{draft.id}/preflight")
     _json_request(submit_handler, {"answers": {"scope_mode": {"selected_option": "Selection only"}}})
     submit_handler.do_POST()
 
     assert submit_handler.send_response.call_args.args == (200,)
-    assert _response_body(submit_handler)["status"] == "ready"
+    assert _response_body(submit_handler)["status"] == "delegated"
     assert enqueued == []
-    store = PlanDraftStore(tmp_path / "drafts")
-    loaded = store.load(draft_id)
+    loaded = store.load(draft.id)
     assert loaded is not None
-    assert loaded.turns[-1]["content"].startswith("Preflight answers:")
+    assert loaded.validation["preflight_status"] == "delegated"
+    assert len(loaded.validation["planning_follow_ups"]) == 1
 
 
-def test_plan_draft_messages_blocked_while_preflight_pending(tmp_path, monkeypatch):
+def test_plan_draft_messages_delegate_execution_follow_up_and_persist_checkpoint(tmp_path, monkeypatch):
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        plan_routes,
-        "discover_preflight_questions",
-        lambda _draft: [
-            {
-                "id": "scope_mode",
-                "prompt": "Should the first release focus on project selection or project data model changes?",
-                "options": ["Selection only", "Both together"],
-                "reason": "This changes the task graph and dependencies.",
-                "allow_custom": True,
-            }
-        ],
-    )
-
-    create_handler = _make_handler("/api/plan/drafts")
-    _json_request(create_handler, {"prompt": "Plan project support"})
-    create_handler.do_POST()
-    draft_id = _response_body(create_handler)["id"]
-
-    message_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
-    _json_request(message_handler, {"content": "Start now"})
-    message_handler.do_POST()
-
-    assert message_handler.send_response.call_args.args == (409,)
-    assert "preflight" in _response_body(message_handler)["error"]
-
-
-def test_plan_draft_messages_enqueue_and_persist_checkpoint(tmp_path, monkeypatch):
-    from agentforce.server import planner_adapter as planner_adapter_mod
-    from agentforce.server import planning_runtime
-    from agentforce.server.routes import plan as plan_routes
-
-    _patch_home(monkeypatch, tmp_path)
-
-    class FakePlanner(planner_adapter_mod.PlannerAdapter):
-        def plan_turn(self, draft: dict, user_message: str) -> planner_adapter_mod.PlannerTurnResult:
-            updated = dict(draft["draft_spec"])
-            updated["name"] = "Calculator Draft"
-            updated["tasks"] = [
-                {
-                    "id": "01",
-                    "title": "Add parser",
-                    "description": "Parse CLI args",
-                    "acceptance_criteria": ["pytest tests/test_cli.py -k parser passes"],
-                }
-            ]
-            return planner_adapter_mod.PlannerTurnResult(
-                events=[
-                    planner_adapter_mod.PlannerEvent(phase="planning", status="started"),
-                    planner_adapter_mod.PlannerEvent(
-                        phase="planning",
-                        status="completed",
-                        content="I updated the draft with an initial task.",
-                    ),
-                ],
-                assistant_message="I updated the draft with an initial task.",
-                draft_spec=updated,
-            )
-
-    monkeypatch.setattr(planner_adapter_mod, "get_planner_adapter", lambda: FakePlanner())
-    monkeypatch.setattr(
-        planning_runtime,
-        "_invoke_profile",
-        lambda *_args, **_kwargs: (
-            json.dumps({"summary": "Critic complete", "issues": [], "suggestions": []}),
-            planning_runtime.TokenEvent(tokens_in=11, tokens_out=7, cost_usd=0.0),
-        ),
-    )
-    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: planning_runtime.run_plan_run(run_id))
+    enqueued: list[str] = []
+    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: enqueued.append(run_id))
 
     create_handler = _make_handler("/api/plan/drafts")
     _json_request(create_handler, {"prompt": "Build a calculator mission", "auto_start": False})
@@ -1228,16 +1175,21 @@ def test_plan_draft_messages_enqueue_and_persist_checkpoint(tmp_path, monkeypatc
 
     assert message_handler.send_response.call_args.args == (200,)
     queued_body = _response_body(message_handler)
-    assert queued_body["status"] == "queued"
-    assert queued_body["plan_run_id"]
+    assert queued_body["status"] == "delegated"
+    assert "plan_run_id" not in queued_body
+    assert enqueued == []
 
     get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
     get_handler.do_GET()
     loaded_body = _response_body(get_handler)
-    assert loaded_body["revision"] == 3
-    assert loaded_body["draft_spec"]["name"] == "Calculator Draft"
+    assert loaded_body["revision"] == 2
+    assert loaded_body["draft_spec"]["name"] == "Build A Calculator Mission"
     assert loaded_body["turns"][-1]["role"] == "assistant"
-    assert loaded_body["planning_summary"]["latest_plan_version_id"]
+    assert "solver" in loaded_body["turns"][-1]["content"].lower()
+    assert len(loaded_body["planning_follow_ups"]) == 1
+    follow_up = loaded_body["planning_follow_ups"][0]
+    assert follow_up["source"] == "follow_up_prompt"
+    assert loaded_body["draft_spec"]["tasks"][0]["id"] == follow_up["generated_task_ids"][0]
 
 
 def test_planner_adapter_default_is_live_boundary():
@@ -1560,7 +1512,6 @@ def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monk
             planning_runtime.TokenEvent(tokens_in=9, tokens_out=5, cost_usd=0.0),
         ),
     )
-    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: planning_runtime.run_plan_run(run_id))
     monkeypatch.setattr("agentforce.autonomous.run_autonomous", lambda *_args, **_kwargs: None)
     from agentforce.server import model_catalog
     from agentforce.server.model_catalog import ProfileNormalizationResult
@@ -1575,21 +1526,29 @@ def test_plan_draft_launch_rust_calculator_flow_with_fake_planner(tmp_path, monk
     create_handler.do_POST()
     draft_id = _response_body(create_handler)["id"]
 
-    first_turn_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
-    _json_request(first_turn_handler, {"content": "Seed the calculator with a parser task"})
-    first_turn_handler.do_POST()
-    assert first_turn_handler.send_response.call_args.args == (200,)
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+    first_run = planning_runtime.create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Seed the calculator with a parser task",
+    )
+    planning_runtime.run_plan_run(first_run.id)
 
-    second_turn_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
-    _json_request(second_turn_handler, {"content": "Add a second task and execution details"})
-    second_turn_handler.do_POST()
+    revised = plan_routes._load_draft(draft_id)
+    assert revised is not None
+    second_run = planning_runtime.create_plan_run_for_draft(
+        revised,
+        trigger_kind="follow_up",
+        trigger_message="Add a second task and execution details",
+    )
+    planning_runtime.run_plan_run(second_run.id)
 
-    assert second_turn_handler.send_response.call_args.args == (200,)
     get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
     get_handler.do_GET()
     revised_draft = _response_body(get_handler)
 
-    assert revised_draft["revision"] == 5
+    assert revised_draft["revision"] >= 3
     assert len(revised_draft["draft_spec"]["tasks"]) >= 2
     assert all(task["acceptance_criteria"] for task in revised_draft["draft_spec"]["tasks"])
 
@@ -2165,8 +2124,6 @@ def test_draft_init_live_planner_system_prompt_contains_draft_spec(tmp_path, mon
             planning_runtime.TokenEvent(tokens_in=1, tokens_out=1, cost_usd=0.0),
         ),
     )
-    monkeypatch.setattr(plan_routes, "_enqueue_plan_run", lambda run_id: planning_runtime.run_plan_run(run_id))
-
     # Mock connector availability
     monkeypatch.setattr("agentforce.connectors.claude.available", lambda: True)
     monkeypatch.setattr("agentforce.connectors.codex.available", lambda: False)
@@ -2180,17 +2137,21 @@ def test_draft_init_live_planner_system_prompt_contains_draft_spec(tmp_path, mon
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-    # Create a draft then send a message to trigger plan_turn
+    # Create a draft then run planner synthesis directly to trigger plan_turn
     create_handler = _make_handler("/api/plan/drafts")
     _json_request(create_handler, {"prompt": "Build something", "auto_start": False})
     create_handler.do_POST()
     draft_id = _response_body(create_handler)["id"]
 
-    message_handler = _make_handler(f"/api/plan/drafts/{draft_id}/messages")
-    _json_request(message_handler, {"content": "Refine the plan"})
-    message_handler.do_POST()
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+    run = planning_runtime.create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Refine the plan",
+    )
+    planning_runtime.run_plan_run(run.id)
 
-    assert message_handler.send_response.call_args.args == (200,)
     assert captured_system_prompts, "expected _build_system_prompt to be called"
     assert "draft_spec" in captured_system_prompts[0]
 
@@ -2646,6 +2607,220 @@ def test_plan_run_retry_resets_after_follow_up_intervention(tmp_path, monkeypatc
     assert retried is not None
     assert retried.retry_attempt == 1
     assert retried.intervention_generation == 1
+
+
+def test_run_plan_run_delegates_repair_questions_into_execution_tasks(tmp_path, monkeypatch):
+    from agentforce.server import planner_adapter as planner_adapter_mod
+    from agentforce.server import planning_runtime
+    from agentforce.server.routes import plan as plan_routes
+
+    _patch_home(monkeypatch, tmp_path)
+
+    class FakePlanner(planner_adapter_mod.PlannerAdapter):
+        def plan_turn(self, draft: dict, user_message: str) -> planner_adapter_mod.PlannerTurnResult:
+            updated = dict(draft["draft_spec"])
+            updated["name"] = "Delegated Repair Draft"
+            updated["definition_of_done"] = ["Mission launches with solver-owned follow-up work."]
+            updated["tasks"] = [
+                {
+                    "id": "setup_env",
+                    "title": "Prepare environment",
+                    "description": "Prepare the delivery environment.",
+                    "acceptance_criteria": ["It works well"],
+                    "dependencies": [],
+                    "output_artifacts": [],
+                    "max_retries": 3,
+                }
+            ]
+            return planner_adapter_mod.PlannerTurnResult(
+                events=[],
+                assistant_message="Planner created an initial draft.",
+                draft_spec=updated,
+            )
+
+    monkeypatch.setattr(planner_adapter_mod, "get_planner_adapter", lambda: FakePlanner())
+    monkeypatch.setattr(
+        planning_runtime,
+        "_invoke_profile",
+        lambda *_args, **_kwargs: (
+            json.dumps({"summary": "Critic complete", "issues": [], "suggestions": []}),
+            planning_runtime.TokenEvent(tokens_in=0, tokens_out=0, cost_usd=0.0),
+        ),
+    )
+    monkeypatch.setattr(
+        planning_runtime,
+        "_resolve_findings",
+        lambda _draft, spec_dict, _technical, _practical: (
+            spec_dict,
+            "Resolver kept the plan unchanged.",
+            planning_runtime.TokenEvent(tokens_in=0, tokens_out=0, cost_usd=0.0),
+        ),
+    )
+    monkeypatch.setattr(
+        planning_runtime,
+        "_attempt_quality_repair",
+        lambda _draft, spec_dict, _blocking_issues: (
+            spec_dict,
+            planning_runtime._mission_plan_validation(spec_dict),
+            "Delegated the repair question to the solver.",
+            planning_runtime.TokenEvent(tokens_in=0, tokens_out=0, cost_usd=0.0),
+            {
+                "questions": [
+                    {
+                        "id": "repair_setup_env",
+                        "prompt": "How should this criterion be made measurable?",
+                        "options": [
+                            "Add an explicit verification command and exit code",
+                            "Require a concrete output artifact or file path",
+                        ],
+                        "reason": "Task setup_env acceptance criteria item is too vague",
+                        "allow_custom": True,
+                        "issue_ids": ["repair_setup_env"],
+                    }
+                ],
+                "gate_reason": "Task setup_env acceptance criteria item is too vague",
+            },
+        ),
+    )
+
+    create_handler = _make_handler("/api/plan/drafts")
+    _json_request(create_handler, {"prompt": "Build a delegated repair plan", "auto_start": False})
+    create_handler.do_POST()
+    draft_id = _response_body(create_handler)["id"]
+
+    draft = plan_routes._load_draft(draft_id)
+    assert draft is not None
+
+    run = planning_runtime.create_plan_run_for_draft(
+        draft,
+        trigger_kind="auto",
+        trigger_message="Initial planning attempt",
+    )
+    planning_runtime.run_plan_run(run.id)
+
+    get_handler = _make_handler(f"/api/plan/drafts/{draft_id}")
+    get_handler.do_GET()
+    loaded = _response_body(get_handler)
+
+    assert loaded["repair_status"] == "delegated"
+    assert len(loaded["planning_follow_ups"]) == 1
+    follow_up = loaded["planning_follow_ups"][0]
+    assert follow_up["source"] == "repair"
+    assert follow_up["status"] == "delegated"
+    assert follow_up["generated_task_ids"]
+    assert len(loaded["draft_spec"]["tasks"]) == 2
+    generated_task = next(task for task in loaded["draft_spec"]["tasks"] if task["id"] == follow_up["generated_task_ids"][0])
+    primary_task = next(task for task in loaded["draft_spec"]["tasks"] if task["id"] == "setup_env")
+    assert generated_task["title"].startswith("Resolve planning follow-up")
+    assert primary_task["dependencies"] == [generated_task["id"]]
+    assert loaded["planning_summary"]["latest_plan_version_id"]
+
+
+def test_black_hole_child_plan_delegates_repair_questions_into_execution_tasks(tmp_path, monkeypatch):
+    from agentforce.server import planning_runtime
+    from agentforce.server.black_hole_runs import BlackHoleCampaignStore
+
+    _patch_home(monkeypatch, tmp_path)
+    draft_store = PlanDraftStore(tmp_path / "drafts")
+    draft = draft_store.create(
+        "draft-black-hole-follow-up",
+        **_draft_payload("Black Hole Draft", validation={"draft_kind": "black_hole"}),
+    )
+    campaign_store = BlackHoleCampaignStore(tmp_path / "black_hole")
+    campaign = campaign_store.create_campaign(
+        "campaign-black-hole-follow-up",
+        draft_id=draft.id,
+        max_loops=4,
+        max_no_progress=2,
+        config_snapshot={"objective": "Improve the selected candidate"},
+    )
+
+    def fake_safe_profile_invoke(_profile, prompt: str, _workdir: str | None):
+        if "synthesizing one AgentForce mission" in prompt:
+            return (
+                json.dumps({
+                    "assistant_message": "Planner created the child mission.",
+                    "draft_spec": {
+                        "name": "Child Mission",
+                        "goal": "Fix the selected candidate",
+                        "definition_of_done": ["Child mission can launch."],
+                        "caps": {"max_concurrent_workers": 1},
+                        "tasks": [
+                            {
+                                "id": "candidate_task",
+                                "title": "Fix candidate",
+                                "description": "Fix the selected candidate.",
+                                "acceptance_criteria": ["It works well"],
+                                "dependencies": [],
+                                "output_artifacts": [],
+                                "max_retries": 3,
+                            }
+                        ],
+                    },
+                }),
+                planning_runtime.TokenEvent(tokens_in=0, tokens_out=0, cost_usd=0.0),
+                None,
+            )
+        return (
+            json.dumps({"summary": "Critic complete", "issues": [], "suggestions": []}),
+            planning_runtime.TokenEvent(tokens_in=0, tokens_out=0, cost_usd=0.0),
+            None,
+        )
+
+    monkeypatch.setattr(planning_runtime, "_safe_profile_invoke", fake_safe_profile_invoke)
+    monkeypatch.setattr(
+        planning_runtime,
+        "_resolve_findings",
+        lambda _draft, spec_dict, _technical, _practical: (
+            spec_dict,
+            "Resolver kept the child plan unchanged.",
+            planning_runtime.TokenEvent(tokens_in=0, tokens_out=0, cost_usd=0.0),
+        ),
+    )
+    monkeypatch.setattr(
+        planning_runtime,
+        "_attempt_quality_repair",
+        lambda _draft, spec_dict, _blocking_issues: (
+            spec_dict,
+            planning_runtime._mission_plan_validation(spec_dict),
+            "Delegated the child-plan repair question to the solver.",
+            planning_runtime.TokenEvent(tokens_in=0, tokens_out=0, cost_usd=0.0),
+            {
+                "questions": [
+                    {
+                        "id": "repair_candidate",
+                        "prompt": "How should this criterion be made measurable?",
+                        "options": [
+                            "Add an explicit verification command and exit code",
+                            "Require a concrete output artifact or file path",
+                        ],
+                        "reason": "Task candidate_task acceptance criteria item is too vague",
+                        "allow_custom": True,
+                        "issue_ids": ["repair_candidate"],
+                    }
+                ],
+                "gate_reason": "Task candidate_task acceptance criteria item is too vague",
+            },
+        ),
+    )
+
+    run, version, spec_dict, _changelog, _assistant_message, repair_state = planning_runtime._synthesize_black_hole_child_plan(
+        campaign,
+        draft,
+        {"objective": "Improve the selected candidate"},
+        {"summary": "Analyzer summary"},
+        {"id": "candidate-1", "summary": "Candidate summary", "payload": {"path": "app.py"}},
+        1,
+    )
+
+    assert run.status == "completed"
+    assert repair_state is None
+    assert version.validation["repair"]["status"] == "delegated"
+    assert len(spec_dict["tasks"]) == 2
+    generated_task = next(task for task in spec_dict["tasks"] if task["id"] != "candidate_task")
+    primary_task = next(task for task in spec_dict["tasks"] if task["id"] == "candidate_task")
+    assert generated_task["title"].startswith("Resolve planning follow-up")
+    assert primary_task["dependencies"] == [generated_task["id"]]
 
 
 def test_run_plan_run_internal_resumes_from_failed_step_checkpoint(tmp_path, monkeypatch):
@@ -3148,7 +3323,7 @@ def test_mission_plan_validation_surfaces_structured_quality_issues():
     assert all(issue["blocking"] is True for issue in validation["structured_issues"])
 
 
-def test_plan_draft_repair_submission_enqueues_retry_run(tmp_path, monkeypatch):
+def test_plan_draft_repair_submission_delegates_solver_follow_up(tmp_path, monkeypatch):
     from agentforce.server.routes import plan as plan_routes
 
     _patch_home(monkeypatch, tmp_path)
@@ -3203,9 +3378,18 @@ def test_plan_draft_repair_submission_enqueues_retry_run(tmp_path, monkeypatch):
 
     assert repair_handler.send_response.call_args.args == (200,)
     body = _response_body(repair_handler)
-    assert body["status"] == "queued"
-    assert body["plan_run_id"]
-    assert enqueued == [body["plan_run_id"]]
+    assert body["status"] == "delegated"
+    assert "plan_run_id" not in body
+    assert enqueued == []
+
+    updated = store.load(draft_id)
+    assert updated is not None
+    repair = updated.validation.get("repair") or {}
+    assert repair.get("status") == "delegated"
+    follow_ups = updated.validation.get("planning_follow_ups") or []
+    assert len(follow_ups) == 1
+    assert follow_ups[0]["source"] == "repair"
+    assert follow_ups[0]["generated_task_ids"]
 
 
 def test_black_hole_repair_submission_requeues_campaign(tmp_path, monkeypatch):

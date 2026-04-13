@@ -222,6 +222,13 @@ function buildPhaseCopy(
         railSummary: missionName ? 'Mission brief locked' : 'Brief pending',
       };
     case 'preflight':
+      if ((draft.planning_follow_ups?.length ?? 0) > 0
+        && (draft.preflight_status === 'delegated' || draft.repair_status === 'delegated')) {
+        return {
+          summary: `${countLabel(draft.planning_follow_ups?.length ?? 0, 'planning follow-up')} were delegated to the solver as execution-owned tasks.`,
+          railSummary: 'Delegated',
+        };
+      }
       if (draft.preflight_status === 'pending') {
         return {
           summary: `${countLabel(draft.preflight_questions?.length ?? 0, 'clarification question')} still gate the first planning pass.`,

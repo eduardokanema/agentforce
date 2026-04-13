@@ -359,7 +359,7 @@ describe('PlanModePage', () => {
     await flushPromises();
 
     expect(container.textContent).toContain('Flight Director Cockpit');
-    expect(container.textContent).toContain('Prompt Follow-up');
+    expect(container.textContent).toContain('Solver Follow-up');
     expect(container.textContent).toContain('Introduce A New Lab Session In');
 
     root.unmount();
@@ -548,7 +548,7 @@ describe('PlanModePage', () => {
     });
   });
 
-  it('applies a follow-up planner turn and refreshes both transcript and draft summary', async () => {
+  it('delegates a planning follow-up to the solver and refreshes the delegated handoff view', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === '/api/models') {
@@ -561,15 +561,23 @@ describe('PlanModePage', () => {
         const afterTurn = Boolean(lastFetchBody);
         return new Response(JSON.stringify(makeDraft({
           revision: afterTurn ? 4 : 3,
-          draft_spec: {
-            ...makeDraft().draft_spec,
-            name: afterTurn ? 'Calculator Mission Refined' : 'Calculator Mission',
-          },
+          planning_follow_ups: afterTurn ? [
+            {
+              id: 'followup_1',
+              source: 'follow_up_prompt',
+              mode: 'execution',
+              status: 'delegated',
+              prompt: 'Tighten the summary',
+              reason: 'Operator guidance submitted during planning.',
+              generated_task_ids: ['follow_up_1_task'],
+              target_task_ids: ['01'],
+            },
+          ] : [],
           turns: afterTurn ? [
             { role: 'user', content: 'Build a calculator mission' },
             { role: 'assistant', content: 'I drafted the initial mission plan.' },
             { role: 'user', content: 'Tighten the summary' },
-            { role: 'assistant', content: 'I tightened the mission summary and task wording.' },
+            { role: 'assistant', content: 'Delegated the planning follow-up to the solver so the mission can continue without a fresh planning run.' },
           ] : makeDraft().turns,
         })), {
           headers: { 'Content-Type': 'application/json' },
@@ -579,8 +587,8 @@ describe('PlanModePage', () => {
         expect(init).toEqual(expect.objectContaining({ method: 'POST' }));
         return new Response(JSON.stringify({
           draft_id: 'draft-123',
-          plan_run_id: 'run-2',
-          status: 'queued',
+          revision: 4,
+          status: 'delegated',
         }), {
           headers: { 'Content-Type': 'application/json' },
         });
@@ -607,7 +615,7 @@ describe('PlanModePage', () => {
     });
 
     const sendButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Send to Planner'));
+      button.textContent?.includes('Delegate to Solver'));
     expect(sendButton).toBeTruthy();
 
     await act(async () => {
@@ -615,15 +623,16 @@ describe('PlanModePage', () => {
     });
     await flushPromises();
 
-    expect(container.textContent).toContain('I tightened the mission summary and task wording.');
-    expect(container.textContent).toContain('Calculator Mission Refined');
+    expect(container.textContent).toContain('Delegated to Solver');
+    expect(container.textContent).toContain('Tighten the summary');
+    expect(container.textContent).toContain('Task follow_up_1_task');
 
     act(() => {
       root.unmount();
     });
   });
 
-  it('renders preflight multiple-choice questions and starts planning after submission', async () => {
+  it('renders preflight multiple-choice questions and delegates solver follow-up work after submission', async () => {
     let draftState = makeDraft({
       preflight_status: 'pending',
       preflight_questions: [
@@ -655,32 +664,32 @@ describe('PlanModePage', () => {
         expect(String(init?.body)).toContain('Selection only');
         draftState = makeDraft({
           revision: 4,
-          preflight_status: 'answered',
+          preflight_status: 'delegated',
           preflight_questions: [],
           preflight_answers: {
             scope_mode: {
               selected_option: 'Selection only',
             },
           },
-          plan_runs: [
+          planning_follow_ups: [
             {
-              id: 'run-1',
-              draft_id: 'draft-123',
-              base_revision: 3,
-              head_revision_seen: 3,
-              status: 'queued',
-              trigger_kind: 'auto',
-              trigger_message: 'Preflight clarifications',
-              created_at: '2026-04-10T00:00:00Z',
-              steps: [],
+              id: 'follow_up_scope_mode',
+              source: 'preflight',
+              mode: 'execution',
+              status: 'delegated',
+              prompt: 'Resolve whether the first release should stay selection-only.',
+              reason: 'This changes the dependency graph.',
+              question_id: 'scope_mode',
+              selected_option: 'Selection only',
+              generated_task_ids: ['follow_up_scope_mode_task'],
+              target_task_ids: ['01'],
             },
           ],
         });
         return new Response(JSON.stringify({
           draft_id: 'draft-123',
           revision: 4,
-          plan_run_id: 'run-1',
-          status: 'queued',
+          status: 'delegated',
         }), {
           headers: { 'Content-Type': 'application/json' },
         });
@@ -719,7 +728,9 @@ describe('PlanModePage', () => {
       }),
     );
     expect(container.textContent).not.toContain('Preflight Questions');
-    expect(container.textContent).toContain('Run queued');
+    expect(container.textContent).toContain('Delegated to Solver');
+    expect(container.textContent).toContain('Resolve whether the first release should stay selection-only.');
+    expect(container.textContent).toContain('Task follow_up_scope_mode_task');
 
     act(() => {
       root.unmount();
@@ -1052,7 +1063,7 @@ describe('PlanModePage', () => {
     });
 
     const sendButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.textContent?.includes('Send to Planner')) as HTMLButtonElement | undefined;
+      button.textContent?.includes('Delegate to Solver')) as HTMLButtonElement | undefined;
     expect(sendButton).toBeTruthy();
     expect(sendButton?.disabled).toBe(false);
 
@@ -1506,8 +1517,8 @@ describe('PlanModePage', () => {
     const text = container.textContent ?? '';
     expect(text.indexOf('Planning Flow')).toBeGreaterThanOrEqual(0);
     expect(text.indexOf('Planner Synthesis')).toBeGreaterThan(text.indexOf('Planning Flow'));
-    expect(text.indexOf('Prompt Follow-up')).toBeGreaterThan(text.indexOf('Planner Synthesis'));
-    expect(text.indexOf('Live Planning Orbit')).toBeGreaterThan(text.indexOf('Prompt Follow-up'));
+    expect(text.indexOf('Solver Follow-up')).toBeGreaterThan(text.indexOf('Planner Synthesis'));
+    expect(text.indexOf('Live Planning Orbit')).toBeGreaterThan(text.indexOf('Solver Follow-up'));
     expect(container.querySelector('textarea[aria-label="Prompt Follow-up"]')).toBeTruthy();
 
     act(() => {

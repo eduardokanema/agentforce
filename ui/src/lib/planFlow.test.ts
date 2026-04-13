@@ -128,6 +128,44 @@ describe("derivePlanFlow", () => {
     expect(flow.nextAction).toContain("Answer or skip");
   });
 
+  it("does not block launch readiness when follow-ups were delegated to the solver", () => {
+    const flow = derivePlanFlow(
+      makeDraft({
+        preflight_status: "delegated",
+        planning_follow_ups: [
+          {
+            id: "followup_1",
+            source: "preflight",
+            mode: "execution",
+            status: "delegated",
+            prompt: "Clarify the first-release scope",
+            generated_task_ids: ["follow_up_scope"],
+            target_task_ids: ["01"],
+          },
+        ],
+        plan_runs: [
+          makeRun({
+            status: "completed",
+            current_step: "resolver",
+            steps: [
+              {
+                name: "resolver",
+                status: "completed",
+                started_at: "2026-04-11T00:02:00Z",
+                completed_at: "2026-04-11T00:03:00Z",
+                summary: "Resolver completed.",
+              },
+            ],
+          }),
+        ],
+        plan_versions: [makeVersion()],
+      }),
+    );
+
+    expect(flow.launchReadiness.ready).toBe(true);
+    expect(flow.phases.find((phase) => phase.id === "preflight")?.railSummary).toBe("Delegated");
+  });
+
   it("uses the active run step to focus stress test work", () => {
     const flow = derivePlanFlow(
       makeDraft({

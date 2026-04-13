@@ -14,14 +14,20 @@ from agentforce.server.plan_drafts import MissionDraftV1, PlanDraftStore
 from agentforce.server.plan_runs import PlanRunStore
 from . import caps_config
 from agentforce.server.planning_runtime import (
+    _delegated_repair_state,
     _answered_repair_state,
     _planning_intervention_generation,
     _planning_retry_limit,
+    _merge_planning_follow_ups,
+    _planning_follow_ups_from_validation,
     _repair_state_from_validation,
     _reused_steps_for_retry,
+    _with_planning_follow_ups,
+    build_planning_follow_up_records,
     create_plan_run_for_draft,
     discover_preflight_questions,
     enqueue_black_hole_campaign,
+    inject_planning_follow_ups_into_spec,
 )
 
 # Set by the server when a MissionDaemon is active; None means ad-hoc threads.
@@ -194,6 +200,7 @@ def _draft_payload(draft: MissionDraftV1) -> dict:
     payload["preflight_status"] = str(payload.get("validation", {}).get("preflight_status") or "not_needed")
     payload["preflight_questions"] = list(payload.get("validation", {}).get("preflight_questions") or [])
     payload["preflight_answers"] = dict(payload.get("validation", {}).get("preflight_answers") or {})
+    payload["planning_follow_ups"] = _planning_follow_ups_from_validation(payload.get("validation", {}))
     repair = _repair_state_from_validation(payload.get("validation", {}))
     payload["repair_status"] = str(repair.get("status") or "not_needed")
     payload["repair_questions"] = list(repair.get("questions") or [])
@@ -348,6 +355,58 @@ def _repair_prompt(draft: MissionDraftV1) -> str:
     return "Repair guidance:\n" + "\n".join(lines)
 
 
+def _draft_working_dir(draft: MissionDraftV1) -> str | None:
+    return str(draft.draft_spec.get("working_dir") or "").strip() or None
+
+
+def _persist_delegated_follow_ups(
+    draft: MissionDraftV1,
+    *,
+    follow_ups: list[dict[str, object]],
+    validation_updates: dict[str, object],
+    activity_type: str,
+    assistant_message: str,
+    expected_revision: int,
+    turns_to_add: list[dict[str, str]] | None = None,
+) -> tuple[int, dict]:
+    merged_follow_ups = _merge_planning_follow_ups(draft.validation, list(follow_ups))
+    delegated_spec, merged_follow_ups = inject_planning_follow_ups_into_spec(
+        draft.draft_spec,
+        merged_follow_ups,
+        default_working_dir=_draft_working_dir(draft),
+    )
+    updated_validation = _with_planning_follow_ups(
+        {
+            **draft.validation,
+            **validation_updates,
+        },
+        merged_follow_ups,
+    )
+    updated = draft.copy_with(
+        draft_spec=delegated_spec,
+        turns=list(draft.turns) + list(turns_to_add or []) + [{"role": "assistant", "content": assistant_message}],
+        validation=updated_validation,
+        activity_log=list(draft.activity_log) + [{
+            "type": activity_type,
+            "count": len(follow_ups),
+        }],
+    )
+    save_result = _store().save(updated, expected_revision=expected_revision)
+    if save_result.status != "saved" or save_result.draft is None:
+        current = save_result.draft
+        return 409, {
+            "error": "draft revision conflict",
+            "revision": current.revision if current is not None else None,
+        }
+    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
+    state_io._broadcast_mission_list_refresh()
+    return 200, {
+        "draft_id": save_result.draft.id,
+        "revision": save_result.draft.revision,
+        "status": "delegated",
+    }
+
+
 def _normalize_black_hole_config(draft: MissionDraftV1, body: dict) -> dict:
     existing = dict(draft.validation.get("black_hole_config") or {})
     raw = dict(body.get("config") or body or {})
@@ -427,16 +486,31 @@ def _create_draft(body: dict) -> tuple[int, dict]:
     )
     questions = discover_preflight_questions(draft)
     if questions:
-        preflight_validation = _build_preflight_validation(questions)
-        preflight_validation = {
-            **validation,
-            **preflight_validation,
-            "draft_kind": draft_kind,
-        }
+        delegated_follow_ups = build_planning_follow_up_records(
+            source="preflight",
+            spec_dict=draft.draft_spec,
+            questions=questions,
+        )
+        delegated_spec, delegated_follow_ups = inject_planning_follow_ups_into_spec(
+            draft.draft_spec,
+            delegated_follow_ups,
+            default_working_dir=_draft_working_dir(draft),
+        )
+        delegated_validation = _with_planning_follow_ups(
+            {
+                **validation,
+                "draft_kind": draft_kind,
+                "preflight_status": "delegated",
+                "preflight_questions": [],
+                "preflight_answers": {},
+            },
+            delegated_follow_ups,
+        )
         save_result = _store().save(
             draft.copy_with(
-                validation=preflight_validation,
-                activity_log=list(draft.activity_log) + [{"type": "preflight_questions_generated", "count": len(questions)}],
+                draft_spec=delegated_spec,
+                validation=delegated_validation,
+                activity_log=list(draft.activity_log) + [{"type": "preflight_delegated", "count": len(questions)}],
             ),
             expected_revision=draft.revision,
         )
@@ -556,34 +630,26 @@ def _stream_turn(handler, draft_id: str, body: dict) -> tuple[int, dict]:
         return error
     if _draft_kind(draft) != _SIMPLE_PLAN_KIND:
         return 409, {"error": "black hole drafts do not accept manual planning messages"}
-    if str(draft.validation.get("preflight_status") or "") == "pending":
-        return 409, {"error": "preflight questions must be answered before planning starts"}
 
     user_message = str(body.get("content") or body.get("message") or "").strip()
     if not user_message:
         return 400, {"error": "content is required"}
 
-    updated = draft.copy_with(
-        turns=list(draft.turns) + [{"role": "user", "content": user_message}],
-        validation=_bump_planning_retry_generation(draft.validation),
-        activity_log=list(draft.activity_log) + [{"type": "plan_follow_up_requested"}],
+    follow_ups = build_planning_follow_up_records(
+        source="follow_up_prompt",
+        spec_dict=draft.draft_spec,
+        message=user_message,
+        reason="Operator guidance submitted during planning.",
     )
-    save_result = _store().save(updated, expected_revision=draft.revision)
-    if save_result.status != "saved" or save_result.draft is None:
-        current = save_result.draft
-        return 409, {
-            "error": "draft revision conflict",
-            "revision": current.revision if current is not None else None,
-        }
-    run = create_plan_run_for_draft(
-        save_result.draft,
-        trigger_kind="follow_up",
-        trigger_message=user_message,
+    return _persist_delegated_follow_ups(
+        draft,
+        follow_ups=follow_ups,
+        validation_updates=_bump_planning_retry_generation(draft.validation),
+        activity_type="plan_follow_up_delegated",
+        assistant_message="Delegated the planning follow-up to the solver so the mission can continue without a fresh planning run.",
+        expected_revision=draft.revision,
+        turns_to_add=[{"role": "user", "content": user_message}],
     )
-    _enqueue_plan_run(run.id)
-    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
-    state_io._broadcast_mission_list_refresh()
-    return 200, {"draft_id": draft.id, "plan_run_id": run.id, "status": "queued"}
 
 
 def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
@@ -624,51 +690,32 @@ def _submit_preflight(draft_id: str, body: dict) -> tuple[int, dict]:
             }
             summary_lines.append(f"- {prompt}: {custom_answer or selected_option}")
 
-    updated = draft.copy_with(
-        validation={
+    follow_ups = build_planning_follow_up_records(
+        source="preflight",
+        spec_dict=draft.draft_spec,
+        questions=[question for question in questions if isinstance(question, dict)],
+        answers=normalized_answers,
+    )
+    user_turns = (
+        [{"role": "user", "content": "Preflight skipped. Proceed with the best available assumptions."}]
+        if skip
+        else ([{"role": "user", "content": "Preflight answers:\n" + "\n".join(summary_lines)}] if summary_lines else [])
+    )
+    return _persist_delegated_follow_ups(
+        draft,
+        follow_ups=follow_ups,
+        validation_updates={
             **_bump_planning_retry_generation(draft.validation),
             "draft_kind": _draft_kind(draft),
-            "preflight_status": "skipped" if skip else "answered",
+            "preflight_status": "delegated",
+            "preflight_questions": [],
             "preflight_answers": normalized_answers,
         },
-        turns=list(draft.turns) + (
-            [{"role": "user", "content": "Preflight skipped. Proceed with the best available assumptions."}]
-            if skip
-            else ([{"role": "user", "content": "Preflight answers:\n" + "\n".join(summary_lines)}] if summary_lines else [])
-        ),
-        activity_log=list(draft.activity_log) + [{"type": "preflight_submitted", "skip": skip}],
+        activity_type="preflight_delegated",
+        assistant_message="Delegated the preflight follow-up to the solver so planning can continue without reopening the full review loop.",
+        expected_revision=draft.revision,
+        turns_to_add=user_turns,
     )
-    save_result = _store().save(updated, expected_revision=draft.revision)
-    if save_result.status != "saved" or save_result.draft is None:
-        current = save_result.draft
-        return 409, {
-            "error": "draft revision conflict",
-            "revision": current.revision if current is not None else None,
-        }
-
-    if _draft_kind(save_result.draft) == _BLACK_HOLE_KIND:
-        ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
-        state_io._broadcast_mission_list_refresh()
-        return 200, {
-            "draft_id": save_result.draft.id,
-            "revision": save_result.draft.revision,
-            "status": "ready",
-        }
-
-    run = create_plan_run_for_draft(
-        save_result.draft,
-        trigger_kind="auto",
-        trigger_message=_preflight_prompt(save_result.draft),
-    )
-    _enqueue_plan_run(run.id)
-    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
-    state_io._broadcast_mission_list_refresh()
-    return 200, {
-        "draft_id": save_result.draft.id,
-        "revision": save_result.draft.revision,
-        "plan_run_id": run.id,
-        "status": "queued",
-    }
 
 
 def _submit_repair(draft_id: str, body: dict) -> tuple[int, dict]:
@@ -718,52 +765,48 @@ def _submit_repair(draft_id: str, body: dict) -> tuple[int, dict]:
         }
         summary_lines.append(f"- {question.get('prompt')}: {custom_answer or selected_option}")
 
-    updated = draft.copy_with(
-        validation={
+    repair_follow_ups = build_planning_follow_up_records(
+        source="repair",
+        spec_dict=draft.draft_spec,
+        questions=[question for question in list(repair.get("questions") or []) if isinstance(question, dict)],
+        answers=normalized_answers,
+        issues=list(repair.get("issues") or []),
+        origin_run_id=str(repair.get("source_run_id") or ""),
+        origin_version_id=source_version_id,
+    )
+    response = _persist_delegated_follow_ups(
+        draft,
+        follow_ups=repair_follow_ups,
+        validation_updates={
             **_bump_planning_retry_generation(draft.validation),
-            "repair": _answered_repair_state(repair, normalized_answers),
+            "repair": _delegated_repair_state(
+                repair,
+                repair_follow_ups,
+                answers=normalized_answers,
+                gate_reason=str(repair.get("gate_reason") or ""),
+            ),
         },
-        turns=list(draft.turns) + (
+        activity_type="repair_delegated",
+        assistant_message="Delegated the repair follow-up to the solver so the mission can continue without restarting the planning loop.",
+        expected_revision=expected_revision,
+        turns_to_add=(
             [{"role": "user", "content": "Repair answers:\n" + "\n".join(summary_lines)}] if summary_lines else []
         ),
-        activity_log=list(draft.activity_log) + [{"type": "repair_submitted", "repair_round": int(repair.get("repair_round") or 0)}],
     )
-    save_result = _store().save(updated, expected_revision=expected_revision)
-    if save_result.status != "saved" or save_result.draft is None:
-        current = save_result.draft
-        return 409, {
-            "error": "draft revision conflict",
-            "revision": current.revision if current is not None else None,
-        }
+    if response[0] != 200:
+        return response
 
-    if _draft_kind(save_result.draft) == _BLACK_HOLE_KIND:
+    if _draft_kind(draft) == _BLACK_HOLE_KIND:
         campaign = _black_hole_store().latest_for_draft(draft_id)
         if campaign is None:
-            return 404, {"error": "black-hole campaign not found"}
+            return response
         enqueue_black_hole_campaign(campaign.id, draft_id=draft_id)
-        ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
-        state_io._broadcast_mission_list_refresh()
         return 200, {
-            "draft_id": save_result.draft.id,
-            "revision": save_result.draft.revision,
+            **response[1],
             "status": "queued",
             "campaign_id": campaign.id,
         }
-
-    run = create_plan_run_for_draft(
-        save_result.draft,
-        trigger_kind="repair_answers",
-        trigger_message=_repair_prompt(save_result.draft),
-    )
-    _enqueue_plan_run(run.id)
-    ws.broadcast_draft_updated(save_result.draft.id, save_result.draft.status)
-    state_io._broadcast_mission_list_refresh()
-    return 200, {
-        "draft_id": save_result.draft.id,
-        "revision": save_result.draft.revision,
-        "plan_run_id": run.id,
-        "status": "queued",
-    }
+    return response
 
 
 def _start_draft(draft_id: str) -> tuple[int, dict]:

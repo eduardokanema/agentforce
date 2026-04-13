@@ -175,6 +175,10 @@ function normalizeDraftSpec(payload: MissionDraft): MissionDraft['draft_spec'] {
 function normalizePlanDraft(payload: MissionDraft): MissionDraft {
   const preflightAnswers = objectRecordOrEmpty(payload.preflight_answers) as Record<string, PreflightAnswer>;
   const repairAnswers = objectRecordOrEmpty(payload.repair_answers) as Record<string, PreflightAnswer>;
+  const planningFollowUps = Array.isArray(payload.planning_follow_ups)
+    ? payload.planning_follow_ups.filter((item): item is NonNullable<MissionDraft["planning_follow_ups"]>[number] =>
+      Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
   return {
     ...payload,
     draft_spec: normalizeDraftSpec(payload),
@@ -191,6 +195,7 @@ function normalizePlanDraft(payload: MissionDraft): MissionDraft {
     plan_versions: Array.isArray(payload.plan_versions) ? payload.plan_versions : [],
     preflight_questions: Array.isArray(payload.preflight_questions) ? payload.preflight_questions : [],
     preflight_answers: preflightAnswers,
+    planning_follow_ups: planningFollowUps,
     repair_questions: Array.isArray(payload.repair_questions) ? payload.repair_questions : [],
     repair_answers: repairAnswers,
     repair_issues: Array.isArray(payload.repair_issues) ? payload.repair_issues : [],
@@ -637,8 +642,8 @@ export function importPlanDraftYaml(
 export async function sendPlanDraftMessage(
   id: string,
   content: string,
-): Promise<{ draft_id: string; plan_run_id: string; status: string }> {
-  return requestJson<{ draft_id: string; plan_run_id: string; status: string }>(
+): Promise<{ draft_id: string; revision: number; status: string; plan_run_id?: string }> {
+  return requestJson<{ draft_id: string; revision: number; status: string; plan_run_id?: string }>(
     `/api/plan/drafts/${encodeURIComponent(id)}/messages`,
     {
     method: 'POST',
@@ -655,8 +660,8 @@ export function submitPlanDraftPreflight(
   id: string,
   answers: Record<string, PreflightAnswer>,
   skip = false,
-): Promise<{ draft_id: string; revision: number; plan_run_id: string; status: string }> {
-  return requestJson<{ draft_id: string; revision: number; plan_run_id: string; status: string }>(
+): Promise<{ draft_id: string; revision: number; plan_run_id?: string; status: string }> {
+  return requestJson<{ draft_id: string; revision: number; plan_run_id?: string; status: string }>(
     `/api/plan/drafts/${encodeURIComponent(id)}/preflight`,
     {
       method: 'POST',

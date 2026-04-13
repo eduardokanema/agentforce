@@ -5,6 +5,7 @@ import ExecutionProfileSelect from "../components/ExecutionProfileSelect";
 import BlackHoleConfigPanel from "../components/planning/BlackHoleConfigPanel";
 import BlackHoleHero from "../components/planning/BlackHoleHero";
 import BlackHoleLedger from "../components/planning/BlackHoleLedger";
+import PlanningFollowUpPanel from "../components/planning/PlanningFollowUpPanel";
 import PreflightQuestionsPanel from "../components/planning/PreflightQuestionsPanel";
 import {
   createBlackHoleCampaign,
@@ -603,6 +604,13 @@ export default function BlackHoleModePage({ labs }: { labs?: LabsConfig }): JSX.
               onSkip={() => {
                 void handleSubmitRepair();
               }}
+            />
+          ) : null}
+
+          {!preflightPending && !repairPending && (draft.planning_follow_ups?.length ?? 0) > 0 ? (
+            <PlanningFollowUpPanel
+              followUps={draft.planning_follow_ups ?? []}
+              description="Black Hole converted these planning questions into execution-owned child-mission work instead of reopening the campaign planning loop."
             />
           ) : null}
 
