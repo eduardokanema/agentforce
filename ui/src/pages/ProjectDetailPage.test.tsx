@@ -7,8 +7,6 @@ const api = vi.hoisted(() => ({
   archiveProject: vi.fn(),
   deleteProject: vi.fn(),
   getProject: vi.fn(),
-  getPlanDraft: vi.fn(),
-  getMission: vi.fn(),
   unarchiveProject: vi.fn(),
   updateProject: vi.fn(),
 }));
@@ -17,8 +15,6 @@ vi.mock('../lib/api', () => ({
   archiveProject: api.archiveProject,
   deleteProject: api.deleteProject,
   getProject: api.getProject,
-  getPlanDraft: api.getPlanDraft,
-  getMission: api.getMission,
   unarchiveProject: api.unarchiveProject,
   updateProject: api.updateProject,
 }));
@@ -62,8 +58,6 @@ describe('ProjectDetailPage', () => {
     api.archiveProject.mockReset();
     api.deleteProject.mockReset();
     api.getProject.mockReset();
-    api.getPlanDraft.mockReset();
-    api.getMission.mockReset();
     api.unarchiveProject.mockReset();
     api.updateProject.mockReset();
     toastHarness.addToast.mockReset();
@@ -73,167 +67,213 @@ describe('ProjectDetailPage', () => {
     document.body.innerHTML = '';
   });
 
-  it('renders the selected project harness details', async () => {
-    api.getPlanDraft.mockResolvedValue({
-      id: 'draft-1',
-      revision: 1,
-      status: 'draft',
-      draft_kind: 'simple_plan',
-      draft_spec: {
-        name: 'AgentForce',
-        goal: 'Goal',
-        definition_of_done: [],
-        tasks: [
-          { id: 'task-1', title: 'Task One', description: 'Desc', acceptance_criteria: [], dependencies: [], max_retries: 3, output_artifacts: [] },
-        ],
-        caps: {
-          max_tokens_per_task: 1000,
-          max_retries_global: 3,
-          max_retries_per_task: 3,
-          max_wall_time_minutes: 30,
-          max_human_interventions: 1,
-          max_concurrent_workers: 1,
-        },
-      },
-      turns: [],
-      validation: {},
-      activity_log: [],
-      approved_models: [],
-      workspace_paths: ['/tmp/agentforce'],
-      companion_profile: {},
-      draft_notes: [],
-      preflight_status: 'not_needed',
-      preflight_questions: [],
-      preflight_answers: {},
-      plan_runs: [{
-        id: 'run-1',
-        draft_id: 'draft-1',
-        base_revision: 1,
-        head_revision_seen: 1,
-        status: 'running',
-        trigger_kind: 'manual',
-        trigger_message: 'go',
-        created_at: '2026-04-14T10:00:00Z',
-        current_step: 'resolver',
-        steps: [],
-      }],
-      plan_versions: [],
-      planning_follow_ups: [],
-      repair_questions: [],
-      repair_answers: {},
-      repair_issues: [],
-    });
-    api.getMission.mockResolvedValue({
-      mission_id: 'mission-1',
-      spec: {
-        name: 'AgentForce',
-        goal: 'Goal',
-        definition_of_done: [],
-        tasks: [
-          { id: 'task-1', title: 'Task One', description: 'Desc', acceptance_criteria: [], dependencies: [], max_retries: 3, output_artifacts: [] },
-        ],
-        caps: {
-          max_tokens_per_task: 1000,
-          max_retries_global: 3,
-          max_retries_per_task: 3,
-          max_wall_time_minutes: 30,
-          max_human_interventions: 1,
-          max_concurrent_workers: 1,
-        },
-      },
-      task_states: {
-        'task-1': {
-          task_id: 'task-1',
-          status: 'in_progress',
-          retries: 0,
-          review_score: 0,
-          human_intervention_needed: false,
-          last_updated: '2026-04-14T10:00:00Z',
-        },
-      },
-      started_at: '2026-04-14T10:00:00Z',
-      total_retries: 2,
-      total_human_interventions: 0,
-      total_tokens_used: 100,
-      estimated_cost_usd: 0.1,
-    });
+  it('renders the project-first home surface with portfolio and scheduler data', async () => {
     api.getProject.mockResolvedValue({
+      project: {
+        project_id: 'proj-1',
+        name: 'AgentForce',
+        repo_root: '/tmp/agentforce',
+        description: 'Keep the redesign inside one project container.',
+        related_project_ids: ['proj-2'],
+        settings: {
+          working_directories: ['/tmp/agentforce/apps/core', '/tmp/agentforce/tests'],
+        },
+        archived_at: null,
+        created_at: '2026-04-14T09:00:00Z',
+        updated_at: '2026-04-14T10:00:00Z',
+      },
       summary: {
         project_id: 'proj-1',
         name: 'AgentForce',
         repo_root: '/tmp/agentforce',
         primary_working_directory: '/tmp/agentforce/apps/core',
         workspace_count: 2,
-        goal: 'Goal',
-        planned_task_count: 1,
+        goal: 'Keep the redesign inside one project container.',
+        planned_task_count: 4,
         current_stage: 'executing',
-        current_plan_id: 'draft-1',
+        current_plan_id: 'plan-1',
         current_mission_id: 'mission-1',
-        next_action_label: 'Ship the update',
+        next_action_label: 'Open workspace',
         mode: 'standard',
         status: 'running',
-        active_cycle_id: 'cycle-1',
-        blocker: 'None',
-        next_action: 'Ship the update',
+        active_cycle_id: 'plan-1',
+        blocker: 'Touch scope conflict',
+        next_action: 'Open workspace',
         active_mission_id: 'mission-1',
         archived_at: null,
         has_activity: true,
         updated_at: '2026-04-14T10:00:00Z',
+        active_plan_count: 3,
+        running_plan_count: 2,
+        blocked_node_count: 1,
       },
       context: {
         repo_root: '/tmp/agentforce',
         primary_working_directory: '/tmp/agentforce/apps/core',
         working_directories: ['/tmp/agentforce/apps/core', '/tmp/agentforce/tests'],
-        goal: 'Goal',
-        definition_of_done: ['Done means shipped'],
-        planned_task_count: 1,
-        task_titles: ['Task One'],
+        goal: 'Keep the redesign inside one project container.',
+        definition_of_done: [],
+        planned_task_count: 4,
+        task_titles: ['Graph workspace'],
         mission_count: 1,
       },
-      cycles: [
+      plans: [
         {
-          cycle_id: 'cycle-1',
-          title: 'Initial cycle',
+          plan_id: 'plan-1',
+          project_id: 'proj-1',
+          name: 'Workspace redesign',
+          objective: 'Replace the dense shell with a DAG workspace.',
           status: 'running',
-          draft_id: 'draft-1',
+          quick_task: false,
+          node_count: 4,
+          selected_version_id: 'version-1',
+          active_mission_run_id: 'run-1',
           mission_id: 'mission-1',
-          latest_plan_run_id: 'run-1',
-          latest_plan_version_id: 'version-1',
-          predecessor_cycle_id: null,
-          successor_cycle_id: null,
-          blocker: 'None',
-          next_action: 'Ship the update',
+          merged_project_scope: ['proj-1', 'proj-2'],
+          planner_debug: { provider: 'deterministic' },
           created_at: '2026-04-14T09:00:00Z',
           updated_at: '2026-04-14T10:00:00Z',
-          evidence: {
-            status: 'pending',
-            contract_summary: 'Awaiting review',
-            verifier_summary: null,
-            artifact_summary: null,
-            stream_summary: null,
-            items: [],
-          },
+          supersedes_plan_id: null,
         },
       ],
-      active_cycle_id: 'cycle-1',
+      selected_plan_id: 'plan-1',
+      selected_plan: {
+        plan_id: 'plan-1',
+        project_id: 'proj-1',
+        name: 'Workspace redesign',
+        objective: 'Replace the dense shell with a DAG workspace.',
+        status: 'running',
+        quick_task: false,
+        node_count: 4,
+        selected_version_id: 'version-1',
+        active_mission_run_id: 'run-1',
+        mission_id: 'mission-1',
+        merged_project_scope: ['proj-1', 'proj-2'],
+        planner_debug: { provider: 'deterministic' },
+        created_at: '2026-04-14T09:00:00Z',
+        updated_at: '2026-04-14T10:00:00Z',
+        supersedes_plan_id: null,
+        graph: {
+          plan_id: 'plan-1',
+          selected_version_id: 'version-1',
+          active_mission_run_id: 'run-1',
+          nodes: [
+            {
+              node_id: 'node-1',
+              title: 'Graph workspace',
+              description: 'Build the DAG workspace.',
+              dependencies: [],
+              subtasks: ['Render graph'],
+              touch_scope: ['ui/src/pages/ProjectPlanPage.tsx'],
+              outputs: [],
+              owner_project_id: 'proj-1',
+              merged_project_scope: ['proj-1'],
+              evidence: [],
+              working_directory: '/tmp/agentforce/apps/core',
+              runtime: { status: 'running' },
+            },
+          ],
+        },
+        history: {
+          versions: [
+            {
+              version_id: 'version-1',
+              plan_id: 'plan-1',
+              project_id: 'proj-1',
+              name: 'Workspace redesign',
+              objective: 'Replace the dense shell with a DAG workspace.',
+              nodes: [],
+              merged_project_scope: ['proj-1'],
+              changelog: ['Approved from current graph with 4 node(s).'],
+              planner_debug: { provider: 'deterministic' },
+              launched_mission_run_id: 'run-1',
+              created_at: '2026-04-14T09:30:00Z',
+            },
+          ],
+          mission_runs: [
+            {
+              mission_run_id: 'run-1',
+              plan_id: 'plan-1',
+              plan_version_id: 'version-1',
+              project_id: 'proj-1',
+              mission_id: 'mission-1',
+              status: 'running',
+              node_states: [],
+              created_at: '2026-04-14T09:30:00Z',
+              started_at: '2026-04-14T09:31:00Z',
+              completed_at: null,
+              updated_at: '2026-04-14T10:00:00Z',
+            },
+          ],
+          planner: { provider: 'deterministic' },
+        },
+      },
+      scheduler: {
+        project_id: 'proj-1',
+        updated_at: '2026-04-14T10:00:00Z',
+        queue: [
+          {
+            plan_id: 'plan-1',
+            plan_name: 'Workspace redesign',
+            node_id: 'node-2',
+            title: 'History / Debug surface',
+            status: 'ready',
+            scheduler_priority: 120,
+            owning_project_id: 'proj-1',
+            merged_project_scope: ['proj-1'],
+          },
+        ],
+        blocked: [
+          {
+            plan_id: 'plan-2',
+            plan_name: 'Cross-project follow-up',
+            node_id: 'node-3',
+            title: 'Shared auth touchpoint',
+            status: 'blocked',
+            scheduler_priority: 0,
+            conflict_reason: 'Touch scope conflict with active node node-1',
+            owning_project_id: 'proj-2',
+            merged_project_scope: ['proj-1', 'proj-2'],
+          },
+        ],
+        running: [
+          {
+            plan_id: 'plan-1',
+            plan_name: 'Workspace redesign',
+            node_id: 'node-1',
+            title: 'Graph workspace',
+            status: 'running',
+            scheduler_priority: 130,
+            owning_project_id: 'proj-1',
+            merged_project_scope: ['proj-1'],
+          },
+        ],
+        plans: [],
+      },
+      history: {
+        plan_versions: [],
+        mission_runs: [
+          {
+            mission_run_id: 'run-1',
+            plan_id: 'plan-1',
+            plan_version_id: 'version-1',
+            project_id: 'proj-1',
+            mission_id: 'mission-1',
+            status: 'running',
+            node_states: [],
+            created_at: '2026-04-14T09:30:00Z',
+            started_at: '2026-04-14T09:31:00Z',
+            completed_at: null,
+            updated_at: '2026-04-14T10:00:00Z',
+          },
+        ],
+      },
+      cycles: [],
+      active_cycle_id: 'plan-1',
       active_cycle: null,
-      evidence: {
-        status: 'pending',
-        contract_summary: 'Awaiting review',
-        verifier_summary: null,
-        artifact_summary: null,
-        stream_summary: null,
-        items: [],
-      },
-      docs_status: {
-        implemented: ['README.md'],
-        planned: ['ui shell'],
-      },
-      policy_summary: {
-        mode: 'standard',
-        derived: true,
-        optimize_available: false,
-      },
+      evidence: { status: 'pending', items: [] },
+      docs_status: { implemented: [], planned: [] },
+      policy_summary: { mode: 'standard', derived: false, optimize_available: false },
       lifecycle: {
         archived: false,
         archived_at: null,
@@ -247,34 +287,16 @@ describe('ProjectDetailPage', () => {
 
     const container = renderPage();
     await flushPromises();
-    await flushPromises();
 
     expect(api.getProject).toHaveBeenCalledWith('proj-1');
-    expect(api.getPlanDraft).toHaveBeenCalledWith('draft-1');
-    expect(api.getMission).toHaveBeenCalledWith('mission-1');
-    expect(container.textContent).toContain('AgentForce');
-    expect(container.textContent).toContain('/tmp/agentforce');
-    expect(container.textContent).toContain('Back to Projects');
-    expect(container.textContent).toContain('Project Context');
-    expect(container.textContent).toContain('Now');
-    expect(container.textContent).toContain('Next');
-    expect(container.textContent).toContain('Evidence');
-    expect(container.textContent).toContain('Plan');
-    expect(container.textContent).toContain('Mission');
-    expect(container.textContent).toContain('History');
-    expect(container.textContent).toContain('/tmp/agentforce/apps/core');
-    expect(container.textContent).toContain('Done means shipped');
-    expect(container.textContent).toContain('Plan status');
-    expect(container.textContent).toContain('Running');
-    expect(container.textContent).toContain('Resolver');
-    expect(container.textContent).toContain('Mission progress');
-    expect(container.textContent).toContain('0/1 tasks approved');
-    expect(container.textContent).toContain('Task One');
-    expect(container.textContent).not.toContain('Initial cycle');
-    expect(container.textContent).toContain('README.md');
-    expect(container.textContent).toContain('ui shell');
-    expect(container.querySelector('a[href="/projects/proj-1/plan"]')).toBeTruthy();
-    expect(container.querySelector('a[href="/projects/proj-1/mission"]')).toBeTruthy();
+    expect(container.textContent).toContain('Project Home');
+    expect(container.textContent).toContain('Plan Portfolio');
+    expect(container.textContent).toContain('Current Blockers');
+    expect(container.textContent).toContain('Selected Plan');
+    expect(container.textContent).toContain('Workspace redesign');
+    expect(container.textContent).toContain('3');
+    expect(container.textContent).toContain('Touch scope conflict with active node node-1');
+    expect(container.querySelector('a[href="/projects/proj-1/plan?plan=plan-1"]')).toBeTruthy();
     expect(container.querySelector('a[href="/projects"]')).toBeTruthy();
   });
 });

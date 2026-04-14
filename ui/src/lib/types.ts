@@ -620,6 +620,10 @@ export interface ProjectSummaryView {
   archived_at?: string | null;
   has_activity: boolean;
   updated_at: string;
+  active_plan_count?: number;
+  running_plan_count?: number;
+  blocked_node_count?: number;
+  related_project_ids?: string[];
 }
 
 export interface ProjectContextView {
@@ -658,6 +662,173 @@ export interface ProjectHarnessView {
     can_edit: boolean;
     has_activity: boolean;
   };
+  project?: ProjectRecordView;
+  plans?: ProjectPlanSummaryView[];
+  selected_plan_id?: string | null;
+  selected_plan?: ProjectPlanDetailView | null;
+  scheduler?: ProjectSchedulerState | null;
+  history?: ProjectHistoryView | null;
+}
+
+export type ProjectGraphNodeRuntimeStatus =
+  | 'draft'
+  | 'ready'
+  | 'queued'
+  | 'running'
+  | 'reviewing'
+  | 'blocked'
+  | 'completed'
+  | 'failed';
+
+export interface ProjectRecordView {
+  project_id: string;
+  name: string;
+  repo_root: string;
+  description?: string | null;
+  related_project_ids: string[];
+  settings: {
+    working_directories?: string[];
+    scheduler_overrides?: Record<string, number>;
+    [key: string]: unknown;
+  };
+  archived_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectPlanNodeRuntimeView {
+  status: ProjectGraphNodeRuntimeStatus;
+  reason?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  scheduler_priority?: number | null;
+}
+
+export interface ProjectPlanNodeView {
+  node_id: string;
+  title: string;
+  description: string;
+  dependencies: string[];
+  subtasks: string[];
+  touch_scope: string[];
+  outputs: string[];
+  owner_project_id: string;
+  merged_project_scope: string[];
+  evidence: string[];
+  working_directory?: string | null;
+  runtime: ProjectPlanNodeRuntimeView;
+}
+
+export interface ProjectPlanVersionView {
+  version_id: string;
+  plan_id: string;
+  project_id: string;
+  name: string;
+  objective: string;
+  nodes: ProjectPlanNodeView[];
+  merged_project_scope: string[];
+  changelog: string[];
+  planner_debug: Record<string, unknown>;
+  launched_mission_run_id?: string | null;
+  created_at: string;
+}
+
+export interface ProjectMissionNodeStateView {
+  node_id: string;
+  status: ProjectGraphNodeRuntimeStatus;
+  reason?: string | null;
+  task_id?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface ProjectMissionRunView {
+  mission_run_id: string;
+  plan_id: string;
+  plan_version_id: string;
+  project_id: string;
+  mission_id?: string | null;
+  status: ProjectGraphNodeRuntimeStatus | string;
+  node_states: ProjectMissionNodeStateView[];
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at: string;
+}
+
+export interface ProjectPlanSummaryView {
+  plan_id: string;
+  project_id: string;
+  name: string;
+  objective: string;
+  status: ProjectStatus | 'draft';
+  quick_task: boolean;
+  node_count: number;
+  selected_version_id?: string | null;
+  active_mission_run_id?: string | null;
+  mission_id?: string | null;
+  merged_project_scope: string[];
+  planner_debug: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  supersedes_plan_id?: string | null;
+}
+
+export interface ProjectPlanGraphView {
+  plan_id: string;
+  nodes: ProjectPlanNodeView[];
+  selected_version_id?: string | null;
+  active_mission_run_id?: string | null;
+}
+
+export interface ProjectPlanHistoryView {
+  versions: ProjectPlanVersionView[];
+  mission_runs: ProjectMissionRunView[];
+  planner: Record<string, unknown>;
+}
+
+export interface ProjectPlanDetailView extends ProjectPlanSummaryView {
+  graph: ProjectPlanGraphView;
+  history: ProjectPlanHistoryView;
+}
+
+export interface ProjectSchedulerItemView {
+  plan_id: string;
+  plan_name: string;
+  node_id: string;
+  title: string;
+  status: ProjectGraphNodeRuntimeStatus | string;
+  scheduler_priority: number;
+  owning_project_id: string;
+  merged_project_scope: string[];
+  conflict_reason?: string | null;
+}
+
+export interface ProjectSchedulerPlanView {
+  plan_id: string;
+  name: string;
+  status: ProjectStatus | 'draft';
+  ready_count: number;
+  blocked_count: number;
+  running_count: number;
+  selected_version_id?: string | null;
+  active_mission_run_id?: string | null;
+  merged_project_scope: string[];
+  updated_at: string;
+}
+
+export interface ProjectSchedulerState {
+  project_id: string;
+  updated_at: string;
+  queue: ProjectSchedulerItemView[];
+  blocked: ProjectSchedulerItemView[];
+  running: ProjectSchedulerItemView[];
+  plans: ProjectSchedulerPlanView[];
+}
+
+export interface ProjectHistoryView {
+  plan_versions: ProjectPlanVersionView[];
+  mission_runs: ProjectMissionRunView[];
 }
 
 export const PROJECTS_ROUTE = '/projects';

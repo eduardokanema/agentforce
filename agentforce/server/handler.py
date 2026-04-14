@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 from . import state_io, ws
 from . import watchers
-from .routes import caps_config, daemon, filesystem, missions, models, plan, projects, providers, static, tasks
+from .routes import caps_config, daemon, filesystem, missions, models, plan, project_graph_routes, providers, static, tasks
 
 _daemon: Optional["MissionDaemon"] = None  # type: ignore[name-defined]  # noqa: F821
 
@@ -25,13 +25,18 @@ _ROUTES: list[tuple[str, re.Pattern[str], object]] = [
     ("GET", re.compile(r"^/api/daemon(?:/.*)?$"), daemon.get),
     ("POST", re.compile(r"^/api/daemon(?:/.*)?$"), daemon.post),
     ("GET", re.compile(r"^/api/missions$"), missions.get),
-    ("GET", re.compile(r"^/api/projects$"), projects.get),
-    ("GET", re.compile(r"^/api/project/lookup$"), projects.get),
-    ("GET", re.compile(r"^/api/project/[^/]+$"), projects.get),
-    ("POST", re.compile(r"^/api/projects$"), projects.post),
-    ("POST", re.compile(r"^/api/project/[^/]+/(?:archive|unarchive)$"), projects.post),
-    ("PATCH", re.compile(r"^/api/project/[^/]+$"), projects.patch),
-    ("DELETE", re.compile(r"^/api/project/[^/]+$"), projects.delete),
+    ("GET", re.compile(r"^/api/projects(?:/[^/]+(?:/(?:plans|scheduler))?)?$"), project_graph_routes.get),
+    ("GET", re.compile(r"^/api/project/lookup$"), project_graph_routes.get),
+    ("GET", re.compile(r"^/api/project/[^/]+$"), project_graph_routes.get),
+    ("POST", re.compile(r"^/api/projects(?:/[^/]+/(?:plans|scheduler/reprioritize))?$"), project_graph_routes.post),
+    ("POST", re.compile(r"^/api/project/[^/]+/(?:archive|unarchive)$"), project_graph_routes.post),
+    ("PATCH", re.compile(r"^/api/projects/[^/]+$"), project_graph_routes.patch),
+    ("PATCH", re.compile(r"^/api/project/[^/]+$"), project_graph_routes.patch),
+    ("DELETE", re.compile(r"^/api/projects/[^/]+$"), project_graph_routes.delete),
+    ("DELETE", re.compile(r"^/api/project/[^/]+$"), project_graph_routes.delete),
+    ("GET", re.compile(r"^/api/plans(?:/[^/]+(?:/(?:graph|history))?)?$"), project_graph_routes.get),
+    ("POST", re.compile(r"^/api/plans/[^/]+/(?:generate-dag|approve-version|start|readjust)$"), project_graph_routes.post),
+    ("PATCH", re.compile(r"^/api/plans/[^/]+/nodes/[^/]+$"), project_graph_routes.patch),
     ("POST", re.compile(r"^/api/missions$"), missions.post),
     ("GET", re.compile(r"^/api/models(?:/default)?$"), models.get),
     ("POST", re.compile(r"^/api/models/default$"), models.post),

@@ -12,6 +12,8 @@ import type {
   MissionDraft,
   PreflightAnswer,
   ProjectHarnessView,
+  ProjectPlanDetailView,
+  ProjectSchedulerState,
   ProjectSummaryView,
   MissionState,
   MissionSummary,
@@ -213,8 +215,17 @@ export function getProjects(options?: { includeArchived?: boolean }): Promise<Pr
   return requestJson<ProjectSummaryView[]>(`/api/projects${query}`);
 }
 
-export function getProject(id: string): Promise<ProjectHarnessView> {
-  return requestJson<ProjectHarnessView>(`/api/project/${encodeURIComponent(id)}`);
+export function getProject(id: string, options?: { planId?: string | null }): Promise<ProjectHarnessView> {
+  const query = options?.planId ? `?plan_id=${encodeURIComponent(options.planId)}` : '';
+  return requestJson<ProjectHarnessView>(`/api/projects/${encodeURIComponent(id)}${query}`);
+}
+
+export function getPlan(id: string): Promise<ProjectPlanDetailView> {
+  return requestJson<ProjectPlanDetailView>(`/api/plans/${encodeURIComponent(id)}`);
+}
+
+export function getProjectScheduler(id: string): Promise<ProjectSchedulerState> {
+  return requestJson<ProjectSchedulerState>(`/api/projects/${encodeURIComponent(id)}/scheduler`);
 }
 
 export function lookupProjectByDraft(id: string): Promise<{ project_id: string }> {
@@ -243,7 +254,7 @@ export function updateProject(id: string, payload: {
   goal?: string;
   working_directories?: string[];
 }): Promise<ProjectHarnessView> {
-  return requestJson<ProjectHarnessView>(`/api/project/${encodeURIComponent(id)}`, {
+  return requestJson<ProjectHarnessView>(`/api/projects/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -259,13 +270,68 @@ export function unarchiveProject(id: string): Promise<void> {
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  const response = await fetch(`${BASE_URL}/api/project/${encodeURIComponent(id)}`, {
+  const response = await fetch(`${BASE_URL}/api/projects/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json' },
   });
   if (!response.ok) {
     throw new Error(`Request failed with status ${response.status} ${response.statusText}`);
   }
+}
+
+export function createProjectPlan(projectId: string, payload: {
+  name?: string;
+  objective: string;
+  quick_task?: boolean;
+  supersedes_plan_id?: string | null;
+}): Promise<ProjectPlanDetailView> {
+  return requestJson<ProjectPlanDetailView>(`/api/projects/${encodeURIComponent(projectId)}/plans`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function approveProjectPlan(planId: string): Promise<{
+  plan_id: string;
+  selected_version_id: string;
+}> {
+  return requestJson<{
+    plan_id: string;
+    selected_version_id: string;
+  }>(`/api/plans/${encodeURIComponent(planId)}/approve-version`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+}
+
+export function startProjectPlan(planId: string): Promise<{
+  mission_run_id: string;
+  mission_id: string;
+  plan_id: string;
+  version_id: string;
+  status: string;
+}> {
+  return requestJson<{
+    mission_run_id: string;
+    mission_id: string;
+    plan_id: string;
+    version_id: string;
+    status: string;
+  }>(`/api/plans/${encodeURIComponent(planId)}/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+}
+
+export function readjustProjectPlan(planId: string): Promise<ProjectPlanDetailView> {
+  return requestJson<ProjectPlanDetailView>(`/api/plans/${encodeURIComponent(planId)}/readjust`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
 }
 
 export function getDrafts(): Promise<DraftSummary[]> {

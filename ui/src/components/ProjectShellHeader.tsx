@@ -33,6 +33,9 @@ export default function ProjectShellHeader({
   summary: ProjectSummaryView;
   section: ProjectSection;
 }) {
+  const activePlans = summary.active_plan_count ?? 0;
+  const runningPlans = summary.running_plan_count ?? 0;
+  const blockedNodes = summary.blocked_node_count ?? 0;
   return (
     <div className="grid gap-4">
       <header className="rounded-lg border border-border bg-card px-4 py-4">
@@ -42,7 +45,7 @@ export default function ProjectShellHeader({
             <h1 className="text-3xl font-semibold tracking-tight">{summary.name}</h1>
             <p className="mt-1 text-sm text-dim font-mono">{summary.repo_root}</p>
             <p className="mt-2 max-w-[72ch] text-sm text-dim">
-              Open one project to define the plan, launch the mission, and keep the same workspace context through delivery.
+              Keep memory, settings, active plans, and mission history inside one long-lived workspace.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -77,6 +80,18 @@ export default function ProjectShellHeader({
           <div className="rounded-lg border border-border bg-surface px-3 py-3">
             <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Mission status</div>
             <div className="mt-1 text-[13px] text-text">{formatLabel(summary.status)}</div>
+          </div>
+          <div className="rounded-lg border border-border bg-surface px-3 py-3">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Plan portfolio</div>
+            <div className="mt-1 text-[13px] text-text">{activePlans} active plan{activePlans === 1 ? '' : 's'}</div>
+          </div>
+          <div className="rounded-lg border border-border bg-surface px-3 py-3">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Running now</div>
+            <div className="mt-1 text-[13px] text-text">{runningPlans} active execution{runningPlans === 1 ? '' : 's'}</div>
+          </div>
+          <div className="rounded-lg border border-border bg-surface px-3 py-3">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Blocked nodes</div>
+            <div className="mt-1 text-[13px] text-text">{blockedNodes}</div>
           </div>
         </div>
       </header>

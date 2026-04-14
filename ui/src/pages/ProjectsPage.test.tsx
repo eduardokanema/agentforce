@@ -78,7 +78,7 @@ describe('ProjectsPage', () => {
     const container = renderPage();
     await flushPromises();
 
-    expect(container.textContent).toContain('No projects yet. Create a project to start the brief, spec, tasks, and mission in one place.');
+    expect(container.textContent).toContain('No projects yet. Create a project to hold memory, settings, active plans, and mission history in one place.');
   });
 
   it('renders an error state and retry action when loading fails', async () => {
@@ -116,6 +116,9 @@ describe('ProjectsPage', () => {
         archived_at: null,
         has_activity: true,
         updated_at: '2026-04-14T10:00:00Z',
+        active_plan_count: 3,
+        running_plan_count: 2,
+        blocked_node_count: 1,
       },
     ]);
 
@@ -132,7 +135,11 @@ describe('ProjectsPage', () => {
     expect(container.textContent).toContain('4');
     expect(container.textContent).toContain('2 working directories');
     expect(container.textContent).toContain('Optimize');
+    expect(container.textContent).toContain('3 active plans');
+    expect(container.textContent).toContain('2 execution reservations');
+    expect(container.textContent).toContain('1');
     expect(container.textContent).toContain('Updated');
     expect(container.querySelector('a[href="/projects/proj-1/overview"]')).toBeTruthy();
+    expect(container.querySelector('a[href="/projects/proj-1/plan"]')).toBeTruthy();
   });
 });

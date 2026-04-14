@@ -1,7 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import {
   projectHistoryRoute,
-  projectMissionRoute,
   projectOverviewRoute,
   projectPlanRoute,
   projectSettingsRoute,
@@ -9,11 +8,10 @@ import {
 } from '../lib/types';
 
 const SECTION_ITEMS: Array<{ section: ProjectSection; label: string; description: string }> = [
-  { section: 'overview', label: 'Overview', description: 'Project status, context, and next action.' },
-  { section: 'plan', label: 'Plan', description: 'Current brief, spec, tasks, and launch readiness.' },
-  { section: 'mission', label: 'Mission', description: 'Execution progress and intervention controls.' },
-  { section: 'history', label: 'History', description: 'Earlier plans, missions, and readjustments.' },
-  { section: 'settings', label: 'Settings', description: 'Project metadata, archive, and lifecycle controls.' },
+  { section: 'overview', label: 'Project Home', description: 'Portfolio, active queue, blockers, and recent history.' },
+  { section: 'plan', label: 'Plan Workspace', description: 'Selected DAG, node detail, approval, and mission overlay.' },
+  { section: 'history', label: 'History / Debug', description: 'Prior versions, mission runs, and planner internals.' },
+  { section: 'settings', label: 'Settings', description: 'Project metadata, related projects, and lifecycle controls.' },
 ];
 
 function projectSectionHref(projectId: string, section: ProjectSection): string {
@@ -22,12 +20,12 @@ function projectSectionHref(projectId: string, section: ProjectSection): string 
       return projectOverviewRoute(projectId);
     case 'plan':
       return projectPlanRoute(projectId);
-    case 'mission':
-      return projectMissionRoute(projectId);
     case 'history':
       return projectHistoryRoute(projectId);
     case 'settings':
       return projectSettingsRoute(projectId);
+    case 'mission':
+      return projectPlanRoute(projectId);
   }
 }
 
@@ -40,7 +38,7 @@ export default function ProjectSectionNav({
 }) {
   return (
     <nav aria-label="Project sections" className="rounded-lg border border-border bg-card px-3 py-3">
-      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
         {SECTION_ITEMS.map((item) => {
           const selected = item.section === currentSection;
           return (

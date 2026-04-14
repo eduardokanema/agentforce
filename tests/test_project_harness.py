@@ -171,22 +171,26 @@ def test_build_project_harness_links_readjusted_successor(monkeypatch, tmp_path)
 
 
 def test_projects_routes_return_derived_payload(monkeypatch, tmp_path) -> None:
-    home = _set_agentforce_home(tmp_path, monkeypatch)
+    _set_agentforce_home(tmp_path, monkeypatch)
     workspace = tmp_path / "workspace" / "nested"
-    drafts = PlanDraftStore(home / "drafts")
-    draft = drafts.create(
-        "draft-1",
-        status="draft",
-        draft_spec={"name": "Harness Project", "goal": "Goal", "tasks": [], "working_dir": str(workspace)},
-        turns=[],
-        validation={},
-        activity_log=[],
-        approved_models=[],
-        workspace_paths=[str(workspace)],
-        companion_profile={},
-        draft_notes=[],
-    )
-    monkeypatch.setattr("agentforce.server.project_harness._repo_root_from_git", lambda path: None)
+    workspace.mkdir(parents=True)
+
+    create_project_handler = _make_handler("/api/projects", {
+        "repo_root": str(workspace),
+        "name": "Harness Project",
+        "description": "Goal",
+    })
+    create_project_handler.do_POST()
+    created = _response_body(create_project_handler)
+    project_id = created["summary"]["project_id"]
+
+    create_plan_handler = _make_handler(f"/api/projects/{project_id}/plans", {
+        "name": "Workspace Plan",
+        "objective": "Build the DAG workspace.",
+        "quick_task": True,
+    })
+    create_plan_handler.do_POST()
+    plan = _response_body(create_plan_handler)
 
     list_handler = _make_handler("/api/projects")
     list_handler.do_GET()
@@ -196,43 +200,44 @@ def test_projects_routes_return_derived_payload(monkeypatch, tmp_path) -> None:
     assert summaries[0]["repo_root"] == str(workspace.resolve())
     assert summaries[0]["primary_working_directory"] == str(workspace.resolve())
     assert summaries[0]["goal"] == "Goal"
-    assert summaries[0]["planned_task_count"] == 0
-    assert summaries[0]["current_stage"] == "planning"
+    assert summaries[0]["planned_task_count"] == 1
+    assert summaries[0]["current_stage"] == "ready_to_launch"
+    assert summaries[0]["active_plan_count"] == 1
 
-    detail_handler = _make_handler(f"/api/project/{summaries[0]['project_id']}")
+    detail_handler = _make_handler(f"/api/projects/{project_id}")
     detail_handler.do_GET()
     assert detail_handler.send_response.call_args.args == (200,)
     detail = _response_body(detail_handler)
-    assert detail["summary"]["active_cycle_id"] == draft.id
-    assert detail["cycles"][0]["draft_id"] == draft.id
+    assert detail["selected_plan_id"] == plan["plan_id"]
+    assert detail["plans"][0]["plan_id"] == plan["plan_id"]
+    assert detail["selected_plan"]["graph"]["nodes"][0]["title"] == "Build The Dag Workspace."
     assert detail["context"]["working_directories"] == [str(workspace.resolve())]
 
-    lookup_by_draft = _make_handler(f"/api/project/lookup?draft_id={draft.id}")
-    lookup_by_draft.do_GET()
-    assert lookup_by_draft.send_response.call_args.args == (200,)
-    assert _response_body(lookup_by_draft) == {"project_id": summaries[0]["project_id"]}
+    lookup_by_mission = _make_handler("/api/project/lookup?mission_id=missing")
+    lookup_by_mission.do_GET()
+    assert lookup_by_mission.send_response.call_args.args == (404,)
+    assert _response_body(lookup_by_mission) == {"error": "Project lookup failed"}
 
-    missing_handler = _make_handler("/api/project/missing-project")
+    missing_handler = _make_handler("/api/projects/missing-project")
     missing_handler.do_GET()
     assert missing_handler.send_response.call_args.args == (404,)
     assert _response_body(missing_handler) == {"error": "Project 'missing-project' not found"}
 
 
 def test_projects_crud_archive_and_safe_delete(monkeypatch, tmp_path) -> None:
-    home = _set_agentforce_home(tmp_path, monkeypatch)
+    _set_agentforce_home(tmp_path, monkeypatch)
     repo_root = tmp_path / "repo"
     work_a = repo_root / "apps" / "core"
     work_b = repo_root / "tests"
     work_a.mkdir(parents=True)
     work_b.mkdir(parents=True)
-    monkeypatch.setattr("agentforce.server.project_harness._repo_root_from_git", lambda path: path.resolve())
 
     create_handler = _make_handler(
         "/api/projects",
         {
             "repo_root": str(repo_root),
             "name": "Harness CRUD",
-            "goal": "Keep project lifecycle explicit",
+            "description": "Keep project lifecycle explicit",
             "working_directories": [str(work_a), str(work_b)],
         },
     )
@@ -244,7 +249,7 @@ def test_projects_crud_archive_and_safe_delete(monkeypatch, tmp_path) -> None:
     assert created["summary"]["workspace_count"] == 2
 
     patch_handler = _make_handler(
-        f"/api/project/{project_id}",
+        f"/api/projects/{project_id}",
         {
             "name": "Harness CRUD Updated",
             "goal": "Updated goal",
@@ -272,36 +277,33 @@ def test_projects_crud_archive_and_safe_delete(monkeypatch, tmp_path) -> None:
     archived_summaries = _response_body(archived_list_handler)
     assert archived_summaries[0]["status"] == "archived"
 
-    delete_handler = _make_handler(f"/api/project/{project_id}")
+    delete_handler = _make_handler(f"/api/projects/{project_id}")
     delete_handler.do_DELETE()
     assert delete_handler.send_response.call_args.args == (200,)
     assert _response_body(delete_handler) == {"deleted": True}
 
 
 def test_project_delete_rejected_when_history_exists(monkeypatch, tmp_path) -> None:
-    home = _set_agentforce_home(tmp_path, monkeypatch)
+    _set_agentforce_home(tmp_path, monkeypatch)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    drafts = PlanDraftStore(home / "drafts")
-    drafts.create(
-        "draft-1",
-        status="draft",
-        draft_spec={"name": "Harness Project", "goal": "Goal", "tasks": [], "working_dir": str(repo_root)},
-        turns=[],
-        validation={},
-        activity_log=[],
-        approved_models=[],
-        workspace_paths=[str(repo_root)],
-        companion_profile={},
-        draft_notes=[],
-    )
-    monkeypatch.setattr("agentforce.server.project_harness._repo_root_from_git", lambda path: path.resolve())
 
-    list_handler = _make_handler("/api/projects")
-    list_handler.do_GET()
-    project_id = _response_body(list_handler)[0]["project_id"]
+    create_handler = _make_handler("/api/projects", {
+        "repo_root": str(repo_root),
+        "name": "Harness Project",
+        "description": "Goal",
+    })
+    create_handler.do_POST()
+    project_id = _response_body(create_handler)["summary"]["project_id"]
 
-    delete_handler = _make_handler(f"/api/project/{project_id}")
+    create_plan_handler = _make_handler(f"/api/projects/{project_id}/plans", {
+        "name": "Protected Plan",
+        "objective": "Keep project lifecycle explicit.",
+        "quick_task": True,
+    })
+    create_plan_handler.do_POST()
+
+    delete_handler = _make_handler(f"/api/projects/{project_id}")
     delete_handler.do_DELETE()
     assert delete_handler.send_response.call_args.args == (409,)
-    assert _response_body(delete_handler)["error"] == "Project with active history cannot be deleted"
+    assert _response_body(delete_handler)["error"] == "Project with plans cannot be deleted"

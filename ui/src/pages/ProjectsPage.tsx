@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { archiveProject, createProject, getProjects, unarchiveProject } from '../lib/api';
 import { useToast } from '../hooks/useToast';
-import { projectPlanRoute, projectRoute, type ProjectSummaryView } from '../lib/types';
+import { projectOverviewRoute, projectPlanRoute, projectRoute, type ProjectSummaryView } from '../lib/types';
 
 const PROJECT_STATUS_CLASSES: Record<ProjectSummaryView['status'], string> = {
   planning: 'text-amber border-amber/30 bg-amber/10',
@@ -70,7 +70,7 @@ function EmptyState() {
   return (
     <section className="rounded-lg border border-border bg-card px-4 py-5 text-sm text-dim">
       <span>No projects yet. </span>
-      <span>Create a project to start the brief, spec, tasks, and mission in one place.</span>
+      <span>Create a project to hold memory, settings, active plans, and mission history in one place.</span>
     </section>
   );
 }
@@ -107,6 +107,9 @@ function ProjectCard({
   const workspaceLabel = project.workspace_count > 1
     ? `${project.workspace_count} working directories`
     : '1 working directory';
+  const activePlanCount = project.active_plan_count ?? 0;
+  const runningPlanCount = project.running_plan_count ?? 0;
+  const blockedNodeCount = project.blocked_node_count ?? 0;
 
   return (
     <article className="group rounded-lg border border-border bg-card transition-all duration-200 hover:border-border-lit hover:shadow-[0_0_24px_rgba(34,211,238,0.1)]">
@@ -152,14 +155,32 @@ function ProjectCard({
             <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Next action</div>
             <div className="mt-1 text-[12px] text-text">{nextAction}</div>
           </div>
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Plan portfolio</div>
+            <div className="mt-1 text-[12px] text-text">{activePlanCount} active plans</div>
+          </div>
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Running now</div>
+            <div className="mt-1 text-[12px] text-text">{runningPlanCount} execution reservations</div>
+          </div>
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Blocked nodes</div>
+            <div className="mt-1 text-[12px] text-text">{blockedNodeCount}</div>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
           <Link
             className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
-            to={projectRoute(project.project_id)}
+            to={projectOverviewRoute(project.project_id)}
           >
-            Open Project
+            Open Home
+          </Link>
+          <Link
+            className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card hover:no-underline"
+            to={projectPlanRoute(project.project_id)}
+          >
+            Open Workspace
           </Link>
           <button
             type="button"
@@ -246,7 +267,7 @@ export default function ProjectsPage() {
       resetCreateForm();
       setIncludeArchived(false);
       refresh();
-      navigate(projectPlanRoute(createdProject.summary.project_id));
+      navigate(projectOverviewRoute(createdProject.summary.project_id));
     } catch (createError) {
       addToast(createError instanceof Error ? createError.message : 'Failed to create project', 'error');
     }

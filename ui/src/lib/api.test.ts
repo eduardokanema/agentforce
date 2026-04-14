@@ -171,7 +171,7 @@ describe('connectors API client', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/projects', {
       headers: { Accept: 'application/json' },
     });
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/project/proj-1', {
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/projects/proj-1', {
       headers: { Accept: 'application/json' },
     });
   });
@@ -220,7 +220,7 @@ describe('connectors API client', () => {
         working_directories: ['/tmp/agentforce/apps/core'],
       }),
     });
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/project/proj-1', {
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/projects/proj-1', {
       method: 'PATCH',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -237,7 +237,7 @@ describe('connectors API client', () => {
       method: 'POST',
       headers: { Accept: 'application/json' },
     });
-    expect(fetchMock).toHaveBeenNthCalledWith(5, '/api/project/proj-1', {
+    expect(fetchMock).toHaveBeenNthCalledWith(5, '/api/projects/proj-1', {
       method: 'DELETE',
       headers: { Accept: 'application/json' },
     });
