@@ -145,6 +145,9 @@ Mission detail keeps task status, review flow, and execution defaults in one pla
 ## Documentation
 
 - [ABOUT.md](ABOUT.md) — product overview, personas, and the end-to-end workflow
+- [ARCHITECTURE.md](ARCHITECTURE.md) — runtime layers and the Project Harness overlay
+- [docs/index.md](docs/index.md) — rollout docs hub
+- [docs/status/implemented-vs-planned.md](docs/status/implemented-vs-planned.md) — shipped vs in-progress Project Harness work
 - [`missions/`](missions/) — real mission spec examples
 - [`ui/README.md`](ui/README.md) — frontend development notes
 

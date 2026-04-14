@@ -11,6 +11,8 @@ import type {
   Model,
   MissionDraft,
   PreflightAnswer,
+  ProjectHarnessView,
+  ProjectSummaryView,
   MissionState,
   MissionSummary,
   Provider,
@@ -204,6 +206,58 @@ function normalizePlanDraft(payload: MissionDraft): MissionDraft {
 
 export function getMissions(): Promise<MissionSummary[]> {
   return requestJson<MissionSummary[]>('/api/missions');
+}
+
+export function getProjects(options?: { includeArchived?: boolean }): Promise<ProjectSummaryView[]> {
+  const query = options?.includeArchived ? '?include_archived=1' : '';
+  return requestJson<ProjectSummaryView[]>(`/api/projects${query}`);
+}
+
+export function getProject(id: string): Promise<ProjectHarnessView> {
+  return requestJson<ProjectHarnessView>(`/api/project/${encodeURIComponent(id)}`);
+}
+
+export function createProject(payload: {
+  repo_root: string;
+  name?: string;
+  goal?: string;
+  working_directories?: string[];
+}): Promise<ProjectHarnessView> {
+  return requestJson<ProjectHarnessView>('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateProject(id: string, payload: {
+  name?: string;
+  goal?: string;
+  working_directories?: string[];
+}): Promise<ProjectHarnessView> {
+  return requestJson<ProjectHarnessView>(`/api/project/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function archiveProject(id: string): Promise<void> {
+  return requestVoid(`/api/project/${encodeURIComponent(id)}/archive`);
+}
+
+export function unarchiveProject(id: string): Promise<void> {
+  return requestVoid(`/api/project/${encodeURIComponent(id)}/unarchive`);
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}/api/project/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status} ${response.statusText}`);
+  }
 }
 
 export function getDrafts(): Promise<DraftSummary[]> {

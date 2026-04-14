@@ -539,9 +539,120 @@ export const DEFAULT_LABS_CONFIG: LabsConfig = {
   black_hole_enabled: false,
 };
 
+export type ProjectMode = 'standard' | 'optimize';
+
+export type ProjectStatus =
+  | 'planning'
+  | 'ready'
+  | 'running'
+  | 'blocked'
+  | 'completed'
+  | 'archived'
+  | 'idle';
+
+export type EvidenceStatus = 'ok' | 'warning' | 'error' | 'pending';
+
+export interface ProjectEvidenceItem {
+  kind: string;
+  label: string;
+  status: EvidenceStatus;
+  summary: string;
+  source_type?: string | null;
+  source_id?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProjectEvidenceSummary {
+  status: EvidenceStatus;
+  contract_summary?: string | null;
+  verifier_summary?: string | null;
+  artifact_summary?: string | null;
+  stream_summary?: string | null;
+  items: ProjectEvidenceItem[];
+}
+
+export interface ProjectCycleView {
+  cycle_id: string;
+  title: string;
+  status: ProjectStatus;
+  draft_id?: string | null;
+  mission_id?: string | null;
+  latest_plan_run_id?: string | null;
+  latest_plan_version_id?: string | null;
+  predecessor_cycle_id?: string | null;
+  successor_cycle_id?: string | null;
+  blocker?: string | null;
+  next_action?: string | null;
+  created_at: string;
+  updated_at: string;
+  evidence?: ProjectEvidenceSummary | null;
+}
+
+export interface ProjectSummaryView {
+  project_id: string;
+  name: string;
+  repo_root: string;
+  primary_working_directory?: string | null;
+  workspace_count: number;
+  goal?: string | null;
+  planned_task_count: number;
+  mode: ProjectMode;
+  status: ProjectStatus;
+  active_cycle_id?: string | null;
+  blocker?: string | null;
+  next_action?: string | null;
+  active_mission_id?: string | null;
+  archived_at?: string | null;
+  has_activity: boolean;
+  updated_at: string;
+}
+
+export interface ProjectContextView {
+  repo_root: string;
+  primary_working_directory?: string | null;
+  working_directories: string[];
+  goal?: string | null;
+  definition_of_done: string[];
+  planned_task_count: number;
+  task_titles: string[];
+  mission_count: number;
+}
+
+export interface ProjectHarnessView {
+  summary: ProjectSummaryView;
+  context: ProjectContextView;
+  cycles: ProjectCycleView[];
+  active_cycle_id?: string | null;
+  active_cycle?: ProjectCycleView | null;
+  evidence: ProjectEvidenceSummary;
+  docs_status: {
+    implemented: string[];
+    planned: string[];
+  };
+  policy_summary: {
+    mode: ProjectMode;
+    derived: boolean;
+    optimize_available: boolean;
+  };
+  lifecycle: {
+    archived: boolean;
+    archived_at?: string | null;
+    can_archive: boolean;
+    can_unarchive: boolean;
+    can_delete: boolean;
+    can_edit: boolean;
+    has_activity: boolean;
+  };
+}
+
+export const PROJECTS_ROUTE = '/projects';
 export const PLAN_ROUTE = '/plan';
 export const MISSIONS_ROUTE = '/missions';
 export const BLACK_HOLE_ROUTE = '/black-hole';
+
+export function projectRoute(id: string): string {
+  return `${PROJECTS_ROUTE}/${id}`;
+}
 
 export function planDraftRoute(id: string): string {
   return `${PLAN_ROUTE}/${id}`;

@@ -108,6 +108,120 @@ def test_api_missions_returns_summaries_json_and_cors(tmp_path, monkeypatch):
     assert body[0]["name"] == "API Mission"
 
 
+def test_api_projects_returns_grouped_project_summaries(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    home = tmp_path / ".agentforce-home"
+    home.mkdir()
+    repo_root = tmp_path / "workspace"
+    repo_root.mkdir()
+
+    _set_handler_config(state_dir)
+    monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", home)
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", home)
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", state_dir)
+    monkeypatch.setattr("agentforce.server.state_io._STATE_DIR_OVERRIDE", state_dir, raising=False)
+    monkeypatch.setattr("agentforce.server.project_harness._repo_root_from_git", lambda path: path.resolve())
+
+    draft_store = PlanDraftStore(home / "drafts")
+    draft_store.create(
+        "draft-1",
+        status="draft",
+        draft_spec={"name": "Project API", "goal": "Goal", "tasks": [], "working_dir": str(repo_root)},
+        turns=[],
+        validation={"latest_plan_version_id": "version-1"},
+        activity_log=[],
+        approved_models=[],
+        workspace_paths=[str(repo_root)],
+        companion_profile={},
+        draft_notes=[],
+    )
+    state = MissionState(
+        mission_id="mission-abc",
+        spec=MissionSpec(
+            name="Project API",
+            goal="Goal",
+            definition_of_done=["Done"],
+            tasks=[TaskSpec(id="task-1", title="Task", description="Do work")],
+            caps=Caps(max_concurrent_workers=1),
+            working_dir=str(repo_root),
+        ),
+        task_states={"task-1": TaskState(task_id="task-1", spec_summary="Do work", status="in_progress")},
+        started_at="2026-04-14T09:00:00+00:00",
+        working_dir=str(repo_root),
+        source_draft_id="draft-1",
+    )
+    state.save(state_dir / "mission-abc.json")
+
+    handler = _make_handler("/api/projects")
+    handler.do_GET()
+
+    body = _response_body(handler)
+    assert isinstance(body, list)
+    assert len(body) == 1
+    assert body[0]["name"] == "Project API"
+    assert body[0]["active_mission_id"] == "mission-abc"
+
+
+def test_api_project_detail_returns_cycles_and_evidence(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    home = tmp_path / ".agentforce-home"
+    home.mkdir()
+    repo_root = tmp_path / "workspace"
+    repo_root.mkdir()
+
+    _set_handler_config(state_dir)
+    monkeypatch.setattr("agentforce.server.handler.AGENTFORCE_HOME", home)
+    monkeypatch.setattr("agentforce.server.state_io.AGENTFORCE_HOME", home)
+    monkeypatch.setattr("agentforce.server.state_io.STATE_DIR", state_dir)
+    monkeypatch.setattr("agentforce.server.state_io._STATE_DIR_OVERRIDE", state_dir, raising=False)
+    monkeypatch.setattr("agentforce.server.project_harness._repo_root_from_git", lambda path: path.resolve())
+
+    draft_store = PlanDraftStore(home / "drafts")
+    draft_store.create(
+        "draft-1",
+        status="draft",
+        draft_spec={"name": "Project API", "goal": "Goal", "tasks": [], "working_dir": str(repo_root)},
+        turns=[],
+        validation={"latest_plan_version_id": "version-1", "latest_plan_run_id": "run-1"},
+        activity_log=[],
+        approved_models=[],
+        workspace_paths=[str(repo_root)],
+        companion_profile={},
+        draft_notes=[],
+    )
+    state = MissionState(
+        mission_id="mission-abc",
+        spec=MissionSpec(
+            name="Project API",
+            goal="Goal",
+            definition_of_done=["Done"],
+            tasks=[TaskSpec(id="task-1", title="Task", description="Do work")],
+            caps=Caps(max_concurrent_workers=1),
+            working_dir=str(repo_root),
+        ),
+        task_states={"task-1": TaskState(task_id="task-1", spec_summary="Do work", status="in_progress")},
+        started_at="2026-04-14T09:00:00+00:00",
+        working_dir=str(repo_root),
+        source_draft_id="draft-1",
+    )
+    state.save(state_dir / "mission-abc.json")
+
+    list_handler = _make_handler("/api/projects")
+    list_handler.do_GET()
+    project_id = _response_body(list_handler)[0]["project_id"]
+
+    handler = _make_handler(f"/api/project/{project_id}")
+    handler.do_GET()
+
+    body = _response_body(handler)
+    assert body["summary"]["project_id"] == project_id
+    assert body["active_cycle"]["draft_id"] == "draft-1"
+    assert body["active_cycle"]["mission_id"] == "mission-abc"
+    assert body["evidence"]["artifact_summary"] == "0/1 tasks approved"
+
+
 def test_api_mission_returns_full_state_json(tmp_path, monkeypatch):
     _seed_state(tmp_path, monkeypatch)
 

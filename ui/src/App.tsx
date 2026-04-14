@@ -9,10 +9,13 @@ import {
   BLACK_HOLE_ROUTE,
   DEFAULT_LABS_CONFIG,
   isBlackHoleEnabled,
+  PROJECTS_ROUTE,
   type LabsConfig,
   MISSIONS_ROUTE,
   PLAN_ROUTE,
 } from './lib/types';
+import ProjectsPageScreen from './pages/ProjectsPage';
+import ProjectDetailPageScreen from './pages/ProjectDetailPage';
 import MissionsPageScreen from './pages/MissionsPage';
 import MissionDetailPageScreen from './pages/MissionDetailPage';
 import PlanModePageScreen from './pages/PlanModePage';
@@ -24,7 +27,9 @@ import SettingsPageScreen from './pages/SettingsPage';
 import GroundControlPageScreen from './pages/GroundControlPage';
 
 const routeConfig = [
-  { path: '/', element: <MissionsPageScreen /> },
+  { path: '/', element: <Navigate to={PROJECTS_ROUTE} replace /> },
+  { path: PROJECTS_ROUTE, element: <ProjectsPageScreen /> },
+  { path: '/projects/:id', element: <ProjectDetailPageScreen /> },
   { path: '/missions', element: <MissionsPageScreen /> },
   { path: '/mission/:id', element: <MissionDetailPageScreen /> },
   { path: '/mission/:mission_id/task/:task_id', element: <TaskDetailPageScreen /> },
@@ -40,6 +45,8 @@ const routeConfig = [
 
 type Expect<T extends true> = T;
 type RoutePath = (typeof routeConfig)[number]['path'];
+type _projectsRouteExists = Expect<typeof PROJECTS_ROUTE extends RoutePath ? true : false>;
+type _projectDetailRouteExists = Expect<'/projects/:id' extends RoutePath ? true : false>;
 type _taskRouteExists = Expect<'/mission/:mission_id/task/:task_id' extends RoutePath ? true : false>;
 type _planRouteExists = Expect<'/plan' extends RoutePath ? true : false>;
 type _planIdRouteExists = Expect<'/plan/:id' extends RoutePath ? true : false>;
@@ -89,7 +96,9 @@ function App() {
             <main className="flex-1 overflow-y-auto pt-10">
               <div className="site-main">
                 <Routes>
-                  <Route path="/" element={<MissionsPageScreen labs={resolvedLabs} />} />
+                  <Route path="/" element={<Navigate to={PROJECTS_ROUTE} replace />} />
+                  <Route path={PROJECTS_ROUTE} element={<ProjectsPageScreen />} />
+                  <Route path="/projects/:id" element={<ProjectDetailPageScreen />} />
                   <Route path={MISSIONS_ROUTE} element={<MissionsPageScreen labs={resolvedLabs} />} />
                   <Route path="/mission/:id" element={<MissionDetailPageScreen />} />
                   <Route path="/mission/:mission_id/task/:task_id" element={<TaskDetailPageScreen />} />
@@ -101,7 +110,7 @@ function App() {
                   <Route path="/models" element={<ModelsPageScreen />} />
                   <Route path="/telemetry" element={<TelemetryPageScreen />} />
                   <Route path="/settings" element={<SettingsPageScreen labs={resolvedLabs} onLabsChange={setLabs} />} />
-                  <Route path="*" element={<Navigate to={MISSIONS_ROUTE} replace />} />
+                  <Route path="*" element={<Navigate to={PROJECTS_ROUTE} replace />} />
                 </Routes>
               </div>
             </main>

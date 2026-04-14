@@ -2,12 +2,18 @@ import { useEffect, useState } from 'react';
 import { NavLink, useInRouterContext } from 'react-router-dom';
 import { wsClient } from '../lib/ws';
 import { useTheme, type ThemeMode } from '../context/ThemeContext';
-import { BLACK_HOLE_ROUTE, isBlackHoleEnabled, PLAN_ROUTE, type LabsConfig } from '../lib/types';
+import {
+  BLACK_HOLE_ROUTE,
+  isBlackHoleEnabled,
+  PLAN_ROUTE,
+  PROJECTS_ROUTE,
+  type LabsConfig,
+} from '../lib/types';
 
 type WsConnectionState = 'connecting' | 'open' | 'closed';
 
 const NAV_ITEMS = [
-  { label: 'Mission Control', icon: '⌘', to: '/' },
+  { label: 'Projects', icon: '▣', to: PROJECTS_ROUTE },
   { label: 'Plan Mode', icon: '◈', to: PLAN_ROUTE },
   { label: 'Black Hole', icon: '☉', to: BLACK_HOLE_ROUTE },
   { label: 'Ground Control', icon: '⊛', to: '/ground-control' },
@@ -68,7 +74,7 @@ function SidebarNavLink({
   return (
     <NavLink
       to={item.to}
-      end={item.to === '/'}
+      end={item.to === PROJECTS_ROUTE}
       className={({ isActive }) => [
         baseClassName,
         isActive

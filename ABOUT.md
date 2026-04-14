@@ -20,6 +20,8 @@ Software teams can get useful output from coding agents, but they still struggle
 
 AgentForce gives engineering leads a structured way to plan, launch, supervise, and recover AI-driven software execution from one system.
 
+Current implementation notes for the Project Harness rollout live in [docs/index.md](docs/index.md) and [docs/status/implemented-vs-planned.md](docs/status/implemented-vs-planned.md).
+
 ## Main Goal
 
 Help engineering leads convert scoped software initiatives into reviewable, executable missions that can run with autonomy but not without control.

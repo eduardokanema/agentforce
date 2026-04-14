@@ -45,6 +45,18 @@ vi.mock('./pages/MissionsPage', () => ({
   },
 }));
 
+vi.mock('./pages/ProjectsPage', () => ({
+  default: function ProjectsPage() {
+    return <div data-testid="page">Projects page</div>;
+  },
+}));
+
+vi.mock('./pages/ProjectDetailPage', () => ({
+  default: function ProjectDetailPage() {
+    return <div data-testid="page">Project detail page</div>;
+  },
+}));
+
 vi.mock('./pages/MissionDetailPage', () => ({
   default: function MissionDetailPage() {
     return <div data-testid="page">Mission detail page</div>;
@@ -109,6 +121,18 @@ afterEach(() => {
 });
 
 describe('App routes', () => {
+  it('redirects the landing route to Projects', async () => {
+    const { root, container } = renderAt('/');
+    await flushPromises();
+
+    expect(window.location.pathname).toBe('/projects');
+    expect(container.textContent).toContain('Projects page');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it('renders the shell and the plan route', async () => {
     const { root, container } = renderAt('/plan');
     await flushPromises();
@@ -117,6 +141,17 @@ describe('App routes', () => {
     expect(container.querySelector('[data-testid="sidebar"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="hudbar"]')).toBeTruthy();
     expect(container.textContent).toContain('Plan mode page true');
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('renders the mission control route', async () => {
+    const { root, container } = renderAt('/missions');
+    await flushPromises();
+
+    expect(container.textContent).toContain('Missions page true');
 
     act(() => {
       root.unmount();
@@ -147,6 +182,22 @@ describe('App routes', () => {
 
     act(() => {
       root.unmount();
+    });
+  });
+
+  it('renders the project routes', async () => {
+    const projects = renderAt('/projects');
+    await flushPromises();
+    expect(projects.container.textContent).toContain('Projects page');
+    act(() => {
+      projects.root.unmount();
+    });
+
+    const projectDetail = renderAt('/projects/proj-1');
+    await flushPromises();
+    expect(projectDetail.container.textContent).toContain('Project detail page');
+    act(() => {
+      projectDetail.root.unmount();
     });
   });
 

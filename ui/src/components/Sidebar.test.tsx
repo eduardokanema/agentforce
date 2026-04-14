@@ -122,7 +122,7 @@ describe('Sidebar', () => {
     });
 
     expect(localStorage.getItem('sidebar-collapsed')).toBe('0');
-    expect(container.textContent).toContain('Mission Control');
+    expect(container.textContent).not.toContain('Mission Control');
 
     act(() => { root.unmount(); });
   });
