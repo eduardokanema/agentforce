@@ -114,7 +114,7 @@ describe('Sidebar', () => {
     );
 
     expect(container.textContent).not.toContain('Mission Control');
-    expect(container.querySelectorAll('a').length).toBe(7);
+    expect(container.querySelectorAll('a').length).toBe(6);
 
     const button = container.querySelector('button');
     act(() => {
@@ -134,7 +134,7 @@ describe('Sidebar', () => {
       </MemoryRouter>,
     );
 
-    expect(container.querySelectorAll('a').length).toBe(6);
+    expect(container.querySelectorAll('a').length).toBe(5);
     expect(container.querySelector('a[href="/black-hole"]')).toBeNull();
 
     act(() => { root.unmount(); });

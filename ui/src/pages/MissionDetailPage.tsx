@@ -11,7 +11,15 @@ import { useMission } from "../hooks/useMission";
 import { useToast } from "../hooks/useToast";
 import SpaceProgress from "../components/SpaceProgress";
 import { executionProfileFromOption, optionIdFromExecutionProfile } from "../lib/executionProfiles";
-import type { EventLogEntry, Model, TaskSpec, TaskState, TaskStatus } from "../lib/types";
+import {
+  projectHistoryRoute,
+  projectPlanRoute,
+  type EventLogEntry,
+  type Model,
+  type TaskSpec,
+  type TaskState,
+  type TaskStatus,
+} from "../lib/types";
 
 type MissionBadgeStatus =
   | "active"
@@ -189,7 +197,17 @@ function MissionDetailPageLoading({ message }: { message: string }) {
   );
 }
 
-function MissionDetailPageContent({ missionId }: { missionId: string }) {
+function MissionDetailPageContent({
+  missionId,
+  projectId,
+  projectName,
+  embedded,
+}: {
+  missionId: string;
+  projectId?: string;
+  projectName?: string;
+  embedded?: boolean;
+}) {
   const navigate = useNavigate();
   const { mission, loading, error } = useMission(missionId);
   const { addToast } = useToast();
@@ -340,11 +358,20 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
 
   return (
     <div>
-      <Breadcrumb
-        missionId={missionId}
-        missionName={mission.spec.name}
-        className="mb-6"
-      />
+      {embedded ? (
+        <div className="mb-6 rounded-lg border border-border bg-card px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">Current Mission</div>
+          <div className="mt-1 text-sm text-dim">
+            {projectName ? `${projectName} mission execution` : 'Project mission execution'} stays inside the project surface.
+          </div>
+        </div>
+      ) : (
+        <Breadcrumb
+          missionId={missionId}
+          missionName={mission.spec.name}
+          className="mb-6"
+        />
+      )}
 
       <div className="mb-6 flex flex-col gap-3">
         <div className="flex flex-wrap items-start gap-3">
@@ -409,7 +436,7 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
       </div>
 
       <div className="mb-6">
-        <div className="section-title mb-2">Mission Control</div>
+        <div className="section-title mb-2">{embedded ? 'Project Mission' : 'Mission Control'}</div>
         <div className="flex gap-2">
           <button
             type="button"
@@ -424,7 +451,7 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
             onClick={() => {
               void createReadjustedDraft(missionId)
                 .then((draft) => {
-                  navigate(`/plan?draft=${draft.id}`);
+                  navigate(projectId ? `${projectPlanRoute(projectId)}?draft=${draft.id}` : `/plan?draft=${draft.id}`);
                 })
                 .catch((error) => {
                   addToast(
@@ -434,7 +461,7 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
                 });
             }}
           >
-            Readjust Trajectory
+            Readjust Plan
           </button>
           <button
             type="button"
@@ -557,9 +584,9 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
             {mission.source_draft_id ? (
               <Link
                 className="mt-3 inline-flex text-sm font-medium text-cyan transition-colors hover:text-cyan/80"
-                to={`/plan?draft=${mission.source_draft_id}`}
+                to={projectId ? `${projectPlanRoute(projectId)}?draft=${mission.source_draft_id}` : `/plan?draft=${mission.source_draft_id}`}
               >
-                Return to planning history
+                {projectId ? 'Return to project plan' : 'Return to planning history'}
               </Link>
             ) : null}
           </div>
@@ -741,12 +768,30 @@ function MissionDetailPageContent({ missionId }: { missionId: string }) {
   );
 }
 
-export default function MissionDetailPage() {
+export default function MissionDetailPage({
+  missionIdOverride,
+  projectId,
+  projectName,
+  embedded,
+}: {
+  missionIdOverride?: string;
+  projectId?: string;
+  projectName?: string;
+  embedded?: boolean;
+}) {
   const params = useParams<{ id?: string }>();
+  const missionId = missionIdOverride ?? params.id;
 
-  if (!params.id) {
+  if (!missionId) {
     return <MissionDetailPageLoading message="Missing mission id." />;
   }
 
-  return <MissionDetailPageContent missionId={params.id} />;
+  return (
+    <MissionDetailPageContent
+      missionId={missionId}
+      projectId={projectId}
+      projectName={projectName}
+      embedded={embedded}
+    />
+  );
 }

@@ -125,6 +125,10 @@ class ProjectSummaryView:
     workspace_count: int
     goal: str | None
     planned_task_count: int
+    current_stage: str
+    current_plan_id: str | None
+    current_mission_id: str | None
+    next_action_label: str | None
     mode: str
     status: str
     active_cycle_id: str | None
@@ -655,6 +659,28 @@ def _build_project_view(
     archived = record is not None and bool(record.archived_at)
     summary_name = record.name if record is not None and record.name else _project_name(repo_root, drafts, missions)
     effective_status = "archived" if archived else (active_cycle.status if active_cycle is not None else "idle")
+    current_stage = (
+        "archived"
+        if archived else
+        "setup" if active_cycle is None else
+        "planning" if effective_status == "planning" else
+        "ready_to_launch" if effective_status == "ready" else
+        "executing" if effective_status == "running" else
+        "blocked" if effective_status == "blocked" else
+        "completed" if effective_status == "completed" else
+        "setup"
+    )
+    next_action_label = (
+        "Unarchive Project"
+        if archived
+        else "Create Plan"
+        if active_cycle is None
+        else "Open Mission"
+        if active_cycle.mission_id
+        else "Continue Planning"
+        if active_cycle.draft_id
+        else active_cycle.next_action
+    )
     summary = ProjectSummaryView(
         project_id=project_id_for_root(repo_root),
         name=summary_name,
@@ -663,6 +689,10 @@ def _build_project_view(
         workspace_count=len(context["working_directories"]),
         goal=context["goal"],
         planned_task_count=int(context["planned_task_count"]),
+        current_stage=current_stage,
+        current_plan_id=active_cycle.draft_id if active_cycle is not None else None,
+        current_mission_id=active_cycle.mission_id if active_cycle is not None else None,
+        next_action_label=next_action_label,
         mode=active_mode,
         status=effective_status,
         active_cycle_id=active_cycle.cycle_id if active_cycle is not None else None,
@@ -776,5 +806,19 @@ def list_project_summaries(*, include_archived: bool = False) -> list[dict[str, 
 def get_project_harness(project_id: str) -> ProjectHarnessView | None:
     for view in build_project_harness_views(include_archived=True):
         if view.summary.project_id == project_id:
+            return view
+    return None
+
+
+def get_project_harness_for_draft(draft_id: str) -> ProjectHarnessView | None:
+    for view in build_project_harness_views(include_archived=True):
+        if any(cycle.draft_id == draft_id for cycle in view.cycles):
+            return view
+    return None
+
+
+def get_project_harness_for_mission(mission_id: str) -> ProjectHarnessView | None:
+    for view in build_project_harness_views(include_archived=True):
+        if any(cycle.mission_id == mission_id for cycle in view.cycles):
             return view
     return None

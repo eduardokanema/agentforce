@@ -217,6 +217,14 @@ export function getProject(id: string): Promise<ProjectHarnessView> {
   return requestJson<ProjectHarnessView>(`/api/project/${encodeURIComponent(id)}`);
 }
 
+export function lookupProjectByDraft(id: string): Promise<{ project_id: string }> {
+  return requestJson<{ project_id: string }>(`/api/project/lookup?draft_id=${encodeURIComponent(id)}`);
+}
+
+export function lookupProjectByMission(id: string): Promise<{ project_id: string }> {
+  return requestJson<{ project_id: string }>(`/api/project/lookup?mission_id=${encodeURIComponent(id)}`);
+}
+
 export function createProject(payload: {
   repo_root: string;
   name?: string;

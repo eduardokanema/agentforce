@@ -5,7 +5,6 @@ import { useTheme, type ThemeMode } from '../context/ThemeContext';
 import {
   BLACK_HOLE_ROUTE,
   isBlackHoleEnabled,
-  PLAN_ROUTE,
   PROJECTS_ROUTE,
   type LabsConfig,
 } from '../lib/types';
@@ -14,7 +13,6 @@ type WsConnectionState = 'connecting' | 'open' | 'closed';
 
 const NAV_ITEMS = [
   { label: 'Projects', icon: '▣', to: PROJECTS_ROUTE },
-  { label: 'Plan Mode', icon: '◈', to: PLAN_ROUTE },
   { label: 'Black Hole', icon: '☉', to: BLACK_HOLE_ROUTE },
   { label: 'Ground Control', icon: '⊛', to: '/ground-control' },
   { label: 'Models', icon: '⬡', to: '/models' },

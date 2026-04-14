@@ -1,10 +1,12 @@
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_LABS_CONFIG, MISSIONS_ROUTE, isBlackHoleEnabled, type LabsConfig } from './lib/types';
+import { DEFAULT_LABS_CONFIG, PROJECTS_ROUTE, isBlackHoleEnabled, type LabsConfig } from './lib/types';
 
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
+  lookupProjectByDraft: vi.fn(),
+  lookupProjectByMission: vi.fn(),
   selectLabsConfig: vi.fn(),
 }));
 
@@ -19,11 +21,15 @@ beforeEach(() => {
     })),
   });
   api.getConfig.mockResolvedValue({ labs: { ...DEFAULT_LABS_CONFIG, black_hole_enabled: true } });
+  api.lookupProjectByDraft.mockResolvedValue({ project_id: 'proj-1' });
+  api.lookupProjectByMission.mockResolvedValue({ project_id: 'proj-1' });
   api.selectLabsConfig.mockImplementation((config) => config?.labs ?? DEFAULT_LABS_CONFIG);
 });
 
 vi.mock('./lib/api', () => ({
   getConfig: api.getConfig,
+  lookupProjectByDraft: api.lookupProjectByDraft,
+  lookupProjectByMission: api.lookupProjectByMission,
   selectLabsConfig: api.selectLabsConfig,
 }));
 
@@ -57,21 +63,33 @@ vi.mock('./pages/ProjectDetailPage', () => ({
   },
 }));
 
-vi.mock('./pages/MissionDetailPage', () => ({
-  default: function MissionDetailPage() {
-    return <div data-testid="page">Mission detail page</div>;
-  },
-}));
-
 vi.mock('./pages/TaskDetailPage', () => ({
   default: function TaskDetailPage() {
     return <div data-testid="page">Task detail page</div>;
   },
 }));
 
-vi.mock('./pages/PlanModePage', () => ({
-  default: function PlanModePage({ labs }: { labs: LabsConfig }) {
-    return <div data-testid="page">Plan mode page {String(isBlackHoleEnabled(labs))}</div>;
+vi.mock('./pages/ProjectPlanPage', () => ({
+  default: function ProjectPlanPage({ labs }: { labs: LabsConfig }) {
+    return <div data-testid="page">Project plan page {String(isBlackHoleEnabled(labs))}</div>;
+  },
+}));
+
+vi.mock('./pages/ProjectMissionPage', () => ({
+  default: function ProjectMissionPage() {
+    return <div data-testid="page">Project mission page</div>;
+  },
+}));
+
+vi.mock('./pages/PlanRedirectPage', () => ({
+  default: function PlanRedirectPage() {
+    return <div data-testid="page">Plan redirect page</div>;
+  },
+}));
+
+vi.mock('./pages/MissionRedirectPage', () => ({
+  default: function MissionRedirectPage() {
+    return <div data-testid="page">Mission redirect page</div>;
   },
 }));
 
@@ -140,7 +158,7 @@ describe('App routes', () => {
     expect(api.getConfig).toHaveBeenCalledTimes(1);
     expect(container.querySelector('[data-testid="sidebar"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="hudbar"]')).toBeTruthy();
-    expect(container.textContent).toContain('Plan mode page true');
+    expect(container.textContent).toContain('Plan redirect page');
 
     act(() => {
       root.unmount();
@@ -176,8 +194,8 @@ describe('App routes', () => {
     const { root, container } = renderAt('/black-hole');
     await flushPromises();
 
-    expect(window.location.pathname).toBe(MISSIONS_ROUTE);
-    expect(container.textContent).toContain('Missions page false');
+    expect(window.location.pathname).toBe(PROJECTS_ROUTE);
+    expect(container.textContent).toContain('Projects page');
     expect(container.textContent).not.toContain('Black hole page');
 
     act(() => {
@@ -193,11 +211,25 @@ describe('App routes', () => {
       projects.root.unmount();
     });
 
-    const projectDetail = renderAt('/projects/proj-1');
+    const projectDetail = renderAt('/projects/proj-1/overview');
     await flushPromises();
     expect(projectDetail.container.textContent).toContain('Project detail page');
     act(() => {
       projectDetail.root.unmount();
+    });
+
+    const projectPlan = renderAt('/projects/proj-1/plan');
+    await flushPromises();
+    expect(projectPlan.container.textContent).toContain('Project plan page true');
+    act(() => {
+      projectPlan.root.unmount();
+    });
+
+    const projectMission = renderAt('/projects/proj-1/mission');
+    await flushPromises();
+    expect(projectMission.container.textContent).toContain('Project mission page');
+    act(() => {
+      projectMission.root.unmount();
     });
   });
 
@@ -205,7 +237,7 @@ describe('App routes', () => {
     const { root, container } = renderAt('/mission/mission-123');
     await flushPromises();
 
-    expect(container.textContent).toContain('Mission detail page');
+    expect(container.textContent).toContain('Mission redirect page');
 
     act(() => {
       root.unmount();

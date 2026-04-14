@@ -57,7 +57,11 @@ import {
   blackHoleDraftRoute,
   isBlackHoleEnabled,
   MISSIONS_ROUTE,
+  PROJECTS_ROUTE,
   planDraftRoute,
+  projectMissionRoute,
+  projectOverviewRoute,
+  projectPlanRoute,
 } from "../lib/types";
 import {
   wsClient,
@@ -1718,11 +1722,23 @@ function PhaseViewport({
   );
 }
 
-export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
+export default function PlanModePage({
+  labs,
+  projectId,
+  projectName,
+  draftIdOverride,
+  initialWorkspaces,
+}: {
+  labs?: LabsConfig;
+  projectId?: string;
+  projectName?: string | null;
+  draftIdOverride?: string | null;
+  initialWorkspaces?: string[];
+}) {
   const navigate = useNavigate();
   const { id } = useParams();
   const [searchParams] = useSearchParams();
-  const draftId = id || searchParams.get("draft");
+  const draftId = draftIdOverride ?? id ?? searchParams.get("draft");
   const blackHoleEnabled = isBlackHoleEnabled(labs);
 
   const [prompt, setPrompt] = useState("");
@@ -1765,6 +1781,20 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
   const [pageError, setPageError] = useState<string | null>(null);
   const [conflictMessage, setConflictMessage] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!projectId || typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem("agentforce-last-project-id", projectId);
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!initialWorkspaces?.length || draftId || workspaces.length > 0) {
+      return;
+    }
+    setWorkspaces(normalizeWorkspacePaths(initialWorkspaces));
+  }, [draftId, initialWorkspaces, workspaces.length]);
+
   const loadDraft = async (nextDraftId: string): Promise<void> => {
     setLoadingDraft(true);
     setPageError(null);
@@ -1772,7 +1802,7 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
       const loaded = await getPlanDraft(nextDraftId);
       if (isBlackHoleDraft(loaded)) {
         if (!blackHoleEnabled) {
-          navigate(MISSIONS_ROUTE, { replace: true });
+          navigate(projectId ? projectOverviewRoute(projectId) : PROJECTS_ROUTE, { replace: true });
           return;
         }
         navigate(blackHoleDraftRoute(nextDraftId), { replace: true });
@@ -2000,7 +2030,7 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
           planning_profiles: initialPlanningProfiles,
         },
       });
-      navigate(planDraftRoute(created.id));
+      navigate(projectId ? `${projectPlanRoute(projectId)}?draft=${created.id}` : planDraftRoute(created.id));
     } catch (caught) {
       setPageError(
         caught instanceof Error
@@ -2075,21 +2105,27 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
       for (let attempt = 0; attempt < MISSION_LAUNCH_POLL_ATTEMPTS; attempt += 1) {
         setLaunchSplashMessage(
           attempt === 0
-            ? "Mission created. Waiting for Mission Control to bring it online..."
-            : `Mission created. Waiting for Mission Control to bring it online... (${attempt + 1}/${MISSION_LAUNCH_POLL_ATTEMPTS})`,
+            ? projectId
+              ? "Mission created. Opening execution in this project..."
+              : "Mission created. Waiting for mission execution to come online..."
+            : projectId
+              ? `Mission created. Opening execution in this project... (${attempt + 1}/${MISSION_LAUNCH_POLL_ATTEMPTS})`
+              : `Mission created. Waiting for mission execution to come online... (${attempt + 1}/${MISSION_LAUNCH_POLL_ATTEMPTS})`,
         );
         try {
           await getMission(response.mission_id);
-          navigate(`/mission/${response.mission_id}`);
+          navigate(projectId ? projectMissionRoute(projectId) : `/mission/${response.mission_id}`);
           return;
         } catch {
           if (attempt === MISSION_LAUNCH_POLL_ATTEMPTS - 1) {
-            throw new Error("Mission launch is taking longer than expected. Please retry from Mission Control.");
+            throw new Error(projectId
+              ? "Mission launch is taking longer than expected. Reopen this project and retry from the Plan section."
+              : "Mission launch is taking longer than expected. Please retry from mission execution.");
           }
           await sleep(MISSION_LAUNCH_POLL_DELAY_MS);
         }
       }
-      navigate(`/mission/${response.mission_id}`);
+      navigate(projectId ? projectMissionRoute(projectId) : `/mission/${response.mission_id}`);
     } catch (caught) {
       setPageError(
         caught instanceof Error ? caught.message : "Failed to launch mission.",
@@ -2348,7 +2384,7 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
       <header className="page-head flex-wrap justify-between gap-4">
         <div>
           <h1 className="text-[clamp(1.7rem,3vw,2.35rem)] font-semibold tracking-[-0.04em] text-text">
-            Flight Director Cockpit
+            {projectName ? `${projectName} Plan` : "Plan Workspace"}
           </h1>
           {draft?.draft_spec.name ? (
             <div className="mt-3 text-lg font-semibold tracking-[-0.03em] text-text">
@@ -2356,7 +2392,9 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
             </div>
           ) : null}
           <p className="mt-2 max-w-[72ch] text-sm leading-7 text-dim">
-            One focused step at a time. Keep the main surface clean, with deeper controls and history available only when needed.
+            {projectId
+              ? "Edit the current plan for this project. Move from brief to spec to launch without leaving project context."
+              : "One focused step at a time. Keep the main surface clean, with deeper controls and history available only when needed."}
           </p>
         </div>
         <div className="flex flex-wrap gap-2 text-[11px] text-dim">
@@ -2400,11 +2438,11 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
         <section className="rounded-[1.15rem] border border-border bg-card p-5">
           <div className="mb-5 max-w-[62ch]">
             <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan">
-              Briefing
+              {projectId ? "Current plan" : "Briefing"}
             </div>
-            <h2 className="mt-2 text-[clamp(1.55rem,2.2vw,2rem)] font-semibold tracking-[-0.03em] text-text">Mission Brief</h2>
+            <h2 className="mt-2 text-[clamp(1.55rem,2.2vw,2rem)] font-semibold tracking-[-0.03em] text-text">Plan Brief</h2>
             <p className="mt-2 text-sm leading-7 text-dim">
-              Start with the prompt, selected folders, and planning stack. Everything else can wait until the planner has something concrete to react to.
+              Start with the brief, selected folders, and planning stack. Everything else can wait until the planner has something concrete to react to.
             </p>
           </div>
           <section className="rounded-[1.15rem] border border-border bg-surface p-5">
@@ -2412,7 +2450,7 @@ export default function PlanModePage({ labs }: { labs?: LabsConfig }) {
               className="block text-sm font-medium text-text"
               htmlFor="plan-prompt"
             >
-              Mission prompt
+              Plan brief
             </label>
             <textarea
               id="plan-prompt"

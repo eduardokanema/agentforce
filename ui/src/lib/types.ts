@@ -550,6 +550,17 @@ export type ProjectStatus =
   | 'archived'
   | 'idle';
 
+export type ProjectStage =
+  | 'setup'
+  | 'planning'
+  | 'ready_to_launch'
+  | 'executing'
+  | 'blocked'
+  | 'completed'
+  | 'archived';
+
+export type ProjectSection = 'overview' | 'plan' | 'mission' | 'history' | 'settings';
+
 export type EvidenceStatus = 'ok' | 'warning' | 'error' | 'pending';
 
 export interface ProjectEvidenceItem {
@@ -596,6 +607,10 @@ export interface ProjectSummaryView {
   workspace_count: number;
   goal?: string | null;
   planned_task_count: number;
+  current_stage: ProjectStage;
+  current_plan_id?: string | null;
+  current_mission_id?: string | null;
+  next_action_label?: string | null;
   mode: ProjectMode;
   status: ProjectStatus;
   active_cycle_id?: string | null;
@@ -651,7 +666,31 @@ export const MISSIONS_ROUTE = '/missions';
 export const BLACK_HOLE_ROUTE = '/black-hole';
 
 export function projectRoute(id: string): string {
-  return `${PROJECTS_ROUTE}/${id}`;
+  return projectOverviewRoute(id);
+}
+
+export function projectSectionRoute(id: string, section: ProjectSection): string {
+  return `${PROJECTS_ROUTE}/${id}/${section}`;
+}
+
+export function projectOverviewRoute(id: string): string {
+  return projectSectionRoute(id, 'overview');
+}
+
+export function projectPlanRoute(id: string): string {
+  return projectSectionRoute(id, 'plan');
+}
+
+export function projectMissionRoute(id: string): string {
+  return projectSectionRoute(id, 'mission');
+}
+
+export function projectHistoryRoute(id: string): string {
+  return projectSectionRoute(id, 'history');
+}
+
+export function projectSettingsRoute(id: string): string {
+  return projectSectionRoute(id, 'settings');
 }
 
 export function planDraftRoute(id: string): string {

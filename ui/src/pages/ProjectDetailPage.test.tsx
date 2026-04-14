@@ -33,7 +33,7 @@ vi.mock('../hooks/useToast', () => ({
 
 import ProjectDetailPage from './ProjectDetailPage';
 
-function renderPage(initialEntry = '/projects/proj-1'): HTMLDivElement {
+function renderPage(initialEntry = '/projects/proj-1/overview'): HTMLDivElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -42,7 +42,7 @@ function renderPage(initialEntry = '/projects/proj-1'): HTMLDivElement {
     root.render(
       <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
-          <Route path="/projects/:id" element={<ProjectDetailPage />} />
+          <Route path="/projects/:id/:section" element={<ProjectDetailPage />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -166,6 +166,10 @@ describe('ProjectDetailPage', () => {
         workspace_count: 2,
         goal: 'Goal',
         planned_task_count: 1,
+        current_stage: 'executing',
+        current_plan_id: 'draft-1',
+        current_mission_id: 'mission-1',
+        next_action_label: 'Ship the update',
         mode: 'standard',
         status: 'running',
         active_cycle_id: 'cycle-1',
@@ -256,22 +260,21 @@ describe('ProjectDetailPage', () => {
     expect(container.textContent).toContain('Next');
     expect(container.textContent).toContain('Evidence');
     expect(container.textContent).toContain('Plan');
-    expect(container.textContent).toContain('Missions');
+    expect(container.textContent).toContain('Mission');
     expect(container.textContent).toContain('History');
     expect(container.textContent).toContain('/tmp/agentforce/apps/core');
     expect(container.textContent).toContain('Done means shipped');
-    expect(container.textContent).toContain('Draft status');
+    expect(container.textContent).toContain('Plan status');
     expect(container.textContent).toContain('Running');
     expect(container.textContent).toContain('Resolver');
     expect(container.textContent).toContain('Mission progress');
     expect(container.textContent).toContain('0/1 tasks approved');
     expect(container.textContent).toContain('Task One');
-    expect(container.textContent).toContain('Initial cycle');
+    expect(container.textContent).not.toContain('Initial cycle');
     expect(container.textContent).toContain('README.md');
     expect(container.textContent).toContain('ui shell');
-    expect(container.querySelector('a[href="/plan/draft-1"]')).toBeTruthy();
-    expect(container.querySelector('a[href="/mission/mission-1"]')).toBeTruthy();
-    expect(container.querySelector('a[href="/missions"]')).toBeTruthy();
+    expect(container.querySelector('a[href="/projects/proj-1/plan"]')).toBeTruthy();
+    expect(container.querySelector('a[href="/projects/proj-1/mission"]')).toBeTruthy();
     expect(container.querySelector('a[href="/projects"]')).toBeTruthy();
   });
 });

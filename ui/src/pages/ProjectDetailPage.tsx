@@ -1,16 +1,31 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { archiveProject, deleteProject, getMission, getPlanDraft, getProject, unarchiveProject, updateProject } from '../lib/api';
+import ProjectShellHeader from '../components/ProjectShellHeader';
+import {
+  archiveProject,
+  deleteProject,
+  getMission,
+  getPlanDraft,
+  getProject,
+  unarchiveProject,
+  updateProject,
+} from '../lib/api';
 import { useToast } from '../hooks/useToast';
 import {
   PROJECTS_ROUTE,
+  projectMissionRoute,
+  projectPlanRoute,
+  projectOverviewRoute,
   type MissionDraft,
   type MissionState,
   type PlanRun,
-  type ProjectHarnessView,
   type ProjectCycleView,
+  type ProjectHarnessView,
+  type ProjectSection,
 } from '../lib/types';
+
+const ALLOWED_SECTIONS = new Set<ProjectSection>(['overview', 'history', 'settings']);
 
 const PROJECT_STATUS_CLASSES: Record<ProjectCycleView['status'], string> = {
   planning: 'text-amber border-amber/30 bg-amber/10',
@@ -22,7 +37,7 @@ const PROJECT_STATUS_CLASSES: Record<ProjectCycleView['status'], string> = {
   idle: 'text-dim border-border bg-surface',
 };
 
-function formatLabel(value: string): string {
+function formatLabel(value: string | null | undefined): string {
   if (!value) {
     return '—';
   }
@@ -79,7 +94,7 @@ function ValueCard({ label, value }: { label: string; value: string }) {
   return (
     <article className="rounded-lg border border-border bg-card px-4 py-3">
       <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">{label}</div>
-      <div className="mt-1 text-[13px] text-text">{value}</div>
+      <div className="mt-1 break-words text-[13px] text-text">{value}</div>
     </article>
   );
 }
@@ -101,32 +116,7 @@ function ListCard({ label, items, emptyLabel = '—' }: { label: string; items: 
   );
 }
 
-function CycleCard({ cycle }: { cycle: ProjectCycleView }) {
-  const blocker = cycle.blocker?.trim() || '—';
-  const nextAction = cycle.next_action?.trim() || '—';
-
-  return (
-    <article className="rounded-lg border border-border bg-card px-4 py-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-[14px] font-semibold text-text">{cycle.title}</h3>
-        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${badgeClassName(cycle.status)}`}>
-          {formatLabel(cycle.status)}
-        </span>
-        <span className="ml-auto font-mono text-[11px] text-dim">
-          Updated {formatTimestamp(cycle.updated_at)}
-        </span>
-      </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <ValueCard label="Draft" value={cycle.draft_id?.trim() || '—'} />
-        <ValueCard label="Mission" value={cycle.mission_id?.trim() || '—'} />
-        <ValueCard label="Blocker" value={blocker} />
-        <ValueCard label="Next action" value={nextAction} />
-      </div>
-    </article>
-  );
-}
-
-function CockpitSection({ title, children }: { title: string; children: ReactNode }) {
+function SectionCard({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="rounded-lg border border-border bg-card px-4 py-4">
       <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">{title}</div>
@@ -163,8 +153,44 @@ function activeTaskTitle(mission: MissionState | null): string {
   return mission.spec.tasks.find((task) => task.id === activeTask.task_id)?.title || activeTask.task_id;
 }
 
+function cycleLabel(index: number): string {
+  return `Plan ${index + 1}`;
+}
+
+function historyLabel(cycle: ProjectCycleView, index: number): string {
+  if (cycle.mission_id && cycle.successor_cycle_id) {
+    return `${cycleLabel(index)} · Mission completed · Replan followed`;
+  }
+  if (cycle.mission_id) {
+    return `${cycleLabel(index)} · Mission launched`;
+  }
+  return `${cycleLabel(index)} · Planning`;
+}
+
+function HistoryCard({ cycle, index }: { cycle: ProjectCycleView; index: number }) {
+  return (
+    <article className="rounded-lg border border-border bg-card px-4 py-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-[14px] font-semibold text-text">{historyLabel(cycle, index)}</h3>
+        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${badgeClassName(cycle.status)}`}>
+          {formatLabel(cycle.status)}
+        </span>
+        <span className="ml-auto font-mono text-[11px] text-dim">
+          Updated {formatTimestamp(cycle.updated_at)}
+        </span>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <ValueCard label="Plan draft" value={cycle.draft_id?.trim() || '—'} />
+        <ValueCard label="Mission" value={cycle.mission_id?.trim() || '—'} />
+        <ValueCard label="Blocker" value={cycle.blocker?.trim() || '—'} />
+        <ValueCard label="Next action" value={cycle.next_action?.trim() || '—'} />
+      </div>
+    </article>
+  );
+}
+
 export default function ProjectDetailPage() {
-  const { id } = useParams();
+  const { id, section } = useParams<{ id?: string; section?: ProjectSection }>();
   const navigate = useNavigate();
   const { addToast } = useToast();
   const [project, setProject] = useState<ProjectHarnessView | null>(null);
@@ -244,7 +270,7 @@ export default function ProjectDetailPage() {
       if (draftResult.status === 'fulfilled') {
         setDraft(draftResult.value);
       } else if (activeCycle.draft_id) {
-        setDetailError(draftResult.reason instanceof Error ? draftResult.reason.message : 'Failed to load draft details');
+        setDetailError(draftResult.reason instanceof Error ? draftResult.reason.message : 'Failed to load plan details');
       }
 
       if (missionResult.status === 'fulfilled') {
@@ -270,6 +296,11 @@ export default function ProjectDetailPage() {
 
   if (!id) {
     return <Navigate to={PROJECTS_ROUTE} replace />;
+  }
+
+  const currentSection: ProjectSection = section && ALLOWED_SECTIONS.has(section) ? section : 'overview';
+  if (section && !ALLOWED_SECTIONS.has(section)) {
+    return <Navigate to={projectOverviewRoute(id)} replace />;
   }
 
   const refresh = () => {
@@ -344,67 +375,15 @@ export default function ProjectDetailPage() {
 
   const summary = project.summary;
   const activeCycle = project.active_cycle ?? project.cycles.find((cycle) => cycle.cycle_id === project.active_cycle_id) ?? null;
-  const implementedDocs = project.docs_status.implemented.length > 0
-    ? project.docs_status.implemented.join(', ')
-    : 'None';
-  const plannedDocs = project.docs_status.planned.length > 0
-    ? project.docs_status.planned.join(', ')
-    : 'None';
-  const policyMode = formatLabel(project.policy_summary.mode);
   const evidence = project.evidence;
   const context = project.context;
-  const primaryWorkingDirectory = context.primary_working_directory?.trim() || summary.repo_root;
-  const planningFocused = summary.status === 'planning' || summary.status === 'ready';
+  const implementedDocs = project.docs_status.implemented.length > 0 ? project.docs_status.implemented.join(', ') : 'None';
+  const plannedDocs = project.docs_status.planned.length > 0 ? project.docs_status.planned.join(', ') : 'None';
+  const activePlanRun = latestPlanRun(draft);
 
   return (
-    <div className="flex flex-col gap-4">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">Project Harness</div>
-          <h1 className="text-3xl font-semibold tracking-tight">{summary.name}</h1>
-          <p className="mt-1 text-sm text-dim font-mono">{summary.repo_root}</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {project.lifecycle.can_edit ? (
-            <button
-              type="button"
-              className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card"
-              onClick={() => setEditing((value) => !value)}
-            >
-              {editing ? 'Close edit' : 'Edit project'}
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card"
-            onClick={() => { void handleArchiveToggle(); }}
-          >
-            {project.lifecycle.archived ? 'Unarchive' : 'Archive'}
-          </button>
-          {project.lifecycle.can_delete ? (
-            <button
-              type="button"
-              className="inline-flex items-center rounded-full border border-red/30 bg-red-bg/20 px-3 py-1.5 text-[11px] font-semibold text-red transition-colors hover:bg-red-bg/30"
-              onClick={() => setConfirmDeleteOpen(true)}
-            >
-              Delete
-            </button>
-          ) : null}
-          <Link
-            className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
-            to={PROJECTS_ROUTE}
-          >
-            Back to Projects
-          </Link>
-          <button
-            type="button"
-            className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card"
-            onClick={refresh}
-          >
-            Refresh
-          </button>
-        </div>
-      </header>
+    <div className="grid gap-4">
+      <ProjectShellHeader summary={summary} section={currentSection} />
 
       {project.lifecycle.archived ? (
         <section className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-dim">
@@ -412,182 +391,168 @@ export default function ProjectDetailPage() {
         </section>
       ) : null}
 
-      {editing ? (
-        <section className="rounded-lg border border-border bg-card px-4 py-4">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Edit project</div>
-          <div className="mt-3 grid gap-3">
-            <label className="grid gap-1 text-sm text-text">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Name</span>
-              <input className="rounded border border-border bg-surface px-3 py-2 text-sm" value={editName} onChange={(event) => setEditName(event.target.value)} />
-            </label>
-            <label className="grid gap-1 text-sm text-text">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Goal</span>
-              <textarea className="min-h-20 rounded border border-border bg-surface px-3 py-2 text-sm" value={editGoal} onChange={(event) => setEditGoal(event.target.value)} />
-            </label>
-            <label className="grid gap-1 text-sm text-text">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Working directories</span>
-              <textarea className="min-h-24 rounded border border-border bg-surface px-3 py-2 font-mono text-sm" value={editWorkingDirectories} onChange={(event) => setEditWorkingDirectories(event.target.value)} />
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15"
-                onClick={() => { void handleSave(); }}
-              >
-                Save changes
-              </button>
-              <button
-                type="button"
-                className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card"
-                onClick={() => setEditing(false)}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <ValueCard label="Status" value={formatLabel(summary.status)} />
-        <ValueCard label="Working directory" value={primaryWorkingDirectory} />
-        <ValueCard label="Planned tasks" value={String(context.planned_task_count)} />
-        <ValueCard label="Updated" value={formatTimestamp(summary.updated_at)} />
-        <ValueCard label="Active mission" value={summary.active_mission_id?.trim() || '—'} />
-      </section>
-
-      <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <div className="grid gap-4">
-          <CockpitSection title="Project Context">
-            <div className="grid gap-3">
-              <ValueCard label="Planning focus" value={planningFocused ? 'Planning stays primary' : 'Mission progress stays primary'} />
-              <ValueCard label="Goal" value={context.goal?.trim() || '—'} />
-              <ListCard label="Definition of done" items={context.definition_of_done} />
-              <ListCard label="Working directories" items={context.working_directories} emptyLabel={summary.repo_root} />
-              <ListCard label="Task preview" items={context.task_titles.slice(0, 6)} emptyLabel="No planned tasks yet" />
-            </div>
-          </CockpitSection>
-
-          <CockpitSection title="Plan">
-            <div className="grid gap-3">
-              <ValueCard label="Draft" value={activeCycle?.draft_id?.trim() || '—'} />
-              <ValueCard label="Draft status" value={draft?.status ? formatLabel(draft.status) : '—'} />
-              <ValueCard label="Plan run" value={latestPlanRun(draft)?.status ? formatLabel(latestPlanRun(draft)?.status || '') : activeCycle?.latest_plan_run_id?.trim() || '—'} />
-              <ValueCard label="Plan step" value={latestPlanRun(draft)?.current_step ? formatLabel(latestPlanRun(draft)?.current_step || '') : '—'} />
-              <ValueCard label="Plan version" value={activeCycle?.latest_plan_version_id?.trim() || '—'} />
-              <ValueCard label="Planned tasks" value={draft ? String(draft.draft_spec.tasks.length) : String(context.planned_task_count)} />
-              <ValueCard label="Preflight" value={draft?.preflight_status ? formatLabel(draft.preflight_status) : '—'} />
-              {activeCycle?.draft_id ? (
-                <Link
-                  className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
-                  to={`/plan/${activeCycle.draft_id}`}
-                >
-                  Open Plan
-                </Link>
-              ) : (
-                <Link
-                  className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
-                  to="/plan"
-                >
-                  Start Planning
-                </Link>
-              )}
-            </div>
-          </CockpitSection>
-
-          <CockpitSection title="Now">
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              <ValueCard label="Status" value={formatLabel(summary.status)} />
-              <ValueCard label="Blocker" value={summary.blocker?.trim() || '—'} />
-              <ValueCard label="Mode" value={policyMode} />
-            </div>
-          </CockpitSection>
-
-          <CockpitSection title="Next">
-            <div className="grid gap-3 md:grid-cols-2">
-              <ValueCard label="Next action" value={summary.next_action?.trim() || '—'} />
-              <ValueCard label="Active cycle" value={summary.active_cycle_id?.trim() || '—'} />
-            </div>
-          </CockpitSection>
-
-          <CockpitSection title="Evidence">
-            <div className="grid gap-3 md:grid-cols-2">
-              <ValueCard label="Contract" value={evidence.contract_summary?.trim() || '—'} />
-              <ValueCard label="Verifier" value={evidence.verifier_summary?.trim() || '—'} />
-              <ValueCard label="Artifacts" value={evidence.artifact_summary?.trim() || '—'} />
-              <ValueCard label="Stream" value={evidence.stream_summary?.trim() || '—'} />
-              <ValueCard label="Docs implemented" value={implementedDocs} />
-              <ValueCard label="Docs planned" value={plannedDocs} />
-            </div>
-            <div className="mt-3 text-[12px] text-dim">
-              Optimize available: {project.policy_summary.optimize_available ? 'yes' : 'no'}
-              {' · '}
-              Derived policy: {project.policy_summary.derived ? 'yes' : 'no'}
-            </div>
-          </CockpitSection>
-        </div>
-
-        <div className="grid gap-4">
-          <CockpitSection title="Current Cycle">
-            <div className="grid gap-3">
-              <ValueCard label="Active cycle" value={summary.active_cycle_id?.trim() || '—'} />
-              <ValueCard label="Cycle status" value={activeCycle ? formatLabel(activeCycle.status) : '—'} />
-              <ValueCard label="Blocker" value={activeCycle?.blocker?.trim() || '—'} />
-              <ValueCard label="Next action" value={activeCycle?.next_action?.trim() || '—'} />
-            </div>
-          </CockpitSection>
-
-          <CockpitSection title="Missions">
-            <div className="grid gap-3">
-              <ValueCard label="Mission" value={activeCycle?.mission_id?.trim() || '—'} />
-              <ValueCard label="Mission progress" value={missionProgress(mission)} />
-              <ValueCard label="Active task" value={activeTaskTitle(mission)} />
-              <ValueCard label="Retries" value={mission ? String(mission.total_retries) : '—'} />
-              {activeCycle?.mission_id ? (
-                <div className="flex flex-wrap gap-2">
-                  <Link
-                    className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card hover:no-underline"
-                    to={`/mission/${activeCycle.mission_id}`}
-                  >
-                    Open Mission
-                  </Link>
-                  <Link
-                    className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card hover:no-underline"
-                    to="/missions"
-                  >
-                    Mission fleet view
-                  </Link>
-                </div>
-              ) : (
-                <div className="text-[12px] text-dim">
-                  Missions appear here after launch. Keep planning inside this project until the cycle is ready.
-                </div>
-              )}
-            </div>
-          </CockpitSection>
-        </div>
-      </div>
-
       {detailError ? (
         <section className="rounded-lg border border-amber/30 bg-amber/10 px-4 py-3 text-sm text-amber">
           {detailError}
         </section>
       ) : null}
 
-      <CockpitSection title="History">
-        <div className="grid gap-3">
-          {activeCycle ? <CycleCard cycle={activeCycle} /> : <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-dim">No active cycle yet.</div>}
-          {project.cycles.length > 1 ? (
-            <div className="grid gap-3">
-              {project.cycles
-                .filter((cycle) => cycle.cycle_id !== activeCycle?.cycle_id)
-                .map((cycle) => (
-                  <CycleCard key={cycle.cycle_id} cycle={cycle} />
-                ))}
+      {currentSection === 'overview' ? (
+        <div className="grid gap-4">
+          <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <ValueCard label="Project stage" value={formatLabel(summary.current_stage)} />
+            <ValueCard label="Project blocker" value={summary.blocker?.trim() || '—'} />
+            <ValueCard label="Current plan" value={summary.current_plan_id?.trim() || activeCycle?.draft_id?.trim() || '—'} />
+            <ValueCard label="Current mission" value={summary.current_mission_id?.trim() || activeCycle?.mission_id?.trim() || '—'} />
+          </section>
+
+          <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+            <div className="grid gap-4">
+              <SectionCard title="Project Context">
+                <div className="grid gap-3">
+                  <ValueCard label="Goal" value={context.goal?.trim() || '—'} />
+                  <ListCard label="Definition of done" items={context.definition_of_done} />
+                  <ListCard label="Working directories" items={context.working_directories} emptyLabel={summary.repo_root} />
+                  <ListCard label="Task preview" items={context.task_titles.slice(0, 6)} emptyLabel="No planned tasks yet" />
+                </div>
+              </SectionCard>
+
+              <SectionCard title="Current Plan">
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  <ValueCard label="Plan draft" value={activeCycle?.draft_id?.trim() || '—'} />
+                  <ValueCard label="Plan status" value={draft?.status ? formatLabel(draft.status) : 'No plan loaded'} />
+                  <ValueCard label="Plan run" value={activePlanRun?.status ? formatLabel(activePlanRun.status) : 'No run yet'} />
+                  <ValueCard label="Plan step" value={activePlanRun?.current_step ? formatLabel(activePlanRun.current_step) : '—'} />
+                  <ValueCard label="Planned tasks" value={draft ? String(draft.draft_spec.tasks.length) : String(context.planned_task_count)} />
+                  <ValueCard label="Preflight" value={draft?.preflight_status ? formatLabel(draft.preflight_status) : '—'} />
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Link
+                    className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
+                    to={projectPlanRoute(summary.project_id)}
+                  >
+                    {summary.current_plan_id || activeCycle?.draft_id ? 'Continue plan' : 'Start plan'}
+                  </Link>
+                  {summary.current_mission_id || activeCycle?.mission_id ? (
+                    <Link
+                      className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card hover:no-underline"
+                      to={projectMissionRoute(summary.project_id)}
+                    >
+                      Open mission
+                    </Link>
+                  ) : null}
+                </div>
+              </SectionCard>
             </div>
-          ) : null}
+
+            <div className="grid gap-4">
+              <SectionCard title="Now">
+                <div className="grid gap-3">
+                  <ValueCard label="Next action" value={summary.next_action_label?.trim() || summary.next_action?.trim() || '—'} />
+                  <ValueCard label="Mission progress" value={missionProgress(mission)} />
+                  <ValueCard label="Active task" value={activeTaskTitle(mission)} />
+                  <ValueCard label="Planning policy" value={formatLabel(project.policy_summary.mode)} />
+                </div>
+              </SectionCard>
+
+              <SectionCard title="Evidence">
+                <div className="grid gap-3">
+                  <ValueCard label="Contract" value={evidence.contract_summary?.trim() || '—'} />
+                  <ValueCard label="Verifier" value={evidence.verifier_summary?.trim() || '—'} />
+                  <ValueCard label="Artifacts" value={evidence.artifact_summary?.trim() || '—'} />
+                  <ValueCard label="Stream" value={evidence.stream_summary?.trim() || '—'} />
+                  <ValueCard label="Docs implemented" value={implementedDocs} />
+                  <ValueCard label="Docs planned" value={plannedDocs} />
+                </div>
+              </SectionCard>
+            </div>
+          </div>
         </div>
-      </CockpitSection>
+      ) : null}
+
+      {currentSection === 'history' ? (
+        <SectionCard title="Project History">
+          <div className="grid gap-3">
+            {project.cycles.length > 0 ? (
+              project.cycles.map((cycle, index) => (
+                <HistoryCard key={cycle.cycle_id} cycle={cycle} index={index} />
+              ))
+            ) : (
+              <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-dim">
+                No plans or missions have been recorded for this project yet.
+              </div>
+            )}
+          </div>
+        </SectionCard>
+      ) : null}
+
+      {currentSection === 'settings' ? (
+        <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+          <SectionCard title="Project Settings">
+            <div className="grid gap-3">
+              <label className="grid gap-1 text-sm text-text">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Name</span>
+                <input className="rounded border border-border bg-surface px-3 py-2 text-sm" value={editName} onChange={(event) => setEditName(event.target.value)} />
+              </label>
+              <label className="grid gap-1 text-sm text-text">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Goal</span>
+                <textarea className="min-h-20 rounded border border-border bg-surface px-3 py-2 text-sm" value={editGoal} onChange={(event) => setEditGoal(event.target.value)} />
+              </label>
+              <label className="grid gap-1 text-sm text-text">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Working directories</span>
+                <textarea className="min-h-24 rounded border border-border bg-surface px-3 py-2 font-mono text-sm" value={editWorkingDirectories} onChange={(event) => setEditWorkingDirectories(event.target.value)} />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15"
+                  onClick={() => { void handleSave(); }}
+                >
+                  Save project
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card"
+                  onClick={() => {
+                    setEditName(project.summary.name);
+                    setEditGoal(project.context.goal ?? '');
+                    setEditWorkingDirectories(project.context.working_directories.join('\n'));
+                    setEditing(false);
+                  }}
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+          </SectionCard>
+
+          <SectionCard title="Lifecycle">
+            <div className="grid gap-3">
+              <ValueCard label="Archive state" value={project.lifecycle.archived ? 'Archived' : 'Active'} />
+              <ValueCard label="Can delete" value={project.lifecycle.can_delete ? 'Yes' : 'No'} />
+              <ValueCard label="Has activity" value={project.lifecycle.has_activity ? 'Yes' : 'No'} />
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card"
+                  onClick={() => { void handleArchiveToggle(); }}
+                >
+                  {project.lifecycle.archived ? 'Unarchive project' : 'Archive project'}
+                </button>
+                {project.lifecycle.can_delete ? (
+                  <button
+                    type="button"
+                    className="inline-flex items-center rounded-full border border-red/30 bg-red-bg/20 px-3 py-1.5 text-[11px] font-semibold text-red transition-colors hover:bg-red-bg/30"
+                    onClick={() => setConfirmDeleteOpen(true)}
+                  >
+                    Delete project
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </SectionCard>
+        </div>
+      ) : null}
 
       <ConfirmDialog
         open={confirmDeleteOpen}

@@ -4,6 +4,8 @@ from __future__ import annotations
 from agentforce.server.project_harness import (
     canonical_repo_root,
     get_project_harness,
+    get_project_harness_for_draft,
+    get_project_harness_for_mission,
     list_project_summaries,
     project_id_for_root,
 )
@@ -37,6 +39,17 @@ def _seed_record_for_existing_project(project_id: str):
 
 def get(handler, parts: list[str], query: dict[str, str]):
     include_archived = _bool_query(query.get("include_archived"))
+    if parts == ["api", "project", "lookup"]:
+        draft_id = str(query.get("draft_id") or "").strip()
+        mission_id = str(query.get("mission_id") or "").strip()
+        view = (
+            get_project_harness_for_draft(draft_id) if draft_id else
+            get_project_harness_for_mission(mission_id) if mission_id else
+            None
+        )
+        if view is None:
+            return 404, {"error": "Project lookup failed"}
+        return 200, {"project_id": view.summary.project_id}
     if parts == ["api", "projects"]:
         return 200, list_project_summaries(include_archived=include_archived)
     if len(parts) == 3 and parts[:2] == ["api", "project"]:

@@ -78,8 +78,7 @@ describe('ProjectsPage', () => {
     const container = renderPage();
     await flushPromises();
 
-    expect(container.textContent).toContain('No projects yet. Start in Plan Mode →');
-    expect(container.querySelector('a[href="/plan"]')).toBeTruthy();
+    expect(container.textContent).toContain('No projects yet. Create a project to start the brief, spec, tasks, and mission in one place.');
   });
 
   it('renders an error state and retry action when loading fails', async () => {
@@ -104,6 +103,10 @@ describe('ProjectsPage', () => {
         workspace_count: 2,
         goal: 'Make planning clearer before launch',
         planned_task_count: 4,
+        current_stage: 'blocked',
+        current_plan_id: 'draft-1',
+        current_mission_id: 'mission-1',
+        next_action_label: 'Investigate pipeline drift',
         mode: 'optimize',
         status: 'blocked',
         blocker: 'Waiting on config',
@@ -130,6 +133,6 @@ describe('ProjectsPage', () => {
     expect(container.textContent).toContain('2 working directories');
     expect(container.textContent).toContain('Optimize');
     expect(container.textContent).toContain('Updated');
-    expect(container.querySelector('a[href="/projects/proj-1"]')).toBeTruthy();
+    expect(container.querySelector('a[href="/projects/proj-1/overview"]')).toBeTruthy();
   });
 });

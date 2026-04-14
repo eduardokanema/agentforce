@@ -119,6 +119,9 @@ def test_build_project_harness_groups_draft_and_mission(monkeypatch, tmp_path) -
     assert view.summary.primary_working_directory == str(repo_root.resolve())
     assert view.summary.workspace_count == 1
     assert view.summary.goal == "Goal"
+    assert view.summary.current_stage == "executing"
+    assert view.summary.current_plan_id == "draft-1"
+    assert view.summary.current_mission_id == "mission-1"
     assert view.cycles[0].draft_id == "draft-1"
     assert view.cycles[0].mission_id == "mission-1"
     assert view.context["working_directories"] == [str(repo_root.resolve())]
@@ -194,6 +197,7 @@ def test_projects_routes_return_derived_payload(monkeypatch, tmp_path) -> None:
     assert summaries[0]["primary_working_directory"] == str(workspace.resolve())
     assert summaries[0]["goal"] == "Goal"
     assert summaries[0]["planned_task_count"] == 0
+    assert summaries[0]["current_stage"] == "planning"
 
     detail_handler = _make_handler(f"/api/project/{summaries[0]['project_id']}")
     detail_handler.do_GET()
@@ -202,6 +206,11 @@ def test_projects_routes_return_derived_payload(monkeypatch, tmp_path) -> None:
     assert detail["summary"]["active_cycle_id"] == draft.id
     assert detail["cycles"][0]["draft_id"] == draft.id
     assert detail["context"]["working_directories"] == [str(workspace.resolve())]
+
+    lookup_by_draft = _make_handler(f"/api/project/lookup?draft_id={draft.id}")
+    lookup_by_draft.do_GET()
+    assert lookup_by_draft.send_response.call_args.args == (200,)
+    assert _response_body(lookup_by_draft) == {"project_id": summaries[0]["project_id"]}
 
     missing_handler = _make_handler("/api/project/missing-project")
     missing_handler.do_GET()

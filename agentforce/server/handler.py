@@ -26,6 +26,7 @@ _ROUTES: list[tuple[str, re.Pattern[str], object]] = [
     ("POST", re.compile(r"^/api/daemon(?:/.*)?$"), daemon.post),
     ("GET", re.compile(r"^/api/missions$"), missions.get),
     ("GET", re.compile(r"^/api/projects$"), projects.get),
+    ("GET", re.compile(r"^/api/project/lookup$"), projects.get),
     ("GET", re.compile(r"^/api/project/[^/]+$"), projects.get),
     ("POST", re.compile(r"^/api/projects$"), projects.post),
     ("POST", re.compile(r"^/api/project/[^/]+/(?:archive|unarchive)$"), projects.post),

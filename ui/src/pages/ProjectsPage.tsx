@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { archiveProject, createProject, getProjects, unarchiveProject } from '../lib/api';
 import { useToast } from '../hooks/useToast';
-import { PLAN_ROUTE, projectRoute, type ProjectSummaryView } from '../lib/types';
+import { projectPlanRoute, projectRoute, type ProjectSummaryView } from '../lib/types';
 
 const PROJECT_STATUS_CLASSES: Record<ProjectSummaryView['status'], string> = {
   planning: 'text-amber border-amber/30 bg-amber/10',
@@ -70,9 +70,7 @@ function EmptyState() {
   return (
     <section className="rounded-lg border border-border bg-card px-4 py-5 text-sm text-dim">
       <span>No projects yet. </span>
-      <Link className="text-cyan hover:no-underline" to={PLAN_ROUTE}>
-        Start in Plan Mode →
-      </Link>
+      <span>Create a project to start the brief, spec, tasks, and mission in one place.</span>
     </section>
   );
 }
@@ -105,6 +103,7 @@ function ProjectCard({
   const blocker = project.blocker?.trim() || '—';
   const nextAction = project.next_action?.trim() || '—';
   const goal = project.goal?.trim() || '—';
+  const currentStage = formatLabel(project.current_stage);
   const workspaceLabel = project.workspace_count > 1
     ? `${project.workspace_count} working directories`
     : '1 working directory';
@@ -138,12 +137,12 @@ function ProjectCard({
             <div className="mt-1 text-[11px] text-dim">{workspaceLabel}</div>
           </div>
           <div>
-            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Planning goal</div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Project goal</div>
             <div className="mt-1 text-[12px] text-text">{goal}</div>
           </div>
           <div>
-            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Planned tasks</div>
-            <div className="mt-1 text-[12px] text-text">{project.planned_task_count}</div>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Current stage</div>
+            <div className="mt-1 text-[12px] text-text">{currentStage}</div>
           </div>
           <div>
             <div className="text-[10px] font-semibold uppercase tracking-[0.09em] text-muted">Blocker</div>
@@ -177,6 +176,7 @@ function ProjectCard({
 
 export default function ProjectsPage() {
   const { addToast } = useToast();
+  const navigate = useNavigate();
   const [projects, setProjects] = useState<ProjectSummaryView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -233,7 +233,7 @@ export default function ProjectsPage() {
 
   const handleCreate = async (): Promise<void> => {
     try {
-      await createProject({
+      const createdProject = await createProject({
         repo_root: repoRoot,
         name,
         goal,
@@ -246,6 +246,7 @@ export default function ProjectsPage() {
       resetCreateForm();
       setIncludeArchived(false);
       refresh();
+      navigate(projectPlanRoute(createdProject.summary.project_id));
     } catch (createError) {
       addToast(createError instanceof Error ? createError.message : 'Failed to create project', 'error');
     }
@@ -273,8 +274,7 @@ export default function ProjectsPage() {
           <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">Primary surface</div>
           <h1 className="text-3xl font-semibold tracking-tight">Projects</h1>
           <p className="mt-1 text-sm text-dim">
-            Projects keep repo root, working directories, and planning context together. Missions stay inside each
-            project as a secondary drill-down.
+            Open a project to plan, launch, and track work in one place.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -285,12 +285,6 @@ export default function ProjectsPage() {
           >
             {showCreateForm ? 'Close new project' : 'New project'}
           </button>
-          <Link
-            className="inline-flex items-center rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1.5 text-[11px] font-semibold text-cyan transition-colors hover:bg-cyan/15 hover:no-underline"
-            to={PLAN_ROUTE}
-          >
-            New project plan
-          </Link>
           <button
             type="button"
             className="inline-flex items-center rounded-full border border-border px-3 py-1.5 text-[11px] font-semibold text-text transition-colors hover:bg-card"
